@@ -2,24 +2,10 @@
 name = "aes67-streamer"
 version = "0.1.0"
 edition = "2021"
-description = "Holoplot Processor DSP"
-homepage = "https://www.holoplot.com"
+repository = "https://github.com/wiccy46/aes67-streamer"
+description = "Audio File Streamer on RTP with AES67 compliance"
 
 [dependencies]
-common = { path = "../../src/common" }
-grpc = { path = "../../src/grpc" }
-renderer = { path = "../../src/renderer" }
-http = { path = "../../src/http" }
-tokio = { version = "1.36", features = ["full"] }
-clap = { version = "4.5", features = ["derive"] }
+config = { path = "../config" }
 env_logger = "0.11.6"
 log = "0.4.26"
-ipp-sys = { workspace = true, optional = true }
-sd-notify = "0.4"
-
-[build-dependencies]
-built = { version = "0.7.7", features = ["git2"] }
-
-[features]
-default = []
-ipp = ["dep:ipp-sys"]

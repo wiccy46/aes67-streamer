@@ -1,14 +1,5 @@
 [workspace]
-members = [
-    "aes67-streamer",
-]
+members = ["src/aes67-streamer", "src/config"]
 resolver = "2"
 
 [workspace.dependencies]
-clap = { version = "4.0", features = ["derive"] }
-tokio = { version = "1.0", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
-anyhow = "1.0"
-tracing = "0.1"
-tracing-subscriber = "0.3"
