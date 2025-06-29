@@ -1,5 +1,8 @@
 use std::process;
 
+mod streamer;
+use streamer::{Aes67Streamer, StreamConfig};
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -24,25 +27,34 @@ fn main() {
         log::info!("Network interface: {}", interface);
     }
 
-    // Initialize audio reader
-    let _reader = match audio::AudioReader::new(&args.file) {
-        Ok(reader) => {
-            log::info!("Audio file loaded successfully");
-            reader
-        }
+    // Create streaming configuration
+    let stream_config = StreamConfig {
+        sample_rate: args.sample_rate.unwrap_or(48000),
+        packet_time_ms: 1, // 1ms packets for AES67
+        gain_db: 0.0, // Unity gain for now
+        verbose: args.verbose,
+    };
+
+    // Create and start streamer
+    let mut streamer = match Aes67Streamer::new(
+        &args.file,
+        &args.address,
+        args.port,
+        args.interface.as_deref(),
+        stream_config,
+    ) {
+        Ok(streamer) => streamer,
         Err(e) => {
-            log::error!("Failed to load audio file: {}", e);
+            log::error!("Failed to create streamer: {}", e);
             process::exit(1);
         }
     };
 
-    // TODO: Implement streaming pipeline
-    // This will include:
-    // 1. Audio processing pipeline setup
-    // 2. RTP packet creation
-    // 3. Network streaming
-    // 4. PTP synchronization
-    log::warn!("Streaming pipeline not yet implemented - Phase 2 in progress");
+    // Start streaming
+    if let Err(e) = streamer.start() {
+        log::error!("Streaming failed: {}", e);
+        process::exit(1);
+    }
 
-    log::info!("AES67 streamer initialization complete")
+    log::info!("AES67 streaming completed successfully")
 }
