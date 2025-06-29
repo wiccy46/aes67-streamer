@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub audio: AudioConfig,
@@ -118,17 +118,6 @@ impl Default for PerformanceConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            audio: AudioConfig::default(),
-            network: NetworkConfig::default(),
-            rtp: RtpConfig::default(),
-            ptp: PtpConfig::default(),
-            performance: PerformanceConfig::default(),
-        }
-    }
-}
 
 pub fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
