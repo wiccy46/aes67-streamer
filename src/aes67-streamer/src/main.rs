@@ -31,13 +31,18 @@ fn main() {
             reader
         }
         Err(e) => {
-            eprintln!("Failed to load audio file: {}", e);
+            log::error!("Failed to load audio file: {}", e);
             process::exit(1);
         }
     };
 
     // TODO: Implement streaming pipeline
-    println!("Streaming pipeline not yet implemented - Phase 2 in progress");
+    // This will include:
+    // 1. Audio processing pipeline setup
+    // 2. RTP packet creation
+    // 3. Network streaming
+    // 4. PTP synchronization
+    log::warn!("Streaming pipeline not yet implemented - Phase 2 in progress");
 
     log::info!("AES67 streamer initialization complete")
 }

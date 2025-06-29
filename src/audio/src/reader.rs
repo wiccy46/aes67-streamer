@@ -23,9 +23,13 @@ pub struct AudioInfo {
 
 #[derive(Debug, Clone)]
 pub struct AudioSample {
+    /// Interleaved audio data: [L, R, L, R, ...] for stereo
+    /// or [L, R, C, LFE, LS, RS, ...] for surround
     pub data: Vec<f32>,
     pub channels: u32,
     pub sample_rate: u32,
+    /// Number of frames (samples per channel)
+    pub frames: usize,
 }
 
 pub struct AudioReader {
@@ -40,7 +44,6 @@ impl AudioReader {
         let file = File::open(path.as_ref())?;
         let media_source = MediaSourceStream::new(Box::new(file), Default::default());
 
-        // Create a hint to help the format registry guess the format
         let mut hint = Hint::new();
         if let Some(extension) = path.as_ref().extension() {
             if let Some(ext_str) = extension.to_str() {
@@ -48,7 +51,6 @@ impl AudioReader {
             }
         }
 
-        // Probe the media source
         let format_opts = FormatOptions::default();
         let metadata_opts = MetadataOptions::default();
         let probed = symphonia::default::get_probe().format(
@@ -69,18 +71,33 @@ impl AudioReader {
 
         let track_id = track.id;
 
-        // Create decoder
         let decoder_opts = DecoderOptions::default();
         let decoder = symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts)?;
 
-        // Extract audio information
         let codec_params = &track.codec_params;
+        
+        // Validate essential audio properties - fail explicitly if missing
+        let sample_rate = codec_params.sample_rate
+            .ok_or_else(|| anyhow::anyhow!("Audio file is missing sample rate information - file may be corrupted or unsupported"))?;
+            
+        let channels = codec_params.channels
+            .map(|ch| ch.count() as u32)
+            .ok_or_else(|| anyhow::anyhow!("Audio file is missing channel information - file may be corrupted or unsupported"))?;
+            
+        // Validate reasonable values
+        if sample_rate == 0 {
+            return Err(anyhow::anyhow!("Invalid sample rate (0) - audio file is corrupted"));
+        }
+        if channels == 0 {
+            return Err(anyhow::anyhow!("Invalid channel count (0) - audio file is corrupted"));
+        }
+        if channels > 64 {
+            return Err(anyhow::anyhow!("Unsupported channel count ({}) - maximum 64 channels supported", channels));
+        }
+        
         let info = AudioInfo {
-            sample_rate: codec_params.sample_rate.unwrap_or(44100),
-            channels: codec_params
-                .channels
-                .map(|ch| ch.count() as u32)
-                .unwrap_or(2),
+            sample_rate,
+            channels,
             duration: codec_params.time_base.and_then(|tb| {
                 codec_params.n_frames.map(|frames| {
                     Duration::from_secs_f64(frames as f64 / tb.denom as f64 * tb.numer as f64)
@@ -94,7 +111,9 @@ impl AudioReader {
             "Loaded audio file - Sample Rate: {} Hz, Channels: {}, Duration: {}, Format: {}",
             info.sample_rate,
             info.channels,
-            info.duration.map(|d| format!("{:.2}s", d.as_secs_f64())).unwrap_or_else(|| "Unknown".to_string()),
+            info.duration
+                .map(|d| format!("{:.2}s", d.as_secs_f64()))
+                .unwrap_or_else(|| "Unknown".to_string()),
             info.format
         );
 
@@ -136,80 +155,85 @@ impl AudioReader {
 
     fn convert_audio_buffer(buffer: AudioBufferRef) -> Result<AudioSample> {
         let spec = *buffer.spec();
-        let _duration = buffer.capacity() as u64;
+        let channels = spec.channels.count() as u32;
+        let frames = buffer.capacity();
+        let sample_rate = spec.rate;
 
-        let mut samples = Vec::new();
+        // Pre-allocate interleaved buffer: [L, R, L, R, ...]
+        let mut interleaved_samples = Vec::with_capacity(frames * channels as usize);
+
+        // Helper macro to convert and interleave samples
+        macro_rules! convert_and_interleave {
+            ($buf:expr, $convert:expr) => {
+                for frame_idx in 0..frames {
+                    for channel_idx in 0..channels {
+                        let sample = $buf.chan(channel_idx as usize)[frame_idx];
+                        let normalized = $convert(sample);
+                        interleaved_samples.push(normalized);
+                    }
+                }
+            };
+        }
 
         match buffer {
             AudioBufferRef::U8(buf) => {
-                for &sample in buf.chan(0) {
-                    let normalized = (sample as f32 - 128.0) / 128.0;
-                    samples.push(normalized);
-                }
+                convert_and_interleave!(buf, |sample| (sample as f32 - 128.0) / 128.0);
             }
             AudioBufferRef::U16(buf) => {
-                for &sample in buf.chan(0) {
-                    let normalized = (sample as f32 - 32768.0) / 32768.0;
-                    samples.push(normalized);
-                }
+                convert_and_interleave!(buf, |sample| (sample as f32 - 32768.0) / 32768.0);
             }
             AudioBufferRef::U24(buf) => {
-                for &sample in buf.chan(0) {
-                    let sample_val = sample.inner();
-                    let normalized = (sample_val as f32 - 8388608.0) / 8388608.0;
-                    samples.push(normalized);
+                for frame_idx in 0..frames {
+                    for channel_idx in 0..channels {
+                        let sample = buf.chan(channel_idx as usize)[frame_idx];
+                        let sample_val = sample.inner();
+                        let normalized = (sample_val as f32 - 8388608.0) / 8388608.0;
+                        interleaved_samples.push(normalized);
+                    }
                 }
             }
             AudioBufferRef::U32(buf) => {
-                for &sample in buf.chan(0) {
-                    let normalized = (sample as f32 - 2147483648.0) / 2147483648.0;
-                    samples.push(normalized);
-                }
+                convert_and_interleave!(buf, |sample| (sample as f32 - 2147483648.0)
+                    / 2147483648.0);
             }
             AudioBufferRef::S8(buf) => {
-                for &sample in buf.chan(0) {
-                    let normalized = sample as f32 / 128.0;
-                    samples.push(normalized);
-                }
+                convert_and_interleave!(buf, |sample| sample as f32 / 128.0);
             }
             AudioBufferRef::S16(buf) => {
-                for &sample in buf.chan(0) {
-                    let normalized = sample as f32 / 32768.0;
-                    samples.push(normalized);
-                }
+                convert_and_interleave!(buf, |sample| sample as f32 / 32768.0);
             }
             AudioBufferRef::S24(buf) => {
-                for &sample in buf.chan(0) {
-                    let sample_val = sample.inner();
-                    let normalized = sample_val as f32 / 8388608.0;
-                    samples.push(normalized);
+                for frame_idx in 0..frames {
+                    for channel_idx in 0..channels {
+                        let sample = buf.chan(channel_idx as usize)[frame_idx];
+                        let sample_val = sample.inner();
+                        let normalized = sample_val as f32 / 8388608.0;
+                        interleaved_samples.push(normalized);
+                    }
                 }
             }
             AudioBufferRef::S32(buf) => {
-                for &sample in buf.chan(0) {
-                    let normalized = sample as f32 / 2147483648.0;
-                    samples.push(normalized);
-                }
+                convert_and_interleave!(buf, |sample| sample as f32 / 2147483648.0);
             }
             AudioBufferRef::F32(buf) => {
-                samples.extend_from_slice(buf.chan(0));
+                // F32 is already normalized, just interleave
+                for frame_idx in 0..frames {
+                    for channel_idx in 0..channels {
+                        let sample = buf.chan(channel_idx as usize)[frame_idx];
+                        interleaved_samples.push(sample);
+                    }
+                }
             }
             AudioBufferRef::F64(buf) => {
-                for &sample in buf.chan(0) {
-                    samples.push(sample as f32);
-                }
+                convert_and_interleave!(buf, |sample| sample as f32);
             }
         }
 
-        // For now, just handle the first channel
-        // TODO: Handle multi-channel audio properly
-        let channels = spec.channels.count() as u32;
-        let sample_rate = spec.rate;
-
         Ok(AudioSample {
-            data: samples,
+            data: interleaved_samples,
             channels,
             sample_rate,
+            frames,
         })
     }
 }
@@ -236,14 +260,17 @@ mod tests {
     #[test]
     fn test_audio_sample_creation() {
         let sample = AudioSample {
-            data: vec![0.0, 0.5, -0.5, 1.0],
+            data: vec![0.0, 0.5, -0.5, 1.0], // 2 frames, 2 channels interleaved
             channels: 2,
             sample_rate: 44100,
+            frames: 2,
         };
 
         assert_eq!(sample.data.len(), 4);
         assert_eq!(sample.channels, 2);
         assert_eq!(sample.sample_rate, 44100);
+        assert_eq!(sample.frames, 2);
+        assert_eq!(sample.data.len(), sample.frames * sample.channels as usize);
     }
 
     #[test]
@@ -251,21 +278,21 @@ mod tests {
     fn test_audio_reader_with_real_file() {
         // This test can be run with: cargo test -- --ignored
         let test_file = "../../tests/piano_freesound.wav";
-        
+
         if std::path::Path::new(test_file).exists() {
             let mut reader = AudioReader::new(test_file).expect("Failed to open test file");
-            
+
             let info = reader.info();
             let expected_channels = info.channels;
             let expected_sample_rate = info.sample_rate;
-            
+
             assert!(expected_sample_rate > 0);
             assert!(expected_channels > 0);
-            
+
             // Try to read a few frames
             let mut frame_count = 0;
             let max_frames = 3;
-            
+
             while frame_count < max_frames {
                 match reader.read_next_frame().expect("Failed to read frame") {
                     Some(sample) => {
@@ -277,9 +304,8 @@ mod tests {
                     None => break,
                 }
             }
-            
+
             assert!(frame_count > 0, "Should have read at least one frame");
         }
     }
 }
-
