@@ -1,5 +1,5 @@
 [workspace]
-members = ["src/aes67-streamer", "src/config"]
+members = ["src/aes67-streamer", "src/config", "src/audio"]
 resolver = "2"
 
 [workspace.dependencies]

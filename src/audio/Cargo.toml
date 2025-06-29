@@ -1,0 +1,14 @@
+[package]
+name = "audio"
+version = "0.1.0"
+edition = "2021"
+description = "Audio processing crate for AES67 streamer"
+
+[lib]
+name = "audio"
+path = "src/lib.rs"
+
+[dependencies]
+symphonia = { version = "0.5", features = ["all"] }
+log = "0.4"
+anyhow = "1.0"

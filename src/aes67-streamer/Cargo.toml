@@ -7,5 +7,6 @@ description = "Audio File Streamer on RTP with AES67 compliance"
 
 [dependencies]
 config = { path = "../config" }
+audio = { path = "../audio" }
 env_logger = "0.11.6"
 log = "0.4.26"
