@@ -74,6 +74,108 @@ Audio File → Decoder → [Sample Buffer] → RTP Packetizer → [Packet Queue]
 3. **Network Thread**: UDP multicast transmission, socket management
 4. **PTP Thread**: Clock synchronization, master/slave logic
 
+## Current Project Structure (Phase 1-2 Complete)
+
+```
+aes67-streamer/
+├── Cargo.toml                    # Workspace configuration
+├── CLAUDE.md                     # Project documentation
+├── readme.md                     # Basic project info
+├── tests/
+│   ├── piano_freesound.wav      # Real audio file for testing
+│   └── fake.wav                 # Corrupted file for error testing
+├── .zed/
+│   └── settings.json            # Zed editor configuration
+└── src/
+    ├── aes67-streamer/          # Main binary crate
+    │   ├── Cargo.toml           # Binary dependencies
+    │   └── src/
+    │       └── main.rs          # CLI entry point + audio demo
+    ├── config/                  # Configuration management crate
+    │   ├── Cargo.toml           # Config dependencies (clap, serde, toml)
+    │   └── src/
+    │       ├── lib.rs           # Public API exports
+    │       ├── args.rs          # CLI argument parsing
+    │       └── configs.rs       # TOML configuration structures
+    └── audio/                   # Audio processing crate
+        ├── Cargo.toml           # Audio dependencies (symphonia, anyhow)
+        └── src/
+            ├── lib.rs           # Public API exports
+            ├── reader.rs        # Multi-channel audio file reader
+            ├── processor.rs     # Audio effects pipeline trait
+            └── gain.rs          # Gain processor with level metering
+```
+
+### Current Implementation Status
+- ✅ **Phase 1 Complete**: Workspace, CLI parsing, configuration
+- ✅ **Phase 2 Complete**: Multi-channel audio reader, gain processing pipeline
+- 🚧 **Phase 3 In Progress**: Network & RTP (next phase)
+
+## Debugging & Testing Commands
+
+### Build & Test
+```bash
+# Test entire workspace
+cargo test
+
+# Test specific crate
+cargo test --package audio
+cargo test --package config
+
+# Test with ignored tests (requires test files)
+cargo test --package audio -- --ignored
+
+# Build check without running
+cargo check
+cargo check --package audio
+```
+
+### Audio File Testing
+```bash
+# Test with good audio file
+cargo run --bin aes67-streamer -- --file tests/piano_freesound.wav --address 239.192.1.1 --port 5004
+
+# Test with verbose logging
+cargo run --bin aes67-streamer -- --file tests/piano_freesound.wav --address 239.192.1.1 --port 5004 --verbose
+
+# Test error handling with corrupted file
+cargo run --bin aes67-streamer -- --file tests/fake.wav --address 239.192.1.1 --port 5004
+
+# Test with non-existent file
+cargo run --bin aes67-streamer -- --file nonexistent.wav --address 239.192.1.1 --port 5004
+
+# Test with invalid file format
+cargo run --bin aes67-streamer -- --file readme.md --address 239.192.1.1 --port 5004
+```
+
+### Debug Logging
+```bash
+# Enable debug logging
+RUST_LOG=debug cargo run --bin aes67-streamer -- --file tests/piano_freesound.wav --address 239.192.1.1 --port 5004
+
+# Enable info logging (default in our build)
+RUST_LOG=info cargo run --bin aes67-streamer -- --file tests/piano_freesound.wav --address 239.192.1.1 --port 5004
+
+# Show help
+cargo run --bin aes67-streamer -- --help
+```
+
+### Integration Testing
+Proper testing is done via integration tests, not main.rs demos:
+
+```bash
+# Run integration tests for main binary
+cargo test --package aes67-streamer
+
+# Run specific integration test
+cargo test --package aes67-streamer test_audio_processing_integration
+```
+
+Integration tests verify:
+- ✅ **Multi-channel audio reading**: Proper stereo/multichannel support  
+- ✅ **Gain processing**: -6dB reduction with peak/RMS metering
+- ✅ **Error validation**: Explicit failures for corrupted files
+- ✅ **Interleaved output**: `[L, R, L, R...]` format validation
 
 ## Key Implementation Details
 
@@ -256,3 +358,4 @@ buffer_size_ms = 15
 - Provide clear error messages and debugging information
 - Be brave to disagree with the coder, provide constructive feedback.
 - Reach good practice on the internet.
+- Do not over comment or duplicate code. Write comment only when there is specific clarification needed
