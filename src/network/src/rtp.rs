@@ -1,5 +1,5 @@
-use audio::AudioSample;
 use anyhow::Result;
+use audio::AudioSample;
 
 /// RTP packet structure for AES67 audio streaming
 #[derive(Debug, Clone)]
@@ -48,29 +48,29 @@ impl RtpHeader {
             ssrc,
         }
     }
-    
+
     /// Serialize header to 12-byte array
     pub fn to_bytes(&self) -> [u8; 12] {
         let mut bytes = [0u8; 12];
-        
+
         // First byte: V(2) + P(1) + X(1) + CC(4)
-        bytes[0] = (self.version << 6) 
-                 | ((self.padding as u8) << 5)
-                 | ((self.extension as u8) << 4)
-                 | self.csrc_count;
-        
+        bytes[0] = (self.version << 6)
+            | ((self.padding as u8) << 5)
+            | ((self.extension as u8) << 4)
+            | self.csrc_count;
+
         // Second byte: M(1) + PT(7)
         bytes[1] = ((self.marker as u8) << 7) | self.payload_type;
-        
+
         // Sequence number (big-endian)
         bytes[2..4].copy_from_slice(&self.sequence_number.to_be_bytes());
-        
+
         // Timestamp (big-endian)
         bytes[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
-        
+
         // SSRC (big-endian)
         bytes[8..12].copy_from_slice(&self.ssrc.to_be_bytes());
-        
+
         bytes
     }
 }
@@ -103,62 +103,57 @@ impl RtpPacketizer {
             packet_time_us,
         }
     }
-    
+
     /// Set base timestamp (typically from PTP clock)
     pub fn set_base_timestamp(&mut self, timestamp: u32) {
         self.base_timestamp = timestamp;
     }
-    
+
     /// Create RTP packet from audio sample
     pub fn create_packet(&mut self, sample: &AudioSample) -> Result<RtpPacket> {
-        // Calculate timestamp based on sample rate and frames processed
         let timestamp = self.base_timestamp + (self.samples_processed as u32);
-        
-        // Create header for this packet
+
         let mut header = self.header_template.clone();
         header.sequence_number = self.sequence_number;
         header.timestamp = timestamp;
-        
-        // Convert audio sample to byte payload
+
         let payload = self.audio_to_payload(sample)?;
-        
+
         // Update state
         self.sequence_number = self.sequence_number.wrapping_add(1);
         self.samples_processed += sample.frames as u64;
-        
+
         Ok(RtpPacket { header, payload })
     }
-    
-    /// Convert audio sample to RTP payload bytes
+
     fn audio_to_payload(&self, sample: &AudioSample) -> Result<Vec<u8>> {
         // For now, convert f32 samples to 24-bit PCM (AES67 standard)
         let mut payload = Vec::with_capacity(sample.data.len() * 3); // 3 bytes per 24-bit sample
-        
+
         for &sample_f32 in &sample.data {
-            // Clamp to [-1.0, 1.0] range
             let clamped = sample_f32.clamp(-1.0, 1.0);
-            
+
             // Convert to 24-bit signed integer (-8388608 to 8388607)
             let sample_i32 = (clamped * 8388607.0) as i32;
-            
+
             // Convert to 24-bit big-endian bytes (network byte order)
             let bytes = sample_i32.to_be_bytes();
             payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte
         }
-        
+
         Ok(payload)
     }
-    
+
     /// Get current sequence number
     pub fn sequence_number(&self) -> u16 {
         self.sequence_number
     }
-    
+
     /// Get samples processed count
     pub fn samples_processed(&self) -> u64 {
         self.samples_processed
     }
-    
+
     /// Reset packetizer state
     pub fn reset(&mut self) {
         self.sequence_number = 0;
@@ -170,7 +165,7 @@ impl RtpPacketizer {
 mod tests {
     use super::*;
     use audio::AudioSample;
-    
+
     #[test]
     fn test_rtp_header_serialization() {
         let header = RtpHeader {
@@ -184,75 +179,81 @@ mod tests {
             timestamp: 0x56789ABC,
             ssrc: 0xDEADBEEF,
         };
-        
+
         let bytes = header.to_bytes();
-        
+
         // Check version and flags
         assert_eq!(bytes[0], 0x80); // Version=2, P=0, X=0, CC=0
-        assert_eq!(bytes[1], 97);   // M=0, PT=97
-        
+        assert_eq!(bytes[1], 97); // M=0, PT=97
+
         // Check sequence number
         assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 0x1234);
-        
+
         // Check timestamp
-        assert_eq!(u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 0x56789ABC);
-        
+        assert_eq!(
+            u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            0x56789ABC
+        );
+
         // Check SSRC
-        assert_eq!(u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0xDEADBEEF);
+        assert_eq!(
+            u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            0xDEADBEEF
+        );
     }
-    
+
     #[test]
     fn test_rtp_packetizer() {
         let mut packetizer = RtpPacketizer::new(97, 0x12345678, 48000, 1000);
-        
+
         let sample = AudioSample {
             data: vec![0.5, -0.5, 0.25, -0.25],
             channels: 2,
             sample_rate: 48000,
             frames: 2,
         };
-        
+
         let packet = packetizer.create_packet(&sample).unwrap();
-        
+
         // Check header
         assert_eq!(packet.header.sequence_number, 0);
         assert_eq!(packet.header.payload_type, 97);
         assert_eq!(packet.header.ssrc, 0x12345678);
-        
+
         // Check payload size (4 samples * 3 bytes each = 12 bytes)
         assert_eq!(packet.payload.len(), 12);
-        
+
         // Create second packet
         let packet2 = packetizer.create_packet(&sample).unwrap();
         assert_eq!(packet2.header.sequence_number, 1);
         assert_eq!(packet2.header.timestamp, 2); // 2 frames processed
     }
-    
+
     #[test]
     fn test_audio_to_payload_conversion() {
         let packetizer = RtpPacketizer::new(97, 0, 48000, 1000);
-        
+
         let sample = AudioSample {
             data: vec![1.0, -1.0, 0.0],
             channels: 1,
             sample_rate: 48000,
             frames: 3,
         };
-        
+
         let payload = packetizer.audio_to_payload(&sample).unwrap();
-        
+
         // Should be 9 bytes (3 samples * 3 bytes each)
         assert_eq!(payload.len(), 9);
-        
+
         // Check 24-bit conversion
         // 1.0 -> 0x7FFFFF (max positive)
         assert_eq!(&payload[0..3], &[0x7F, 0xFF, 0xFF]);
-        
+
         // -1.0 -> 0x800001 (max negative in 24-bit two's complement)
         // When we multiply -1.0 * 8388607, we get -8388607, which is 0xFF800001 as u32
         // Taking bytes [1..4] gives us [0x80, 0x00, 0x01]
         assert_eq!(&payload[3..6], &[0x80, 0x00, 0x01]);
-        
+
         // 0.0 -> 0x000000
         assert_eq!(&payload[6..9], &[0x00, 0x00, 0x00]);
     }
