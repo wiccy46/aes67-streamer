@@ -108,6 +108,23 @@ impl RtpPacketizer {
     pub fn set_base_timestamp(&mut self, timestamp: u32) {
         self.base_timestamp = timestamp;
     }
+    
+    /// Create RTP packet from audio sample with explicit timestamp
+    pub fn create_packet_with_timestamp(&mut self, sample: &AudioSample, timestamp: u32) -> Result<RtpPacket> {
+        // Create header for this packet
+        let mut header = self.header_template.clone();
+        header.sequence_number = self.sequence_number;
+        header.timestamp = timestamp;
+        
+        // Convert audio sample to byte payload
+        let payload = self.audio_to_payload(sample)?;
+        
+        // Update state
+        self.sequence_number = self.sequence_number.wrapping_add(1);
+        self.samples_processed += sample.frames as u64;
+        
+        Ok(RtpPacket { header, payload })
+    }
 
     /// Create RTP packet from audio sample
     pub fn create_packet(&mut self, sample: &AudioSample) -> Result<RtpPacket> {

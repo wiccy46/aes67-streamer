@@ -1,0 +1,10 @@
+[package]
+name = "ptp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+statime = "0.2"
+anyhow = "1.0"
+log = "0.4"
+tokio = { version = "1.0", features = ["net", "time", "rt"] }

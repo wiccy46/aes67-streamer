@@ -9,6 +9,7 @@ description = "Audio File Streamer on RTP with AES67 compliance"
 config = { path = "../config" }
 audio = { path = "../audio" }
 network = { path = "../network" }
+ptp = { path = "../ptp" }
 anyhow = "1.0"
 env_logger = "0.11.6"
 log = "0.4.26"
