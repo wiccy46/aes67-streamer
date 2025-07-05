@@ -26,6 +26,14 @@ pub trait AudioNode {
     
     /// Check if this node has a next node
     fn has_next(&self) -> bool;
+    
+    /// Convert this node into a chain (all nodes are chainable)
+    fn into_chain(self) -> AudioNodeChain
+    where
+        Self: Sized + 'static,
+    {
+        AudioNodeChain::new(Box::new(self))
+    }
 }
 
 /// Base implementation for audio processing nodes with automatic chaining
@@ -106,18 +114,6 @@ impl AudioNodeChain {
     }
 }
 
-/// Helper trait to make any AudioNode chainable
-pub trait ChainableNode: AudioNode {
-    fn into_chain(self) -> AudioNodeChain
-    where
-        Self: Sized + 'static,
-    {
-        AudioNodeChain::new(Box::new(self))
-    }
-}
-
-// Implement ChainableNode for all AudioNode types
-impl<T: AudioNode> ChainableNode for T {}
 
 /// Base struct for implementing audio nodes
 pub struct BaseAudioNode {

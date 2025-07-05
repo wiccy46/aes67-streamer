@@ -1,4 +1,4 @@
-use audio::{AudioReader, GainNode, ChainableNode};
+use audio::{AudioReader, GainNode, ResamplerQuality};
 use network::{MulticastSocket, MulticastConfig, RtpPacketizer, resolve_interface_ip};
 use ptp::{PtpClient, PtpConfig};
 use std::net::Ipv4Addr;
@@ -33,6 +33,10 @@ pub struct StreamConfig {
     pub gain_db: f32,
     /// PTP domain (0 for AES67)
     pub ptp_domain: u8,
+    /// Enable sample rate conversion
+    pub enable_src: bool,
+    /// Sample rate conversion quality
+    pub src_quality: ResamplerQuality,
     /// Enable verbose logging
     pub verbose: bool,
 }
@@ -44,6 +48,8 @@ impl Default for StreamConfig {
             packet_time_ms: 1,
             gain_db: 0.0,
             ptp_domain: 0,
+            enable_src: true,
+            src_quality: ResamplerQuality::Medium,
             verbose: false,
         }
     }
@@ -60,8 +66,9 @@ impl Aes67Streamer {
     ) -> Result<Self> {
         log::info!("Initializing AES67 Streamer");
         
-        // Load audio file
-        let audio_reader = AudioReader::new(audio_file)
+        // Load audio file with optional resampling
+        let target_rate = if config.enable_src { Some(config.sample_rate) } else { None };
+        let audio_reader = AudioReader::with_resampling(audio_file, target_rate, config.src_quality)
             .context("Failed to load audio file")?;
         
         let audio_info = audio_reader.info();
@@ -69,9 +76,14 @@ impl Aes67Streamer {
                   audio_info.sample_rate, audio_info.channels, 
                   audio_info.duration);
         
-        // Create audio processing chain
+        // Create audio processing chain (sample rate conversion handled at load time)
         let gain_node = GainNode::new_db(config.gain_db);
         let audio_chain = gain_node.into_chain();
+        
+        if config.enable_src {
+            log::info!("Sample rate conversion completed during file loading: target {} Hz, quality: {:?}", 
+                      config.sample_rate, config.src_quality);
+        }
         
         // Resolve network interface
         let local_ip = if let Some(iface) = interface {
@@ -218,6 +230,8 @@ mod tests {
         assert_eq!(config.packet_time_ms, 1);
         assert_eq!(config.gain_db, 0.0);
         assert_eq!(config.ptp_domain, 0);
+        assert!(config.enable_src);
+        assert_eq!(config.src_quality, ResamplerQuality::Medium);
         assert!(!config.verbose);
     }
     

@@ -10,5 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 symphonia = { version = "0.5", features = ["all"] }
+rubato = "0.15"
 log = "0.4"
 anyhow = "1.0"

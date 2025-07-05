@@ -9,8 +9,50 @@ use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use anyhow::Context;
 
+use crate::utils::{flat_noninterleaved_to_channels, channels_to_flat_noninterleaved};
 use crate::Result;
+
+/// Sample rate conversion quality settings
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ResamplerQuality {
+    /// Fastest conversion, lower quality
+    Fast,
+    /// Balanced speed and quality
+    Medium,
+    /// Highest quality, slower conversion
+    High,
+}
+
+impl ResamplerQuality {
+    fn to_rubato_params(self) -> SincInterpolationParameters {
+        match self {
+            ResamplerQuality::Fast => SincInterpolationParameters {
+                sinc_len: 64,
+                f_cutoff: 0.9,
+                interpolation: SincInterpolationType::Linear,
+                oversampling_factor: 16,
+                window: WindowFunction::BlackmanHarris2,
+            },
+            ResamplerQuality::Medium => SincInterpolationParameters {
+                sinc_len: 128,
+                f_cutoff: 0.95,
+                interpolation: SincInterpolationType::Cubic,
+                oversampling_factor: 32,
+                window: WindowFunction::BlackmanHarris2,
+            },
+            ResamplerQuality::High => SincInterpolationParameters {
+                sinc_len: 256,
+                f_cutoff: 0.98,
+                interpolation: SincInterpolationType::Cubic,
+                oversampling_factor: 64,
+                window: WindowFunction::BlackmanHarris2,
+            },
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AudioInfo {
@@ -23,8 +65,9 @@ pub struct AudioInfo {
 
 #[derive(Debug, Clone)]
 pub struct AudioSample {
-    /// Interleaved audio data: [L, R, L, R, ...] for stereo
-    /// or [L, R, C, LFE, LS, RS, ...] for surround
+    /// Non-interleaved audio data: [ch1_samples..., ch2_samples..., ch3_samples...] 
+    /// For stereo: [L1, L2, L3, ..., R1, R2, R3, ...]
+    /// More efficient for channel-based processing
     pub data: Vec<f32>,
     pub channels: u32,
     pub sample_rate: u32,
@@ -37,10 +80,24 @@ pub struct AudioReader {
     decoder: Box<dyn Decoder>,
     track_id: u32,
     info: AudioInfo,
+    /// Optional resampler for converting to target sample rate
+    resampler: Option<SincFixedIn<f32>>,
+    /// Target sample rate (if different from file)
+    target_sample_rate: Option<u32>,
 }
 
 impl AudioReader {
+    /// Create new audio reader without resampling
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::with_resampling(path, None, ResamplerQuality::Medium)
+    }
+    
+    /// Create new audio reader with optional resampling to target sample rate
+    pub fn with_resampling<P: AsRef<Path>>(
+        path: P, 
+        target_sample_rate: Option<u32>,
+        quality: ResamplerQuality
+    ) -> Result<Self> {
         let file = File::open(path.as_ref())?;
         let media_source = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -117,11 +174,43 @@ impl AudioReader {
             info.format
         );
 
+        // Setup resampler if target sample rate is different
+        let (resampler, final_sample_rate) = if let Some(target_rate) = target_sample_rate {
+            if target_rate != sample_rate {
+                log::info!("Setting up resampler: {} Hz → {} Hz", sample_rate, target_rate);
+                
+                let ratio = target_rate as f64 / sample_rate as f64;
+                let params = quality.to_rubato_params();
+                let chunk_size = 1024;
+                
+                let resampler = SincFixedIn::<f32>::new(
+                    ratio,
+                    2.0, // Maximum ratio change
+                    params,
+                    chunk_size,
+                    channels as usize,
+                ).context("Failed to create resampler")?;
+                
+                (Some(resampler), target_rate)
+            } else {
+                log::debug!("Target sample rate matches file sample rate, no resampling needed");
+                (None, sample_rate)
+            }
+        } else {
+            (None, sample_rate)
+        };
+
+        // Update info with final sample rate
+        let mut final_info = info;
+        final_info.sample_rate = final_sample_rate;
+
         Ok(AudioReader {
             format_reader,
             decoder,
             track_id,
-            info,
+            info: final_info,
+            resampler,
+            target_sample_rate,
         })
     }
 
@@ -148,9 +237,39 @@ impl AudioReader {
         let decoded = self.decoder.decode(&packet)?;
 
         // Convert to f32 samples
-        let audio_sample = Self::convert_audio_buffer(decoded)?;
+        let mut audio_sample = Self::convert_audio_buffer(decoded)?;
+
+        // Apply resampling if needed
+        if self.resampler.is_some() {
+            audio_sample = self.apply_resampling(audio_sample)?;
+        }
 
         Ok(Some(audio_sample))
+    }
+
+    fn apply_resampling(&mut self, sample: AudioSample) -> Result<AudioSample> {
+        let resampler = self.resampler.as_mut().unwrap();
+        
+        // Convert flat non-interleaved to channels for rubato
+        let input_channels = flat_noninterleaved_to_channels(&sample.data, sample.channels as usize, sample.frames);
+
+        // Process through resampler
+        let output_channels = resampler
+            .process(&input_channels, None)
+            .context("Failed to process sample rate conversion")?;
+
+        // Convert back to flat non-interleaved format
+        let output_data = channels_to_flat_noninterleaved(&output_channels);
+        
+        // Calculate new frame count
+        let new_frames = if output_channels.is_empty() { 0 } else { output_channels[0].len() };
+
+        Ok(AudioSample {
+            data: output_data,
+            channels: sample.channels,
+            sample_rate: self.target_sample_rate.unwrap_or(sample.sample_rate),
+            frames: new_frames,
+        })
     }
 
     fn convert_audio_buffer(buffer: AudioBufferRef) -> Result<AudioSample> {
@@ -159,17 +278,18 @@ impl AudioReader {
         let frames = buffer.capacity();
         let sample_rate = spec.rate;
 
-        // Pre-allocate interleaved buffer: [L, R, L, R, ...]
-        let mut interleaved_samples = Vec::with_capacity(frames * channels as usize);
+        // Pre-allocate non-interleaved buffer: [ch1_samples..., ch2_samples..., ch3_samples...]
+        let mut noninterleaved_samples = Vec::with_capacity(frames * channels as usize);
 
-        // Helper macro to convert and interleave samples
-        macro_rules! convert_and_interleave {
+        // Helper macro to convert to non-interleaved format
+        macro_rules! convert_to_noninterleaved {
             ($buf:expr, $convert:expr) => {
-                for frame_idx in 0..frames {
-                    for channel_idx in 0..channels {
+                // Convert channel by channel (non-interleaved layout)
+                for channel_idx in 0..channels {
+                    for frame_idx in 0..frames {
                         let sample = $buf.chan(channel_idx as usize)[frame_idx];
                         let normalized = $convert(sample);
-                        interleaved_samples.push(normalized);
+                        noninterleaved_samples.push(normalized);
                     }
                 }
             };
@@ -177,60 +297,62 @@ impl AudioReader {
 
         match buffer {
             AudioBufferRef::U8(buf) => {
-                convert_and_interleave!(buf, |sample| (sample as f32 - 128.0) / 128.0);
+                convert_to_noninterleaved!(buf, |sample| (sample as f32 - 128.0) / 128.0);
             }
             AudioBufferRef::U16(buf) => {
-                convert_and_interleave!(buf, |sample| (sample as f32 - 32768.0) / 32768.0);
+                convert_to_noninterleaved!(buf, |sample| (sample as f32 - 32768.0) / 32768.0);
             }
             AudioBufferRef::U24(buf) => {
-                for frame_idx in 0..frames {
-                    for channel_idx in 0..channels {
+                // Convert channel by channel (non-interleaved layout)
+                for channel_idx in 0..channels {
+                    for frame_idx in 0..frames {
                         let sample = buf.chan(channel_idx as usize)[frame_idx];
                         let sample_val = sample.inner();
                         let normalized = (sample_val as f32 - 8388608.0) / 8388608.0;
-                        interleaved_samples.push(normalized);
+                        noninterleaved_samples.push(normalized);
                     }
                 }
             }
             AudioBufferRef::U32(buf) => {
-                convert_and_interleave!(buf, |sample| (sample as f32 - 2147483648.0)
+                convert_to_noninterleaved!(buf, |sample| (sample as f32 - 2147483648.0)
                     / 2147483648.0);
             }
             AudioBufferRef::S8(buf) => {
-                convert_and_interleave!(buf, |sample| sample as f32 / 128.0);
+                convert_to_noninterleaved!(buf, |sample| sample as f32 / 128.0);
             }
             AudioBufferRef::S16(buf) => {
-                convert_and_interleave!(buf, |sample| sample as f32 / 32768.0);
+                convert_to_noninterleaved!(buf, |sample| sample as f32 / 32768.0);
             }
             AudioBufferRef::S24(buf) => {
-                for frame_idx in 0..frames {
-                    for channel_idx in 0..channels {
+                // Convert channel by channel (non-interleaved layout)
+                for channel_idx in 0..channels {
+                    for frame_idx in 0..frames {
                         let sample = buf.chan(channel_idx as usize)[frame_idx];
                         let sample_val = sample.inner();
                         let normalized = sample_val as f32 / 8388608.0;
-                        interleaved_samples.push(normalized);
+                        noninterleaved_samples.push(normalized);
                     }
                 }
             }
             AudioBufferRef::S32(buf) => {
-                convert_and_interleave!(buf, |sample| sample as f32 / 2147483648.0);
+                convert_to_noninterleaved!(buf, |sample| sample as f32 / 2147483648.0);
             }
             AudioBufferRef::F32(buf) => {
-                // F32 is already normalized, just interleave
-                for frame_idx in 0..frames {
-                    for channel_idx in 0..channels {
+                // F32 is already normalized, just convert to non-interleaved
+                for channel_idx in 0..channels {
+                    for frame_idx in 0..frames {
                         let sample = buf.chan(channel_idx as usize)[frame_idx];
-                        interleaved_samples.push(sample);
+                        noninterleaved_samples.push(sample);
                     }
                 }
             }
             AudioBufferRef::F64(buf) => {
-                convert_and_interleave!(buf, |sample| sample as f32);
+                convert_to_noninterleaved!(buf, |sample| sample as f32);
             }
         }
 
         Ok(AudioSample {
-            data: interleaved_samples,
+            data: noninterleaved_samples,
             channels,
             sample_rate,
             frames,
@@ -258,9 +380,19 @@ mod tests {
     }
 
     #[test]
+    fn test_resampler_quality_settings() {
+        let fast_params = ResamplerQuality::Fast.to_rubato_params();
+        let high_params = ResamplerQuality::High.to_rubato_params();
+        
+        // High quality should have longer sinc length
+        assert!(high_params.sinc_len > fast_params.sinc_len);
+        assert!(high_params.f_cutoff > fast_params.f_cutoff);
+    }
+
+    #[test]
     fn test_audio_sample_creation() {
         let sample = AudioSample {
-            data: vec![0.0, 0.5, -0.5, 1.0], // 2 frames, 2 channels interleaved
+            data: vec![0.0, -0.5, 0.5, 1.0], // 2 frames, 2 channels planar: [L1, L2, R1, R2]
             channels: 2,
             sample_rate: 44100,
             frames: 2,

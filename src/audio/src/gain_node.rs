@@ -139,17 +139,27 @@ impl AudioNode for GainNode {
             return Ok(false);
         }
         
-        // Apply gain to each sample
-        for value in &mut sample.data {
-            // Apply gain
-            *value *= self.gain_linear;
+        // Process non-interleaved audio data efficiently (channel by channel)
+        let frames_per_channel = sample.frames;
+        let channels = sample.channels as usize;
+        
+        // Process each channel separately for better cache efficiency
+        for ch_idx in 0..channels {
+            let channel_start = ch_idx * frames_per_channel;
+            let channel_end = channel_start + frames_per_channel;
             
-            // Update meters before clipping
-            self.update_meters(*value);
-            
-            // Apply clipping protection if enabled
-            if self.clip_protection {
-                *value = Self::soft_clip(*value);
+            // Process this channel's samples
+            for value in &mut sample.data[channel_start..channel_end] {
+                // Apply gain
+                *value *= self.gain_linear;
+                
+                // Update meters before clipping
+                self.update_meters(*value);
+                
+                // Apply clipping protection if enabled
+                if self.clip_protection {
+                    *value = Self::soft_clip(*value);
+                }
             }
         }
         
@@ -231,7 +241,7 @@ mod tests {
         let mut node = GainNode::new_linear(2.0); // 2x gain
         
         let mut sample = AudioSample {
-            data: vec![0.1, 0.2, 0.3, 0.4],
+            data: vec![0.1, 0.3, 0.2, 0.4], // Planar: [L1, L2, R1, R2]
             channels: 2,
             sample_rate: 44100,
             frames: 2,
@@ -240,10 +250,10 @@ mod tests {
         node.process(&mut sample).unwrap();
         
         // Values should be doubled
-        assert!((sample.data[0] - 0.2).abs() < 0.001);
-        assert!((sample.data[1] - 0.4).abs() < 0.001);
-        assert!((sample.data[2] - 0.6).abs() < 0.001);
-        assert!((sample.data[3] - 0.8).abs() < 0.001);
+        assert!((sample.data[0] - 0.2).abs() < 0.001); // L1
+        assert!((sample.data[1] - 0.6).abs() < 0.001); // L2
+        assert!((sample.data[2] - 0.4).abs() < 0.001); // R1
+        assert!((sample.data[3] - 0.8).abs() < 0.001); // R2
     }
     
     #[test]
@@ -296,7 +306,7 @@ mod tests {
     #[test]
     fn test_apply_gain_example() {
         let mut sample = AudioSample {
-            data: vec![0.1, 0.2, 0.3, 0.4],
+            data: vec![0.1, 0.3, 0.2, 0.4], // Planar: [L1, L2, R1, R2]
             channels: 2,
             sample_rate: 44100,
             frames: 2,
@@ -305,6 +315,6 @@ mod tests {
         apply_gain_example(&mut sample, 6.0).unwrap();
         
         // Should be doubled due to +6dB gain
-        assert!((sample.data[0] - 0.2).abs() < 0.001);
+        assert!((sample.data[0] - 0.2).abs() < 0.001); // L1
     }
 }
