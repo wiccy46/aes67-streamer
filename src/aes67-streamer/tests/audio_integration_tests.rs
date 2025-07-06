@@ -1,4 +1,4 @@
-use audio::{AudioReader, GainNode, ChainableNode};
+use audio::{AudioReader, GainNode, AudioNode};
 
 #[test]
 fn test_audio_file_loading_integration() {

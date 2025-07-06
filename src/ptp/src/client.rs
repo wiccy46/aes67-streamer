@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,7 +15,7 @@ pub struct PtpConfig {
     pub interface_ip: Ipv4Addr,
     /// Priority1 value (0-255, lower is higher priority)
     pub priority1: u8,
-    /// Priority2 value (0-255, lower is higher priority)  
+    /// Priority2 value (0-255, lower is higher priority)
     pub priority2: u8,
     /// Clock class (248 for default application clock)
     pub clock_class: u8,
@@ -26,12 +26,12 @@ pub struct PtpConfig {
 impl Default for PtpConfig {
     fn default() -> Self {
         Self {
-            domain: 0,                    // AES67 default domain
+            domain: 0,
             interface_ip: Ipv4Addr::new(127, 0, 0, 1),
-            priority1: 128,               // Default priority
-            priority2: 128,               // Default priority
-            clock_class: 248,             // Default application clock
-            clock_accuracy: 0x25,         // ~1ms accuracy
+            priority1: 128,       // Default priority
+            priority2: 128,       // Default priority
+            clock_class: 248,     // Default application clock
+            clock_accuracy: 0x25, // ~1ms accuracy
         }
     }
 }
@@ -134,9 +134,12 @@ pub struct PtpClient {
 impl PtpClient {
     /// Create new PTP client
     pub fn new(config: PtpConfig) -> Result<Self> {
-        log::info!("Creating PTP client for domain {} on interface {}", 
-                  config.domain, config.interface_ip);
-        
+        log::info!(
+            "Creating PTP client for domain {} on interface {}",
+            config.domain,
+            config.interface_ip
+        );
+
         Ok(Self {
             config,
             clock: SimpleClock::new(),
@@ -154,16 +157,16 @@ impl PtpClient {
         // 2. Join multicast groups for PTP
         // 3. Start message processing threads
         // 4. Initialize statime PTP instance
-        
+
         // For now, simulate basic startup
         *self.running.lock().unwrap() = true;
-        
+
         // Update initial state
         {
             let mut stats = self.stats.lock().unwrap();
             stats.state = PtpState::Listening;
         }
-        
+
         log::info!("PTP client started successfully (simulation mode)");
         Ok(())
     }
@@ -171,15 +174,15 @@ impl PtpClient {
     /// Stop PTP client
     pub fn stop(&mut self) {
         log::info!("Stopping PTP client...");
-        
+
         *self.running.lock().unwrap() = false;
-        
+
         // Update state
         {
             let mut stats = self.stats.lock().unwrap();
             stats.state = PtpState::Disabled;
         }
-        
+
         log::info!("PTP client stopped");
     }
 
@@ -188,7 +191,7 @@ impl PtpClient {
         // Use clock with PTP adjustments
         self.clock.now_ns()
     }
-    
+
     /// Adjust clock offset (for PTP synchronization)
     pub fn adjust_clock_offset(&mut self, offset_ns: i64) {
         self.clock.adjust_offset(offset_ns);
@@ -198,11 +201,11 @@ impl PtpClient {
     /// Get current PTP timestamp for RTP (32-bit sample-based)
     pub fn rtp_timestamp(&self, sample_rate: u32) -> Result<u32> {
         let ns = self.now_ns()?;
-        
+
         // Convert nanoseconds to sample units with overflow protection
         // Use f64 to avoid overflow for large timestamps
         let samples_f64 = (ns as f64 * sample_rate as f64) / 1_000_000_000.0;
-        
+
         Ok(samples_f64 as u32)
     }
 
@@ -238,10 +241,10 @@ impl PtpClient {
         // 2. Send periodic messages (announce, sync, delay_req)
         // 3. Update clock synchronization
         // 4. Update statistics
-        
+
         // For now, simulate basic state transitions
         let mut stats = self.stats.lock().unwrap();
-        
+
         match stats.state {
             PtpState::Listening => {
                 // Simulate discovering a master after some time
@@ -266,7 +269,7 @@ impl PtpClient {
                 let new_offset = (stats.sync_count as i64 % 1000) - 500; // ±500ns offset
                 stats.offset_ns = new_offset;
                 stats.mean_path_delay_ns = 1000; // 1μs path delay
-                
+
                 // Apply small clock adjustments
                 if stats.sync_count % 10 == 0 {
                     self.clock.adjust_offset(new_offset / 10); // Small correction
@@ -274,7 +277,7 @@ impl PtpClient {
             }
             _ => {}
         }
-        
+
         Ok(())
     }
 }
@@ -303,7 +306,7 @@ mod tests {
         let config = PtpConfig::default();
         let client = PtpClient::new(config);
         assert!(client.is_ok());
-        
+
         let client = client.unwrap();
         assert!(!client.is_running());
         assert!(!client.is_synchronized());
@@ -313,19 +316,19 @@ mod tests {
     fn test_ptp_start_stop() {
         let config = PtpConfig::default();
         let mut client = PtpClient::new(config).unwrap();
-        
+
         // Start client
         assert!(client.start().is_ok());
         assert!(client.is_running());
-        
+
         // Check initial state
         let stats = client.stats();
         assert_eq!(stats.state, PtpState::Listening);
-        
+
         // Stop client
         client.stop();
         assert!(!client.is_running());
-        
+
         let stats = client.stats();
         assert_eq!(stats.state, PtpState::Disabled);
     }
@@ -334,11 +337,11 @@ mod tests {
     fn test_timestamp_generation() {
         let config = PtpConfig::default();
         let client = PtpClient::new(config).unwrap();
-        
+
         // Test nanosecond timestamp
         let ns = client.now_ns().unwrap();
         assert!(ns > 0);
-        
+
         // Test RTP timestamp
         let rtp_ts = client.rtp_timestamp(48000).unwrap();
         assert!(rtp_ts > 0);
@@ -348,25 +351,25 @@ mod tests {
     fn test_state_transitions() {
         let config = PtpConfig::default();
         let mut client = PtpClient::new(config).unwrap();
-        
+
         client.start().unwrap();
-        
+
         // Initial state should be Listening
         assert_eq!(client.stats().state, PtpState::Listening);
-        
+
         // Simulate state transitions
         for _ in 0..15 {
             client.tick().unwrap();
         }
-        
+
         // Should transition to Uncalibrated
         assert_eq!(client.stats().state, PtpState::Uncalibrated);
-        
+
         // Continue simulation
         for _ in 0..15 {
             client.tick().unwrap();
         }
-        
+
         // Should achieve synchronization
         assert_eq!(client.stats().state, PtpState::Slave);
         assert!(client.is_synchronized());
