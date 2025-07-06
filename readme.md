@@ -2,7 +2,7 @@
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/your-org/aes67-streamer)
 [![AES67 Compliant](https://img.shields.io/badge/AES67-compliant-blue)](https://www.aes.org/publications/standards/search.cfm?docID=96)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 A high-performance, cross-platform CLI tool for streaming audio files over IP networks with full AES67 compliance. Built in Rust for reliability and real-time performance.
 
@@ -262,13 +262,7 @@ tcpdump -i eth0 port 319
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🤝 Support
-
-- **Documentation**: See [docs/](docs/) for detailed guides
-- **Issues**: Report bugs on [GitHub Issues](https://github.com/your-org/aes67-streamer/issues)
-- **Discussions**: Join the [community forum](https://github.com/your-org/aes67-streamer/discussions)
+This project is licensed under the GNU General Public License v3.0
 
 ## 🏆 Compliance
 
@@ -277,7 +271,3 @@ This implementation is fully compliant with:
 - **RFC 3550**: RTP: A Transport Protocol for Real-Time Applications
 - **IEEE 1588-2008**: Precision Time Protocol (PTPv2)
 - **SMPTE ST 2110**: Professional Media Over Managed IP Networks
-
----
-
-**Made with ❤️ for the professional audio community**
