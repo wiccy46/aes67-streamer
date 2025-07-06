@@ -98,6 +98,9 @@ aes67-streamer --file test.wav --address 127.0.0.1 --port 5004 --interface 127.0
 # Monitor stream with VLC
 vlc rtp://@239.69.83.1:5004
 
+# Use ffplay to receive the stream
+ffplay -protocol_whitelist file,udp,rtp tests/unicast_sdp.sdp
+
 # Capture packets for analysis
 tcpdump -i eth0 -w capture.pcap host 239.69.83.1
 ```
