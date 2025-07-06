@@ -31,9 +31,9 @@ fn main() {
     let stream_config = StreamConfig {
         sample_rate: args.sample_rate.unwrap_or(48000),
         packet_time_ms: 1, // 1ms packets for AES67
-        gain_db: 0.0, // Unity gain for now
+        gain_db: 0.0,      // Unity gain for now
         ptp_domain: args.ptp_domain.unwrap_or(0),
-        enable_src: true,
+        enable_sample_rate_conversion: args.sample_rate.is_some(), // Only resample if user specified a target rate
         src_quality: audio::ResamplerQuality::Medium,
         verbose: args.verbose,
         enable_threading: true,
