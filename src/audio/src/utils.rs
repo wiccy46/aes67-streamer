@@ -51,10 +51,26 @@ pub fn noninterleaved_to_interleaved(noninterleaved: &[f32], channels: usize) ->
 pub fn flat_noninterleaved_to_channels(flat_noninterleaved: &[f32], channels: usize, frames: usize) -> Vec<Vec<f32>> {
     let mut channel_vecs = Vec::with_capacity(channels);
     
+    // Calculate actual frames available per channel
+    let available_frames = if channels > 0 { flat_noninterleaved.len() / channels } else { 0 };
+    let actual_frames = frames.min(available_frames);
+    
     for ch_idx in 0..channels {
-        let start = ch_idx * frames;
-        let end = start + frames;
-        channel_vecs.push(flat_noninterleaved[start..end].to_vec());
+        let start = ch_idx * actual_frames;
+        let end = start + actual_frames;
+        if end <= flat_noninterleaved.len() {
+            channel_vecs.push(flat_noninterleaved[start..end].to_vec());
+        } else {
+            // Handle case where data is incomplete - pad with zeros
+            let mut channel_data = Vec::with_capacity(actual_frames);
+            let available_end = flat_noninterleaved.len().min(end);
+            if start < available_end {
+                channel_data.extend_from_slice(&flat_noninterleaved[start..available_end]);
+            }
+            // Pad with zeros if needed
+            channel_data.resize(actual_frames, 0.0);
+            channel_vecs.push(channel_data);
+        }
     }
     
     channel_vecs
