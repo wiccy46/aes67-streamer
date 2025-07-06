@@ -144,18 +144,34 @@ impl RtpPacketizer {
     }
 
     fn audio_to_payload(&self, sample: &AudioSample) -> Result<Vec<u8>> {
-        // For now, convert f32 samples to 24-bit PCM (AES67 standard)
+        // Convert f32 samples to 24-bit PCM (AES67 standard)
+        // Also convert from non-interleaved to interleaved format [L, R, L, R...]
         let mut payload = Vec::with_capacity(sample.data.len() * 3); // 3 bytes per 24-bit sample
 
-        for &sample_f32 in &sample.data {
-            let clamped = sample_f32.clamp(-1.0, 1.0);
+        let channels = sample.channels as usize;
+        let frames = sample.frames;
 
-            // Convert to 24-bit signed integer (-8388608 to 8388607)
-            let sample_i32 = (clamped * 8388607.0) as i32;
-
-            // Convert to 24-bit big-endian bytes (network byte order)
-            let bytes = sample_i32.to_be_bytes();
-            payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte
+        if channels == 2 {
+            // Convert non-interleaved [L1,L2,L3...R1,R2,R3] to interleaved [L1,R1,L2,R2,L3,R3]
+            for frame_idx in 0..frames {
+                for ch_idx in 0..channels {
+                    let sample_idx = ch_idx * frames + frame_idx;
+                    if sample_idx < sample.data.len() {
+                        let sample_f32 = sample.data[sample_idx].clamp(-1.0, 1.0);
+                        let sample_i32 = (sample_f32 * 8388607.0) as i32;
+                        let bytes = sample_i32.to_be_bytes();
+                        payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte for 24-bit
+                    }
+                }
+            }
+        } else {
+            // For non-stereo, just convert directly
+            for &sample_f32 in &sample.data {
+                let clamped = sample_f32.clamp(-1.0, 1.0);
+                let sample_i32 = (clamped * 8388607.0) as i32;
+                let bytes = sample_i32.to_be_bytes();
+                payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte for 24-bit
+            }
         }
 
         Ok(payload)
