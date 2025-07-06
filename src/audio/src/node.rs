@@ -1,7 +1,7 @@
 use crate::{AudioSample, Result};
 
 /// Trait for audio processing nodes in a linked-list style chain
-pub trait AudioNode {
+pub trait AudioNode: Send {
     /// Process audio samples and optionally pass to next node
     /// Returns true if processing was successful, false if node should be bypassed
     fn process(&mut self, sample: &mut AudioSample) -> Result<bool>;

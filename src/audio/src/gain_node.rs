@@ -146,9 +146,15 @@ impl AudioNode for GainNode {
         // Process each channel separately for better cache efficiency
         for ch_idx in 0..channels {
             let channel_start = ch_idx * frames_per_channel;
-            let channel_end = channel_start + frames_per_channel;
+            let channel_end = (channel_start + frames_per_channel).min(sample.data.len());
             
-            // Process this channel's samples
+            // Skip this channel if we don't have enough data
+            if channel_start >= sample.data.len() {
+                log::warn!("Channel {} starts beyond available data ({} >= {})", ch_idx, channel_start, sample.data.len());
+                continue;
+            }
+            
+            // Process this channel's samples (with bounds protection)
             for value in &mut sample.data[channel_start..channel_end] {
                 // Apply gain
                 *value *= self.gain_linear;
