@@ -33,7 +33,10 @@ fn main() {
         packet_time_ms: 1, // 1ms packets for AES67
         gain_db: 0.0, // Unity gain for now
         ptp_domain: args.ptp_domain.unwrap_or(0),
+        enable_src: true,
+        src_quality: audio::ResamplerQuality::Medium,
         verbose: args.verbose,
+        enable_threading: true,
     };
 
     // Create and start streamer

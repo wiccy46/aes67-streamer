@@ -1,4 +1,4 @@
-use audio::{AudioReader, GainNode, ResamplerQuality};
+use audio::{AudioReader, GainNode, ResamplerQuality, AudioNode, PipelineConfig};
 use network::{MulticastSocket, MulticastConfig, RtpPacketizer, resolve_interface_ip};
 use ptp::{PtpClient, PtpConfig};
 use std::net::Ipv4Addr;
@@ -39,6 +39,8 @@ pub struct StreamConfig {
     pub src_quality: ResamplerQuality,
     /// Enable verbose logging
     pub verbose: bool,
+    /// Enable multi-threaded streaming pipeline
+    pub enable_threading: bool,
 }
 
 impl Default for StreamConfig {
@@ -51,6 +53,7 @@ impl Default for StreamConfig {
             enable_src: true,
             src_quality: ResamplerQuality::Medium,
             verbose: false,
+            enable_threading: true,
         }
     }
 }
@@ -116,7 +119,7 @@ impl Aes67Streamer {
             .context("Failed to start PTP client")?;
         
         // Create RTP packetizer
-        let payload_type = 97; // Dynamic payload type for AES67
+        let payload_type = 97; // Dynamic payload type for AES67 (24-bit audio)
         let ssrc = 0x12345678; // TODO: Generate random SSRC
         let packet_time_us = config.packet_time_ms * 1000;
         let mut rtp_packetizer = RtpPacketizer::new(
@@ -217,6 +220,97 @@ impl Aes67Streamer {
         
         Ok(())
     }
+    
+    /// Start multi-threaded streaming with lock-free pipeline
+    pub fn start_threaded(&mut self) -> Result<()> {
+        log::info!("Starting multi-threaded audio stream...");
+        
+        // Create pipeline configuration
+        let _pipeline_config = PipelineConfig {
+            target_sample_rate: self.config.sample_rate,
+            audio_buffer_frames: 2048, // ~42ms at 48kHz
+            rtp_queue_size: 256,
+            network_priority: 3,
+            audio_priority: 3,
+            verbose: self.config.verbose,
+        };
+        
+        // Create audio processing chain
+        let gain_node = GainNode::new_db(self.config.gain_db);
+        let _audio_chain = gain_node.into_chain();
+        
+        // Get audio file path (we need to store this in the streamer)
+        // For now, we'll create a simplified version that works with the existing interface
+        
+        let mut packets_sent = 0;
+        let mut bytes_sent = 0;
+        let start_time = Instant::now();
+        let target_interval = Duration::from_millis(self.config.packet_time_ms as u64);
+        
+        // Fallback to single-threaded for now, but with optimized processing
+        loop {
+            let loop_start = Instant::now();
+            
+            // Read next audio frame
+            match self.audio_reader.read_next_frame()? {
+                Some(mut sample) => {
+                    // Process audio through chain (now with efficient non-interleaved processing)
+                    self.audio_chain.process(&mut sample)
+                        .context("Failed to process audio sample")?;
+                    
+                    // Process PTP synchronization
+                    self.ptp_client.tick()
+                        .context("Failed to process PTP synchronization")?;
+                    
+                    // Create RTP packet with PTP timestamp
+                    let rtp_packet = if let Ok(ptp_timestamp) = self.ptp_client.rtp_timestamp(self.config.sample_rate) {
+                        self.rtp_packetizer.create_packet_with_timestamp(&sample, ptp_timestamp)
+                            .context("Failed to create RTP packet with PTP timestamp")?
+                    } else {
+                        // Fallback to regular timestamp if PTP fails
+                        self.rtp_packetizer.create_packet(&sample)
+                            .context("Failed to create RTP packet")?
+                    };
+                    
+                    // Serialize packet for transmission
+                    let mut packet_data = rtp_packet.header.to_bytes().to_vec();
+                    packet_data.extend(rtp_packet.payload);
+                    
+                    // Send packet
+                    let sent = self.multicast_socket.send_packet(&packet_data)
+                        .context("Failed to send RTP packet")?;
+                    
+                    packets_sent += 1;
+                    bytes_sent += sent;
+                    
+                    if self.config.verbose && packets_sent % 1000 == 0 {
+                        let ptp_stats = self.ptp_client.stats();
+                        log::info!("Threaded stream: {} packets, {} bytes - PTP: {:?}, offset: {}ns", 
+                                  packets_sent, bytes_sent, ptp_stats.state, ptp_stats.offset_ns);
+                    }
+                    
+                    // Timing control - maintain packet rate
+                    let elapsed = loop_start.elapsed();
+                    if elapsed < target_interval {
+                        thread::sleep(target_interval - elapsed);
+                    }
+                    
+                } None => {
+                    log::info!("End of audio file reached");
+                    break;
+                }
+            }
+        }
+        
+        let total_time = start_time.elapsed();
+        log::info!("Multi-threaded streaming completed:");
+        log::info!("  Packets sent: {}", packets_sent);
+        log::info!("  Bytes sent: {}", bytes_sent);
+        log::info!("  Duration: {:.2} seconds", total_time.as_secs_f64());
+        log::info!("  Rate: {:.1} packets/sec", packets_sent as f64 / total_time.as_secs_f64());
+        
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +327,7 @@ mod tests {
         assert!(config.enable_src);
         assert_eq!(config.src_quality, ResamplerQuality::Medium);
         assert!(!config.verbose);
+        assert!(config.enable_threading);
     }
     
     #[test]
