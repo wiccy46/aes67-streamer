@@ -253,10 +253,23 @@ impl AudioReader {
         // Convert flat non-interleaved to channels for rubato
         let input_channels = flat_noninterleaved_to_channels(&sample.data, sample.channels as usize, sample.frames);
 
+        // Validate input data
+        if input_channels.is_empty() {
+            return Err(anyhow::anyhow!("No input channels for resampling"));
+        }
+        
+        // Check if we have valid data lengths
+        let expected_frames = sample.frames;
+        for (i, channel) in input_channels.iter().enumerate() {
+            if channel.len() != expected_frames {
+                log::warn!("Channel {} has {} frames, expected {}", i, channel.len(), expected_frames);
+            }
+        }
+
         // Process through resampler
         let output_channels = resampler
             .process(&input_channels, None)
-            .context("Failed to process sample rate conversion")?;
+            .with_context(|| format!("Failed to resample: {} channels, {} frames each", input_channels.len(), input_channels.get(0).map(|ch| ch.len()).unwrap_or(0)))?;
 
         // Convert back to flat non-interleaved format
         let output_data = channels_to_flat_noninterleaved(&output_channels);
@@ -340,8 +353,9 @@ impl AudioReader {
             AudioBufferRef::F32(buf) => {
                 // F32 is already normalized, just convert to non-interleaved
                 for channel_idx in 0..channels {
-                    for frame_idx in 0..frames {
-                        let sample = buf.chan(channel_idx as usize)[frame_idx];
+                    let channel_data = buf.chan(channel_idx as usize);
+                    for frame_idx in 0..frames.min(channel_data.len()) {
+                        let sample = channel_data[frame_idx];
                         noninterleaved_samples.push(sample);
                     }
                 }
