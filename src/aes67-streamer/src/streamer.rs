@@ -8,56 +8,46 @@ use std::time::{Duration, Instant};
 
 /// AES67 Audio Streamer
 pub struct Aes67Streamer {
-    /// Audio file reader
     audio_reader: AudioReader,
-    /// Audio processing chain
     audio_chain: audio::AudioNodeChain,
-    /// RTP packet generator
     rtp_packetizer: RtpPacketizer,
-    /// Network socket for multicast streaming
     multicast_socket: MulticastSocket,
-    /// PTP client for timing synchronization
     ptp_client: PtpClient,
-    /// Streaming configuration
     config: StreamConfig,
 }
 
-/// Streaming configuration
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
     /// Target sample rate for streaming (None = use file's native rate)
     pub target_sample_rate: Option<u32>,
     /// Actual sample rate used for streaming (set after file loading)
     pub actual_sample_rate: u32,
-    /// Packet time in milliseconds (1ms typical for AES67)
+    /// Packet time in milliseconds (1ms typical for AES67, 48 samples per packet)
     pub packet_time_ms: u32,
-    /// Audio gain in dB
     pub gain_db: f32,
     /// PTP domain (0 for AES67)
     pub ptp_domain: u8,
     /// Sample rate conversion quality
     pub src_quality: ResamplerQuality,
-    /// Enable verbose logging
     pub verbose: bool,
-    /// Enable multi-threaded streaming pipeline
-    pub enable_threading: bool,
 }
 
 impl Default for StreamConfig {
     fn default() -> Self {
         Self {
-            target_sample_rate: None, // Use file's native rate by default
+            target_sample_rate: None,  // Use file's native rate by default
             actual_sample_rate: 48000, // Will be updated after file loading
             packet_time_ms: 1,
             gain_db: 0.0,
             ptp_domain: 0,
             src_quality: ResamplerQuality::Medium,
             verbose: false,
-            enable_threading: true,
         }
     }
 }
 
+/// An Aes67Streamer is the main entry of the app
+/// It loads an audio file, creates a multicast udp socket, packetize the audio data, and sends it over the network.
 impl Aes67Streamer {
     /// Create new AES67 streamer
     pub fn new(
@@ -69,12 +59,9 @@ impl Aes67Streamer {
     ) -> Result<Self> {
         log::info!("Initializing AES67 Streamer");
 
-        // Load audio file with optional resampling
-        let audio_reader = AudioReader::with_resampling(
-            audio_file, 
-            config.target_sample_rate, 
-            config.src_quality
-        ).context("Failed to load audio file")?;
+        let audio_reader =
+            AudioReader::with_resampling(audio_file, config.target_sample_rate, config.src_quality)
+                .context("Failed to load audio file")?;
 
         let audio_info = audio_reader.info();
         log::info!(
@@ -84,22 +71,25 @@ impl Aes67Streamer {
             audio_info.duration
         );
 
-        // Update config with actual sample rate used
         config.actual_sample_rate = audio_info.sample_rate;
 
-        // Log resampling status
         if let Some(target_rate) = config.target_sample_rate {
             if target_rate != audio_info.sample_rate {
                 log::info!(
                     "Sample rate conversion applied: {} Hz → {} Hz, quality: {:?}",
                     // Note: audio_info shows the final rate, so we need to infer the original
-                    target_rate, audio_info.sample_rate, config.src_quality
+                    target_rate,
+                    audio_info.sample_rate,
+                    config.src_quality
                 );
             } else {
-                log::info!("No resampling needed: file already at target {} Hz", target_rate);
+                log::info!("No resampling needed: file already at target {target_rate} Hz");
             }
         } else {
-            log::info!("Using file's native sample rate: {} Hz", audio_info.sample_rate);
+            log::info!(
+                "Using file's native sample rate: {} Hz",
+                audio_info.sample_rate
+            );
         }
 
         // Create audio processing chain
@@ -113,47 +103,41 @@ impl Aes67Streamer {
             Ipv4Addr::new(127, 0, 0, 1) // Default to loopback
         };
 
-        // Parse multicast address
         let multicast_ip: Ipv4Addr = multicast_addr
             .parse()
             .context("Invalid multicast address")?;
 
-        // Create multicast socket
         let multicast_config = MulticastConfig::new(multicast_ip, port, local_ip);
         let multicast_socket =
             MulticastSocket::new(multicast_config).context("Failed to create multicast socket")?;
 
-        // Create PTP client
         let ptp_config = PtpConfig {
             domain: config.ptp_domain,
             interface_ip: local_ip,
             ..Default::default()
         };
         let mut ptp_client = PtpClient::new(ptp_config).context("Failed to create PTP client")?;
-
-        // Start PTP synchronization
         ptp_client.start().context("Failed to start PTP client")?;
 
         // Create RTP packetizer using actual sample rate
         let payload_type = 97; // Dynamic payload type for AES67 (24-bit audio)
         let ssrc = 0x12345678; // TODO: Generate random SSRC
         let packet_time_us = config.packet_time_ms * 1000;
-        let mut rtp_packetizer =
-            RtpPacketizer::new(payload_type, ssrc, config.actual_sample_rate, packet_time_us);
+        let mut rtp_packetizer = RtpPacketizer::new(
+            payload_type,
+            ssrc,
+            config.actual_sample_rate,
+            packet_time_us,
+        );
 
         // Set initial PTP timestamp
         if let Ok(ptp_timestamp) = ptp_client.rtp_timestamp(config.actual_sample_rate) {
             rtp_packetizer.set_base_timestamp(ptp_timestamp);
-            log::info!("RTP base timestamp set from PTP: {}", ptp_timestamp);
+            log::info!("RTP base timestamp set from PTP: {ptp_timestamp}");
         }
 
         log::info!("AES67 Streamer initialized successfully");
-        log::info!(
-            "Streaming to {}:{} via interface {}",
-            multicast_ip,
-            port,
-            local_ip
-        );
+        log::info!("Streaming to {multicast_ip}:{port} via interface {local_ip}");
 
         Ok(Self {
             audio_reader,
@@ -191,8 +175,9 @@ impl Aes67Streamer {
                         .context("Failed to process PTP synchronization")?;
 
                     // Create RTP packet with PTP timestamp
-                    let rtp_packet = if let Ok(ptp_timestamp) =
-                        self.ptp_client.rtp_timestamp(self.config.actual_sample_rate)
+                    let rtp_packet = if let Ok(ptp_timestamp) = self
+                        .ptp_client
+                        .rtp_timestamp(self.config.actual_sample_rate)
                     {
                         self.rtp_packetizer
                             .create_packet_with_timestamp(&sample, ptp_timestamp)
@@ -243,8 +228,8 @@ impl Aes67Streamer {
 
         let total_time = start_time.elapsed();
         log::info!("Streaming completed:");
-        log::info!("  Packets sent: {}", packets_sent);
-        log::info!("  Bytes sent: {}", bytes_sent);
+        log::info!("  Packets sent: {packets_sent}");
+        log::info!("  Bytes sent: {bytes_sent}");
         log::info!("  Duration: {:.2} seconds", total_time.as_secs_f64());
         log::info!(
             "  Rate: {:.1} packets/sec",
@@ -269,7 +254,6 @@ mod tests {
         assert_eq!(config.ptp_domain, 0);
         assert_eq!(config.src_quality, ResamplerQuality::Medium);
         assert!(!config.verbose);
-        assert!(config.enable_threading);
     }
 
     #[test]

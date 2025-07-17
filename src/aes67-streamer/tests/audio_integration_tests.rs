@@ -16,7 +16,7 @@ fn test_audio_file_loading_integration() {
         
         println!("✅ Audio file loaded: {} Hz, {} channels", info.sample_rate, info.channels);
     } else {
-        panic!("Test audio file not found: {}", test_file);
+        panic!("Test audio file not found: {test_file}");
     }
 }
 
@@ -49,7 +49,7 @@ fn test_audio_processing_integration() {
         }
         
         assert!(frames_processed > 0, "Should have processed at least one frame");
-        println!("✅ Processed {} audio frames with gain node chain", frames_processed);
+        println!("✅ Processed {frames_processed} audio frames with gain node chain");
     }
 }
 
@@ -68,7 +68,6 @@ fn test_chained_nodes_integration() {
         if let Some(mut sample) = reader.read_next_frame().unwrap() {
             let original_peak = sample.data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
             
-            // Process through chained nodes
             node_chain.process(&mut sample).unwrap();
             
             let processed_peak = sample.data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
@@ -76,19 +75,16 @@ fn test_chained_nodes_integration() {
             // Should be close to original (within 1% due to floating point precision)
             assert!((processed_peak / original_peak - 1.0).abs() < 0.01);
             
-            println!("✅ Chained node processing: original peak {:.3}, processed peak {:.3}", 
-                original_peak, processed_peak);
+            println!("✅ Chained node processing: original peak {original_peak:.3}, processed peak {processed_peak:.3}");
         }
     }
 }
 
 #[test]
 fn test_error_handling_integration() {
-    // Test with non-existent file
     let result = AudioReader::new("nonexistent.wav");
     assert!(result.is_err());
     
-    // Test with invalid file
     let result = AudioReader::new("../../Cargo.toml");
     assert!(result.is_err());
     
