@@ -45,6 +45,8 @@ pub struct AudioReader {
     info: AudioInfo,
     /// Samples per packet (e.g., 48 for 1ms at 48kHz)
     samples_per_packet: usize,
+    /// Reusable buffer for packet data to avoid allocations
+    packet_buffer: Vec<f32>,
 }
 
 impl AudioReader {
@@ -74,6 +76,7 @@ impl AudioReader {
             samples_per_packet
         );
 
+        let total_samples_per_packet = samples_per_packet * channels as usize;
         let reader = AudioReader {
             audio_data,
             read_position: 0,
@@ -85,13 +88,17 @@ impl AudioReader {
                 format: "Loaded".to_string(),
             },
             samples_per_packet,
+            packet_buffer: Vec::with_capacity(total_samples_per_packet),
         };
 
-        // Export resampled audio for verification (optional)
+        // Export resampled audio for verification (optional) - only in debug mode
+        #[cfg(debug_assertions)]
         if let Some(input_path) = path.as_ref().file_stem().and_then(|s| s.to_str()) {
-            let output_path = format!("tmp/{}_resampled_48k.wav", input_path);
-            if let Err(e) = reader.export_to_wav(&output_path) {
-                log::warn!("Failed to export resampled audio to {}: {}", output_path, e);
+            if let Ok(()) = std::fs::create_dir_all("tmp") {
+                let output_path = format!("tmp/{}_resampled_48k.wav", input_path);
+                if let Err(e) = reader.export_to_wav(&output_path) {
+                    log::warn!("Failed to export resampled audio to {}: {}", output_path, e);
+                }
             }
         }
 
@@ -218,7 +225,6 @@ impl AudioReader {
         Self::resample_linear_interpolation(data, from_rate, to_rate, channels)
     }
     
-    /// Fallback linear interpolation resampling (simple but reliable)
     fn resample_linear_interpolation(
         data: Vec<f32>, 
         from_rate: u32, 
@@ -262,7 +268,6 @@ impl AudioReader {
             }
         }
         
-        log::info!("Linear interpolation complete: {} output samples", output_data.len());
         Ok(output_data)
     }
 
@@ -310,7 +315,6 @@ impl AudioReader {
     /// Read exactly samples_per_packet frames (e.g., 48 samples for 1ms at 48kHz)
     pub fn read_next_frame(&mut self) -> Result<Option<AudioSample>> {
         let channels = self.info.channels as usize;
-        let total_samples_needed = self.samples_per_packet * channels;
         let frames_per_channel = self.audio_data.len() / channels;
         
         // Check if we have enough frames left
@@ -318,22 +322,22 @@ impl AudioReader {
             return Ok(None); // End of file
         }
         
-        // Extract exactly samples_per_packet frames from our buffer
-        let mut packet_data = Vec::with_capacity(total_samples_needed);
+        // Reuse the pre-allocated buffer to avoid allocations
+        self.packet_buffer.clear();
         
         for ch in 0..channels {
             let channel_start = ch * frames_per_channel;
             let frame_start = channel_start + self.read_position;
             let frame_end = frame_start + self.samples_per_packet;
             
-            packet_data.extend_from_slice(&self.audio_data[frame_start..frame_end]);
+            self.packet_buffer.extend_from_slice(&self.audio_data[frame_start..frame_end]);
         }
         
         // Advance read position
         self.read_position += self.samples_per_packet;
         
         Ok(Some(AudioSample {
-            data: packet_data,
+            data: self.packet_buffer.clone(), // Clone the reused buffer data
             channels: self.info.channels,
             sample_rate: self.info.sample_rate,
             frames: self.samples_per_packet,
@@ -362,16 +366,15 @@ impl AudioReader {
         // Pre-allocate non-interleaved buffer: [ch1_samples..., ch2_samples..., ch3_samples...]
         let mut noninterleaved_samples = Vec::with_capacity(frames * channels as usize);
 
-        // Helper macro to convert to non-interleaved format
+        // Helper macro to convert to non-interleaved format - optimized version
         macro_rules! convert_to_noninterleaved {
-            ($buf:expr, $convert:expr) => {
-                // Convert channel by channel (non-interleaved layout)
+            ($buf:expr, $normalize:expr) => {
                 for channel_idx in 0..channels {
                     let channel_data = $buf.chan(channel_idx as usize);
-                    for frame_idx in 0..channel_data.len().min(frames) {
+                    let channel_len = channel_data.len().min(frames);
+                    for frame_idx in 0..channel_len {
                         let sample = channel_data[frame_idx];
-                        let normalized = $convert(sample);
-                        noninterleaved_samples.push(normalized);
+                        noninterleaved_samples.push($normalize(sample));
                     }
                 }
             };
@@ -396,8 +399,11 @@ impl AudioReader {
                 }
             }
             AudioBufferRef::U32(buf) => {
-                convert_to_noninterleaved!(buf, |sample| (sample as f32 - 2147483648.0)
-                    / 2147483648.0);
+                convert_to_noninterleaved!(buf, |sample| {
+                    // Avoid overflow by using saturating arithmetic
+                    let normalized = sample as f64 / u32::MAX as f64;
+                    (normalized * 2.0 - 1.0) as f32
+                });
             }
             AudioBufferRef::S8(buf) => {
                 convert_to_noninterleaved!(buf, |sample| sample as f32 / 128.0);
