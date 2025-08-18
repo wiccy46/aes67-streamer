@@ -12,19 +12,18 @@ fn main() {
     let args = match config::parse_args() {
         Ok(args) => args,
         Err(e) => {
-            eprintln!("Error parsing arguments: {}", e);
+            eprintln!("Error parsing arguments: {e}");
             process::exit(1);
         }
     };
 
-    log::info!("Parsed arguments: {:?}", args);
-
+    log::info!("Parsed arguments: {args:?}");
     log::info!("Audio file: {}", args.file);
     log::info!("Multicast address: {}", args.address);
     log::info!("Port: {}", args.port);
 
     if let Some(interface) = &args.interface {
-        log::info!("Network interface: {}", interface);
+        log::info!("Network interface: {interface}");
     }
 
     // Create streaming configuration
@@ -36,7 +35,6 @@ fn main() {
         ptp_domain: args.ptp_domain.unwrap_or(0),
         src_quality: audio::ResamplerQuality::Medium,
         verbose: args.verbose,
-        enable_threading: true,
     };
 
     // Create and start streamer
@@ -49,14 +47,14 @@ fn main() {
     ) {
         Ok(streamer) => streamer,
         Err(e) => {
-            log::error!("Failed to create streamer: {}", e);
+            log::error!("Failed to create streamer: {e}");
             process::exit(1);
         }
     };
 
     // Start streaming
     if let Err(e) = streamer.start() {
-        log::error!("Streaming failed: {}", e);
+        log::error!("Streaming failed: {e}");
         process::exit(1);
     }
 

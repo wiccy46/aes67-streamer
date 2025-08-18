@@ -128,7 +128,7 @@ impl AudioPipeline {
                 
                 let mut sequence = 0u64;
                 
-                log::info!("Audio thread started: reading from {}", audio_file);
+                log::info!("Audio thread started: reading from {audio_file}");
                 
                 while !shutdown.load(Ordering::Relaxed) {
                     let start_time = Instant::now();
@@ -146,11 +146,11 @@ impl AudioPipeline {
                                 Ok(_) => {
                                     sequence += 1;
                                     if config.verbose && sequence % 1000 == 0 {
-                                        log::debug!("Audio thread: read {} frames", sequence);
+                                        log::debug!("Audio thread: read {sequence} frames");
                                     }
                                 }
                                 Err(crossbeam_channel::TrySendError::Full(_)) => {
-                                    log::warn!("Audio buffer full, dropping frame {}", sequence);
+                                    log::warn!("Audio buffer full, dropping frame {sequence}");
                                     sequence += 1;
                                 }
                                 Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
@@ -207,7 +207,7 @@ impl AudioPipeline {
                                 Ok(_) => {
                                     processed_count += 1;
                                     if config.verbose && processed_count % 1000 == 0 {
-                                        log::debug!("Processing thread: processed {} frames", processed_count);
+                                        log::debug!("Processing thread: processed {processed_count} frames");
                                     }
                                 }
                                 Err(crossbeam_channel::TrySendError::Full(_)) => {
@@ -230,7 +230,7 @@ impl AudioPipeline {
                     }
                 }
                 
-                log::info!("Processing thread finished: processed {} frames", processed_count);
+                log::info!("Processing thread finished: processed {processed_count} frames");
                 Ok(())
             })
             .context("Failed to spawn processing thread")?;
@@ -241,7 +241,6 @@ impl AudioPipeline {
     /// Set thread priority (Linux specific implementation)
     #[cfg(target_os = "linux")]
     fn set_thread_priority(priority: u8) {
-        use std::os::unix::thread::JoinHandleExt;
         
         // Map priority 0-3 to nice values (-19 to 0)
         let nice_value = match priority {
@@ -255,7 +254,7 @@ impl AudioPipeline {
             libc::setpriority(libc::PRIO_PROCESS, 0, nice_value);
         }
         
-        log::debug!("Set thread priority to nice value: {}", nice_value);
+        log::debug!("Set thread priority to nice value: {nice_value}");
     }
     
     /// Placeholder for other platforms
