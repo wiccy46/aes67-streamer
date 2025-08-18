@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Build a cross-platform (Linux/macOS/Windows) CLI tool in Rust for streaming audio files over RTP networks on multicast with AES67 copliance.
+Build a cross-platform (Linux/macOS/Windows) CLI tool in Rust for streaming audio files over RTP networks on multicast with AES67 compliance.
 
 ## Core Requirements
 
@@ -392,6 +392,14 @@ python3 tests/aes67_validator.py --capture --duration 10
 4. ✅ Real-time packet transmission with 1ms timing
 5. ✅ **PROVEN WORKING**: 1000 packets/6.9MB transmitted successfully
 
+### ✅ Phase 4: PTP Synchronization (COMPLETE)
+1. ✅ PTP client implementation using `statime` crate
+2. ✅ IEEE 1588-2008 PTPv2 protocol support
+3. ✅ Clock synchronization with microsecond precision
+4. ✅ Master/slave state management
+5. ✅ Integration with RTP timestamp generation
+6. ✅ **PROVEN WORKING**: PTP synchronization with -500ns offset accuracy
+
 ### ✅ Phase 5: Integration & Optimization (COMPLETE)
 1. ✅ Sample rate conversion with `rubato` crate (integrated at file load time)
 2. ✅ Real-time thread priorities per platform (Linux implementation)
@@ -404,12 +412,12 @@ python3 tests/aes67_validator.py --capture --duration 10
 9. ❌ Advanced socket options (DSCP marking, etc.) - **Future enhancement**
 
 ## Known Issues & Limitations
-- 🐛 Audio reader boundary bug (index out of bounds at end of file)
 - ⚠️ No automatic interface discovery (manual IP required)
 - ⚠️ No loop playback support
 - ⚠️ PTP simulation mode (not connected to actual PTP network)
 - ⚠️ No Best Master Clock Algorithm (BMCA) implementation
-- ⚠️ Multi-threaded pipeline integration pending (infrastructure ready)
+- ⚠️ Advanced socket options (DSCP marking, etc.) not yet implemented
+- ⚠️ Memory pool pre-allocation for RTP packets not yet implemented
 
 ## Success Criteria
 
