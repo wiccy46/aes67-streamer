@@ -9,7 +9,7 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use rubato::Resampler;
 use anyhow::Context;
 
 use crate::utils::{flat_noninterleaved_to_channels, channels_to_flat_noninterleaved};
@@ -156,99 +156,26 @@ impl AudioReader {
 
         log::info!("Loaded {} samples from file", all_samples.len());
 
+
         // Apply resampling if needed (AES67 requires 48kHz)
         if target_sample_rate != sample_rate {
             log::info!("Resampling from {} Hz to {} Hz (AES67 compliance)", sample_rate, target_sample_rate);
             all_samples = Self::resample_audio_data_simple(all_samples, sample_rate, target_sample_rate, channels)?;
             log::info!("Resampled to {} samples", all_samples.len());
-            target_sample_rate
         } else {
             log::info!("No resampling needed: already at {} Hz", sample_rate);
-            sample_rate
         };
 
         Ok((all_samples, channels))
     }
 
-    /// Resample audio data in chunks
-    fn resample_audio_data(
-        data: Vec<f32>, 
-        from_rate: u32, 
-        to_rate: u32, 
-        channels: u32, 
-    ) -> Result<Vec<f32>> {
-        let ratio = to_rate as f64 / from_rate as f64;
-        let chunk_size = 1024; // Process 1024 frames at a time
-
-        let params = SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
-        };
-        
-        let mut resampler = SincFixedIn::<f32>::new(
-            ratio,
-            2.0,
-            params,
-            chunk_size,
-            channels as usize,
-        ).context("Failed to create resampler")?;
-
-        let total_frames = data.len() / channels as usize;
-        let input_channels = flat_noninterleaved_to_channels(&data, channels as usize, total_frames);
-        
-        log::info!("Resampling {} frames in chunks of {}", total_frames, chunk_size);
-        
-        // Process audio in chunks
-        let mut all_output_channels: Vec<Vec<f32>> = vec![Vec::new(); channels as usize];
-        let mut frame_offset = 0;
-        
-        while frame_offset < total_frames {
-            let frames_remaining = total_frames - frame_offset;
-            let frames_to_process = frames_remaining.min(chunk_size);
-            
-            // Extract chunk for each channel
-            let mut chunk_channels = Vec::new();
-            for ch in 0..channels as usize {
-                let start = frame_offset;
-                let end = frame_offset + frames_to_process;
-                let mut chunk = input_channels[ch][start..end].to_vec();
-                
-                // Pad chunk to exact chunk_size if needed (except for last chunk)
-                if frames_to_process < chunk_size && frames_remaining > frames_to_process {
-                    chunk.resize(chunk_size, 0.0);
-                }
-                
-                chunk_channels.push(chunk);
-            }
-            
-            // Process this chunk - rubato expects None for normal chunks
-            let output_chunk = resampler.process(&chunk_channels, None)?;
-            
-            // Accumulate results
-            for (ch, output_channel) in output_chunk.iter().enumerate() {
-                all_output_channels[ch].extend_from_slice(output_channel);
-            }
-            
-            frame_offset += frames_to_process;
-        }
-        
-        log::info!("Resampling complete: {} output frames", 
-                   if all_output_channels.is_empty() { 0 } else { all_output_channels[0].len() });
-        
-        Ok(channels_to_flat_noninterleaved(&all_output_channels))
-    }
-
-    /// Simple resampling for the entire audio file
     fn resample_audio_data_simple(
         data: Vec<f32>, 
         from_rate: u32, 
         to_rate: u32, 
         channels: u32
     ) -> Result<Vec<f32>> {
-        use rubato::{SincFixedOut, WindowFunction, SincInterpolationType, SincInterpolationParameters};
+        use rubato::{SincFixedIn, WindowFunction, SincInterpolationType, SincInterpolationParameters};
         
         let ratio = to_rate as f64 / from_rate as f64;
         let frames = data.len() / channels as usize;
@@ -266,18 +193,82 @@ impl AudioReader {
             window: WindowFunction::BlackmanHarris2,
         };
         
-        let output_frames = (frames as f64 * ratio).round() as usize;
-        let mut resampler = SincFixedOut::<f32>::new(
+        // Use SincFixedIn which is more flexible with input buffer sizes
+        let chunk_size = 1024.min(frames); // Process in chunks, but handle small files
+        let mut resampler = SincFixedIn::<f32>::new(
             ratio,
             2.0,
             params,
-            output_frames,
+            chunk_size,
             channels as usize,
         ).context("Failed to create simple resampler")?;
+
+        log::info!("Created resampler: ratio={:.3}, chunk_size={}, channels={}", ratio, chunk_size, channels);
+        log::info!("Input channels: count={}, frames_per_channel={:?}", 
+                   input_channels.len(), 
+                   input_channels.iter().map(|ch| ch.len()).collect::<Vec<_>>());
         
-        // Process all data at once
-        let output_channels = resampler.process(&input_channels, None)?;
+        // Process all data in chunks
+        let mut output_channels: Vec<Vec<f32>> = vec![Vec::new(); channels as usize];
+        let mut input_pos = 0;
         
+        while input_pos < frames {
+            let chunk_frames = (frames - input_pos).min(chunk_size);
+            let mut chunk_channels: Vec<Vec<f32>> = Vec::new();
+            
+            // Extract chunk for each channel
+            for ch_idx in 0..channels as usize {
+                let mut chunk = input_channels[ch_idx][input_pos..input_pos + chunk_frames].to_vec();
+                
+                // Pad chunk to chunk_size if it's the last partial chunk
+                if chunk.len() < chunk_size {
+                    log::debug!("Padding final chunk from {} to {} frames", chunk.len(), chunk_size);
+                    chunk.resize(chunk_size, 0.0);
+                }
+                
+                chunk_channels.push(chunk);
+            }
+            
+            log::debug!("Processing chunk: frames={}, position={}, padded_size={}", 
+                       chunk_frames, input_pos, chunk_channels[0].len());
+            
+            // Process chunk
+            let chunk_output = match resampler.process(&chunk_channels, None) {
+                Ok(output) => {
+                    log::debug!("Chunk processed successfully, output frames: {}", output[0].len());
+                    output
+                },
+                Err(e) => {
+                    log::error!("Chunk processing failed at position {}: {:?}", input_pos, e);
+                    return Err(anyhow::anyhow!("Chunk resampling failed: {:?}", e));
+                }
+            };
+            
+            // For the final chunk, we may need to trim padding-induced extra output
+            if input_pos + chunk_frames >= frames {
+                // This is the final chunk - calculate how much of the output is valid
+                let ratio = to_rate as f64 / from_rate as f64;
+                let expected_output_frames = (chunk_frames as f64 * ratio).round() as usize;
+                
+                log::debug!("Final chunk: trimming output from {} to {} frames", 
+                           chunk_output[0].len(), expected_output_frames);
+                
+                // Append only the valid portion of the final chunk output
+                for (ch_idx, channel_output) in chunk_output.iter().enumerate() {
+                    let valid_output = &channel_output[..expected_output_frames.min(channel_output.len())];
+                    output_channels[ch_idx].extend_from_slice(valid_output);
+                }
+            } else {
+                // Append full chunk output for non-final chunks
+                for (ch_idx, channel_output) in chunk_output.iter().enumerate() {
+                    output_channels[ch_idx].extend_from_slice(channel_output);
+                }
+            }
+            
+            input_pos += chunk_frames;
+        }
+
+        log::info!("Finished resampling successfully");
         log::info!("Simple resampling complete: {} output frames", output_channels[0].len());
         
         Ok(channels_to_flat_noninterleaved(&output_channels))
