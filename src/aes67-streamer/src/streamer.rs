@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use audio::{AudioNode, AudioReader, GainNode, ResamplerQuality};
+use audio::{AudioNode, AudioReader, GainNode};
 use network::{resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer};
 use ptp::{PtpClient, PtpConfig};
 use std::net::Ipv4Addr;
@@ -18,49 +18,45 @@ pub struct Aes67Streamer {
 
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
-    /// Target sample rate for streaming (None = use file's native rate)
-    pub target_sample_rate: Option<u32>,
-    /// Actual sample rate used for streaming (set after file loading)
-    pub actual_sample_rate: u32,
-    /// Packet time in milliseconds (1ms typical for AES67, 48 samples per packet)
+    /// Target sample rate for streaming, for now only support 48000 Hz
+    pub target_sample_rate: u32,
+    /// Packet time in milliseconds (1ms typical for AES67, 48 samples per packet, can be lower for RAVENNA)
     pub packet_time_ms: u32,
+    /// Gain in decibels
     pub gain_db: f32,
     /// PTP domain (0 for AES67)
     pub ptp_domain: u8,
-    /// Sample rate conversion quality
-    pub src_quality: ResamplerQuality,
     pub verbose: bool,
 }
 
 impl Default for StreamConfig {
     fn default() -> Self {
         Self {
-            target_sample_rate: None,  // Use file's native rate by default
-            actual_sample_rate: 48000, // Will be updated after file loading
+            target_sample_rate: 48000,
             packet_time_ms: 1,
             gain_db: 0.0,
             ptp_domain: 0,
-            src_quality: ResamplerQuality::Medium,
             verbose: false,
         }
     }
 }
 
 /// An Aes67Streamer is the main entry of the app
-/// It loads an audio file, creates a multicast udp socket, packetize the audio data, and sends it over the network.
+/// It loads an audio file, creates a multicast udp socket, 
+/// packetize the audio data, and sends it over the network.
 impl Aes67Streamer {
-    /// Create new AES67 streamer
     pub fn new(
         audio_file: &str,
         multicast_addr: &str,
         port: u16,
         interface: Option<&str>,
-        mut config: StreamConfig,
+        config: StreamConfig,
     ) -> Result<Self> {
-        log::info!("Initializing AES67 Streamer");
+        log::info!("Initializing AES67 Streamer...");
+        let samples_per_packet = config.target_sample_rate as usize / (config.packet_time_ms as usize * 1000);
 
         let audio_reader =
-            AudioReader::with_resampling(audio_file, config.target_sample_rate, config.src_quality)
+            AudioReader::with_resampling(audio_file, config.target_sample_rate, samples_per_packet)
                 .context("Failed to load audio file")?;
 
         let audio_info = audio_reader.info();
@@ -71,27 +67,6 @@ impl Aes67Streamer {
             audio_info.duration
         );
 
-        config.actual_sample_rate = audio_info.sample_rate;
-
-        if let Some(target_rate) = config.target_sample_rate {
-            if target_rate != audio_info.sample_rate {
-                log::info!(
-                    "Sample rate conversion applied: {} Hz → {} Hz, quality: {:?}",
-                    // Note: audio_info shows the final rate, so we need to infer the original
-                    target_rate,
-                    audio_info.sample_rate,
-                    config.src_quality
-                );
-            } else {
-                log::info!("No resampling needed: file already at target {target_rate} Hz");
-            }
-        } else {
-            log::info!(
-                "Using file's native sample rate: {} Hz",
-                audio_info.sample_rate
-            );
-        }
-
         // Create audio processing chain
         let gain_node = GainNode::new_db(config.gain_db);
         let audio_chain = gain_node.into_chain();
@@ -100,7 +75,7 @@ impl Aes67Streamer {
         let local_ip = if let Some(iface) = interface {
             resolve_interface_ip(iface).context("Failed to resolve network interface")?
         } else {
-            Ipv4Addr::new(127, 0, 0, 1) // Default to loopback
+            Ipv4Addr::new(127, 0, 0, 1)
         };
 
         let multicast_ip: Ipv4Addr = multicast_addr
@@ -126,12 +101,12 @@ impl Aes67Streamer {
         let mut rtp_packetizer = RtpPacketizer::new(
             payload_type,
             ssrc,
-            config.actual_sample_rate,
+            config.target_sample_rate,
             packet_time_us,
         );
 
         // Set initial PTP timestamp
-        if let Ok(ptp_timestamp) = ptp_client.rtp_timestamp(config.actual_sample_rate) {
+        if let Ok(ptp_timestamp) = ptp_client.rtp_timestamp(config.target_sample_rate) {
             rtp_packetizer.set_base_timestamp(ptp_timestamp);
             log::info!("RTP base timestamp set from PTP: {ptp_timestamp}");
         }
@@ -149,7 +124,6 @@ impl Aes67Streamer {
         })
     }
 
-    /// Start streaming audio
     pub fn start(&mut self) -> Result<()> {
         log::info!("Starting audio stream...");
 
@@ -164,6 +138,7 @@ impl Aes67Streamer {
             // Read next audio frame
             match self.audio_reader.read_next_frame()? {
                 Some(mut sample) => {
+                    println!("Frames: {}", sample.frames);
                     // Process audio through chain
                     self.audio_chain
                         .process(&mut sample)
@@ -177,7 +152,7 @@ impl Aes67Streamer {
                     // Create RTP packet with PTP timestamp
                     let rtp_packet = if let Ok(ptp_timestamp) = self
                         .ptp_client
-                        .rtp_timestamp(self.config.actual_sample_rate)
+                        .rtp_timestamp(self.config.target_sample_rate)
                     {
                         self.rtp_packetizer
                             .create_packet_with_timestamp(&sample, ptp_timestamp)
@@ -247,12 +222,10 @@ mod tests {
     #[test]
     fn test_stream_config_default() {
         let config = StreamConfig::default();
-        assert_eq!(config.target_sample_rate, None);
-        assert_eq!(config.actual_sample_rate, 48000);
+        assert_eq!(config.target_sample_rate, 48000);
         assert_eq!(config.packet_time_ms, 1);
         assert_eq!(config.gain_db, 0.0);
         assert_eq!(config.ptp_domain, 0);
-        assert_eq!(config.src_quality, ResamplerQuality::Medium);
         assert!(!config.verbose);
     }
 

@@ -3,9 +3,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use symphonia::core::audio::{AudioBufferRef, Signal};
-use symphonia::core::codecs::{Decoder, DecoderOptions};
+use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -14,45 +14,6 @@ use anyhow::Context;
 
 use crate::utils::{flat_noninterleaved_to_channels, channels_to_flat_noninterleaved};
 use crate::Result;
-
-/// Sample rate conversion quality settings
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ResamplerQuality {
-    /// Fastest conversion, lower quality
-    Fast,
-    /// Balanced speed and quality
-    Medium,
-    /// Highest quality, slower conversion
-    High,
-}
-
-impl ResamplerQuality {
-    fn to_rubato_params(self) -> SincInterpolationParameters {
-        match self {
-            ResamplerQuality::Fast => SincInterpolationParameters {
-                sinc_len: 64,
-                f_cutoff: 0.9,
-                interpolation: SincInterpolationType::Linear,
-                oversampling_factor: 16,
-                window: WindowFunction::BlackmanHarris2,
-            },
-            ResamplerQuality::Medium => SincInterpolationParameters {
-                sinc_len: 128,
-                f_cutoff: 0.95,
-                interpolation: SincInterpolationType::Cubic,
-                oversampling_factor: 32,
-                window: WindowFunction::BlackmanHarris2,
-            },
-            ResamplerQuality::High => SincInterpolationParameters {
-                sinc_len: 256,
-                f_cutoff: 0.98,
-                interpolation: SincInterpolationType::Cubic,
-                oversampling_factor: 64,
-                window: WindowFunction::BlackmanHarris2,
-            },
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct AudioInfo {
@@ -76,33 +37,68 @@ pub struct AudioSample {
 }
 
 pub struct AudioReader {
-    format_reader: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
-    track_id: u32,
+    /// Pre-loaded audio data
+    audio_data: Vec<f32>,
+    /// Current read position in frames
+    read_position: usize,
+    /// Audio file information
     info: AudioInfo,
-    /// Optional resampler for converting to target sample rate
-    resampler: Option<SincFixedIn<f32>>,
-    /// Target sample rate (if different from file)
-    target_sample_rate: Option<u32>,
+    /// Samples per packet (e.g., 48 for 1ms at 48kHz)
+    samples_per_packet: usize,
 }
 
 impl AudioReader {
-    /// Create new audio reader without resampling
+    /// Create new audio reader - always targets 48kHz for AES67 compliance
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::with_resampling(path, None, ResamplerQuality::Medium)
+        Self::with_resampling(path, 48000, 48)
     }
     
-    /// Create new audio reader with optional resampling to target sample rate
+    /// Create new audio reader with target sample rate and packet size
     pub fn with_resampling<P: AsRef<Path>>(
         path: P, 
-        target_sample_rate: Option<u32>,
-        quality: ResamplerQuality
+        target_sample_rate: u32,
+        samples_per_packet: usize,
     ) -> Result<Self> {
-        let file = File::open(path.as_ref())?;
+        // Load entire audio file into memory first
+        let (audio_data, channels) = Self::load_audio_file(path.as_ref(), target_sample_rate)?;
+        
+        // Calculate duration
+        let total_frames = audio_data.len() / channels as usize;
+        let duration = Duration::from_secs_f64(total_frames as f64 / target_sample_rate as f64);
+        
+        log::info!(
+            "Audio file loaded: {} samples total, {} channels, {:.2}s duration, {} samples per packet",
+            audio_data.len(),
+            channels,
+            duration.as_secs_f64(),
+            samples_per_packet
+        );
+
+        Ok(AudioReader {
+            audio_data,
+            read_position: 0,
+            info: AudioInfo {
+                sample_rate: target_sample_rate,
+                channels,
+                duration: Some(duration),
+                bit_depth: Some(24),
+                format: "Loaded".to_string(),
+            },
+            samples_per_packet,
+        })
+    }
+
+    pub fn info(&self) -> &AudioInfo {
+        &self.info
+    }
+
+    /// Load entire audio file into memory with optional resampling
+    fn load_audio_file(path: &Path, target_sample_rate: u32) -> Result<(Vec<f32>, u32)> {
+        let file = File::open(path)?;
         let media_source = MediaSourceStream::new(Box::new(file), Default::default());
 
         let mut hint = Hint::new();
-        if let Some(extension) = path.as_ref().extension() {
+        if let Some(extension) = path.extension() {
             if let Some(ext_str) = extension.to_str() {
                 hint.with_extension(ext_str);
             }
@@ -117,7 +113,7 @@ impl AudioReader {
             &metadata_opts,
         )?;
 
-        let format_reader = probed.format;
+        let mut format_reader = probed.format;
 
         // Find the default audio track
         let track = format_reader
@@ -127,163 +123,200 @@ impl AudioReader {
             .ok_or_else(|| anyhow::anyhow!("No audio tracks found"))?;
 
         let track_id = track.id;
-
         let decoder_opts = DecoderOptions::default();
-        let decoder = symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts)?;
+        let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts)?;
 
         let codec_params = &track.codec_params;
-        
-        // Validate essential audio properties - fail explicitly if missing
         let sample_rate = codec_params.sample_rate
-            .ok_or_else(|| anyhow::anyhow!("Audio file is missing sample rate information - file may be corrupted or unsupported"))?;
-            
+            .ok_or_else(|| anyhow::anyhow!("Audio file is missing sample rate"))?;
         let channels = codec_params.channels
             .map(|ch| ch.count() as u32)
-            .ok_or_else(|| anyhow::anyhow!("Audio file is missing channel information - file may be corrupted or unsupported"))?;
-            
-        // Validate reasonable values
-        if sample_rate == 0 {
-            return Err(anyhow::anyhow!("Invalid sample rate (0) - audio file is corrupted"));
-        }
-        if channels == 0 {
-            return Err(anyhow::anyhow!("Invalid channel count (0) - audio file is corrupted"));
-        }
-        if channels > 64 {
-            return Err(anyhow::anyhow!("Unsupported channel count ({}) - maximum 64 channels supported", channels));
-        }
+            .ok_or_else(|| anyhow::anyhow!("Audio file is missing channel information"))?;
+
+        log::info!("Loading audio file: {} Hz, {} channels", sample_rate, channels);
+
+        // Collect all audio data
+        let mut all_samples = Vec::new();
         
-        let info = AudioInfo {
-            sample_rate,
-            channels,
-            duration: codec_params.time_base.and_then(|tb| {
-                codec_params.n_frames.map(|frames| {
-                    Duration::from_secs_f64(frames as f64 / tb.denom as f64 * tb.numer as f64)
-                })
-            }),
-            bit_depth: codec_params.bits_per_sample,
-            format: format!("{:?}", codec_params.codec),
-        };
+        loop {
+            let packet = match format_reader.next_packet() {
+                Ok(packet) => packet,
+                Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            };
 
-        log::info!(
-            "Loaded audio file - Sample Rate: {} Hz, Channels: {}, Duration: {}, Format: {}",
-            info.sample_rate,
-            info.channels,
-            info.duration
-                .map(|d| format!("{:.2}s", d.as_secs_f64()))
-                .unwrap_or_else(|| "Unknown".to_string()),
-            info.format
-        );
-
-        // Setup resampler if target sample rate is different
-        let (resampler, final_sample_rate) = if let Some(target_rate) = target_sample_rate {
-            if target_rate != sample_rate {
-                log::info!("Setting up resampler: {} Hz → {} Hz", sample_rate, target_rate);
-                
-                let ratio = target_rate as f64 / sample_rate as f64;
-                let params = quality.to_rubato_params();
-                let chunk_size = 1024;
-                
-                let resampler = SincFixedIn::<f32>::new(
-                    ratio,
-                    2.0, // Maximum ratio change
-                    params,
-                    chunk_size,
-                    channels as usize,
-                ).context("Failed to create resampler")?;
-                
-                (Some(resampler), target_rate)
-            } else {
-                log::debug!("Target sample rate matches file sample rate, no resampling needed");
-                (None, sample_rate)
+            if packet.track_id() != track_id {
+                continue;
             }
+
+            let decoded = decoder.decode(&packet)?;
+            let audio_sample = Self::convert_audio_buffer(decoded)?;
+            all_samples.extend_from_slice(&audio_sample.data);
+        }
+
+        log::info!("Loaded {} samples from file", all_samples.len());
+
+        // Apply resampling if needed (AES67 requires 48kHz)
+        if target_sample_rate != sample_rate {
+            log::info!("Resampling from {} Hz to {} Hz (AES67 compliance)", sample_rate, target_sample_rate);
+            all_samples = Self::resample_audio_data_simple(all_samples, sample_rate, target_sample_rate, channels)?;
+            log::info!("Resampled to {} samples", all_samples.len());
+            target_sample_rate
         } else {
-            (None, sample_rate)
+            log::info!("No resampling needed: already at {} Hz", sample_rate);
+            sample_rate
         };
 
-        // Update info with final sample rate
-        let mut final_info = info;
-        final_info.sample_rate = final_sample_rate;
-
-        Ok(AudioReader {
-            format_reader,
-            decoder,
-            track_id,
-            info: final_info,
-            resampler,
-            target_sample_rate,
-        })
+        Ok((all_samples, channels))
     }
 
-    pub fn info(&self) -> &AudioInfo {
-        &self.info
+    /// Resample audio data in chunks
+    fn resample_audio_data(
+        data: Vec<f32>, 
+        from_rate: u32, 
+        to_rate: u32, 
+        channels: u32, 
+    ) -> Result<Vec<f32>> {
+        let ratio = to_rate as f64 / from_rate as f64;
+        let chunk_size = 1024; // Process 1024 frames at a time
+
+        let params = SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: WindowFunction::BlackmanHarris2,
+        };
+        
+        let mut resampler = SincFixedIn::<f32>::new(
+            ratio,
+            2.0,
+            params,
+            chunk_size,
+            channels as usize,
+        ).context("Failed to create resampler")?;
+
+        let total_frames = data.len() / channels as usize;
+        let input_channels = flat_noninterleaved_to_channels(&data, channels as usize, total_frames);
+        
+        log::info!("Resampling {} frames in chunks of {}", total_frames, chunk_size);
+        
+        // Process audio in chunks
+        let mut all_output_channels: Vec<Vec<f32>> = vec![Vec::new(); channels as usize];
+        let mut frame_offset = 0;
+        
+        while frame_offset < total_frames {
+            let frames_remaining = total_frames - frame_offset;
+            let frames_to_process = frames_remaining.min(chunk_size);
+            
+            // Extract chunk for each channel
+            let mut chunk_channels = Vec::new();
+            for ch in 0..channels as usize {
+                let start = frame_offset;
+                let end = frame_offset + frames_to_process;
+                let mut chunk = input_channels[ch][start..end].to_vec();
+                
+                // Pad chunk to exact chunk_size if needed (except for last chunk)
+                if frames_to_process < chunk_size && frames_remaining > frames_to_process {
+                    chunk.resize(chunk_size, 0.0);
+                }
+                
+                chunk_channels.push(chunk);
+            }
+            
+            // Process this chunk - rubato expects None for normal chunks
+            let output_chunk = resampler.process(&chunk_channels, None)?;
+            
+            // Accumulate results
+            for (ch, output_channel) in output_chunk.iter().enumerate() {
+                all_output_channels[ch].extend_from_slice(output_channel);
+            }
+            
+            frame_offset += frames_to_process;
+        }
+        
+        log::info!("Resampling complete: {} output frames", 
+                   if all_output_channels.is_empty() { 0 } else { all_output_channels[0].len() });
+        
+        Ok(channels_to_flat_noninterleaved(&all_output_channels))
     }
 
+    /// Simple resampling for the entire audio file
+    fn resample_audio_data_simple(
+        data: Vec<f32>, 
+        from_rate: u32, 
+        to_rate: u32, 
+        channels: u32
+    ) -> Result<Vec<f32>> {
+        use rubato::{SincFixedOut, WindowFunction, SincInterpolationType, SincInterpolationParameters};
+        
+        let ratio = to_rate as f64 / from_rate as f64;
+        let frames = data.len() / channels as usize;
+        
+        log::info!("Simple resampling: {} frames, ratio {:.3}", frames, ratio);
+        
+        // Convert to channel format for rubato
+        let input_channels = flat_noninterleaved_to_channels(&data, channels as usize, frames);
+        
+        let params = SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: WindowFunction::BlackmanHarris2,
+        };
+        
+        let output_frames = (frames as f64 * ratio).round() as usize;
+        let mut resampler = SincFixedOut::<f32>::new(
+            ratio,
+            2.0,
+            params,
+            output_frames,
+            channels as usize,
+        ).context("Failed to create simple resampler")?;
+        
+        // Process all data at once
+        let output_channels = resampler.process(&input_channels, None)?;
+        
+        log::info!("Simple resampling complete: {} output frames", output_channels[0].len());
+        
+        Ok(channels_to_flat_noninterleaved(&output_channels))
+    }
+
+    /// Read exactly samples_per_packet frames (e.g., 48 samples for 1ms at 48kHz)
     pub fn read_next_frame(&mut self) -> Result<Option<AudioSample>> {
-        // Get the next packet from the format reader
-        let packet = match self.format_reader.next_packet() {
-            Ok(packet) => packet,
-            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(None);
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        // Skip packets that don't belong to our track
-        if packet.track_id() != self.track_id {
-            return self.read_next_frame();
+        let channels = self.info.channels as usize;
+        let total_samples_needed = self.samples_per_packet * channels;
+        let frames_per_channel = self.audio_data.len() / channels;
+        
+        // Check if we have enough frames left
+        if self.read_position + self.samples_per_packet > frames_per_channel {
+            return Ok(None); // End of file
         }
-
-        // Decode the packet
-        let decoded = self.decoder.decode(&packet)?;
-
-        // Convert to f32 samples
-        let mut audio_sample = Self::convert_audio_buffer(decoded)?;
-
-        // Apply resampling if needed
-        if self.resampler.is_some() {
-            audio_sample = self.apply_resampling(audio_sample)?;
+        
+        // Extract exactly samples_per_packet frames from our buffer
+        let mut packet_data = Vec::with_capacity(total_samples_needed);
+        
+        for ch in 0..channels {
+            let channel_start = ch * frames_per_channel;
+            let frame_start = channel_start + self.read_position;
+            let frame_end = frame_start + self.samples_per_packet;
+            
+            packet_data.extend_from_slice(&self.audio_data[frame_start..frame_end]);
         }
-
-        Ok(Some(audio_sample))
+        
+        // Advance read position
+        self.read_position += self.samples_per_packet;
+        
+        Ok(Some(AudioSample {
+            data: packet_data,
+            channels: self.info.channels,
+            sample_rate: self.info.sample_rate,
+            frames: self.samples_per_packet,
+        }))
     }
 
-    fn apply_resampling(&mut self, sample: AudioSample) -> Result<AudioSample> {
-        let resampler = self.resampler.as_mut().unwrap();
-        
-        // Convert flat non-interleaved to channels for rubato
-        let input_channels = flat_noninterleaved_to_channels(&sample.data, sample.channels as usize, sample.frames);
 
-        // Validate input data
-        if input_channels.is_empty() {
-            return Err(anyhow::anyhow!("No input channels for resampling"));
-        }
-        
-        // Check if we have valid data lengths
-        let expected_frames = sample.frames;
-        for (i, channel) in input_channels.iter().enumerate() {
-            if channel.len() != expected_frames {
-                log::warn!("Channel {} has {} frames, expected {}", i, channel.len(), expected_frames);
-            }
-        }
-
-        // Process through resampler
-        let output_channels = resampler
-            .process(&input_channels, None)
-            .with_context(|| format!("Failed to resample: {} channels, {} frames each", input_channels.len(), input_channels.get(0).map(|ch| ch.len()).unwrap_or(0)))?;
-
-        // Convert back to flat non-interleaved format
-        let output_data = channels_to_flat_noninterleaved(&output_channels);
-        
-        // Calculate new frame count
-        let new_frames = if output_channels.is_empty() { 0 } else { output_channels[0].len() };
-
-        Ok(AudioSample {
-            data: output_data,
-            channels: sample.channels,
-            sample_rate: self.target_sample_rate.unwrap_or(sample.sample_rate),
-            frames: new_frames,
-        })
-    }
 
     fn convert_audio_buffer(buffer: AudioBufferRef) -> Result<AudioSample> {
         let spec = *buffer.spec();
@@ -391,16 +424,6 @@ mod tests {
         assert_eq!(info.sample_rate, 48000);
         assert_eq!(info.channels, 2);
         assert_eq!(info.bit_depth, Some(24));
-    }
-
-    #[test]
-    fn test_resampler_quality_settings() {
-        let fast_params = ResamplerQuality::Fast.to_rubato_params();
-        let high_params = ResamplerQuality::High.to_rubato_params();
-        
-        // High quality should have longer sinc length
-        assert!(high_params.sinc_len > fast_params.sinc_len);
-        assert!(high_params.f_cutoff > fast_params.f_cutoff);
     }
 
     #[test]
