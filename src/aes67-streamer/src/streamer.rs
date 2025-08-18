@@ -130,15 +130,13 @@ impl Aes67Streamer {
         let mut packets_sent = 0;
         let mut bytes_sent = 0;
         let start_time = Instant::now();
-        let target_interval = Duration::from_millis(self.config.packet_time_ms as u64);
+        let packet_duration = Duration::from_millis(self.config.packet_time_ms as u64);
 
         loop {
-            let loop_start = Instant::now();
 
             // Read next audio frame
             match self.audio_reader.read_next_frame()? {
                 Some(mut sample) => {
-                    println!("Frames: {}", sample.frames);
                     // Process audio through chain
                     self.audio_chain
                         .process(&mut sample)
@@ -189,9 +187,16 @@ impl Aes67Streamer {
                     }
 
                     // Timing control - maintain packet rate
-                    let elapsed = loop_start.elapsed();
-                    if elapsed < target_interval {
-                        thread::sleep(target_interval - elapsed);
+                    // Calculate when this packet should be sent based on audio timeline
+                    let target_time = start_time + packet_duration * packets_sent as u32;
+                    let now = Instant::now();
+                    
+                    if now < target_time {
+                        thread::sleep(target_time - now);
+                    } else if packets_sent % 1000 == 0 && now > target_time + packet_duration {
+                        // Warn if we're falling behind real-time
+                        let behind_ms = (now - target_time).as_millis();
+                        log::warn!("Streaming falling behind by {}ms at packet {}", behind_ms, packets_sent);
                     }
                 }
                 None => {
