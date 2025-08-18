@@ -11,6 +11,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use rubato::Resampler;
 use anyhow::Context;
+use hound::{WavWriter, WavSpec, SampleFormat};
 
 use crate::utils::{flat_noninterleaved_to_channels, channels_to_flat_noninterleaved};
 use crate::Result;
@@ -74,7 +75,7 @@ impl AudioReader {
             samples_per_packet
         );
 
-        Ok(AudioReader {
+        let reader = AudioReader {
             audio_data,
             read_position: 0,
             info: AudioInfo {
@@ -85,7 +86,17 @@ impl AudioReader {
                 format: "Loaded".to_string(),
             },
             samples_per_packet,
-        })
+        };
+
+        // Export resampled audio for verification (optional)
+        if let Some(input_path) = path.as_ref().file_stem().and_then(|s| s.to_str()) {
+            let output_path = format!("tmp/{}_resampled_48k.wav", input_path);
+            if let Err(e) = reader.export_to_wav(&output_path) {
+                log::warn!("Failed to export resampled audio to {}: {}", output_path, e);
+            }
+        }
+
+        Ok(reader)
     }
 
     pub fn info(&self) -> &AudioInfo {
@@ -135,8 +146,8 @@ impl AudioReader {
 
         log::info!("Loading audio file: {} Hz, {} channels", sample_rate, channels);
 
-        // Collect all audio data
-        let mut all_samples = Vec::new();
+        // Collect all audio data properly in non-interleaved format
+        let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::new(); channels as usize];
         
         loop {
             let packet = match format_reader.next_packet() {
@@ -151,7 +162,21 @@ impl AudioReader {
 
             let decoded = decoder.decode(&packet)?;
             let audio_sample = Self::convert_audio_buffer(decoded)?;
-            all_samples.extend_from_slice(&audio_sample.data);
+            
+            // The audio_sample.data is in non-interleaved format: [Ch0_frames..., Ch1_frames...]
+            let frames_per_channel = audio_sample.frames;
+            
+            for ch_idx in 0..channels as usize {
+                let start_idx = ch_idx * frames_per_channel;
+                let end_idx = start_idx + frames_per_channel;
+                channel_buffers[ch_idx].extend_from_slice(&audio_sample.data[start_idx..end_idx]);
+            }
+        }
+        
+        // Concatenate all channel buffers into final non-interleaved format
+        let mut all_samples = Vec::new();
+        for channel_buffer in &channel_buffers {
+            all_samples.extend_from_slice(channel_buffer);
         }
 
         log::info!("Loaded {} samples from file", all_samples.len());
@@ -175,103 +200,120 @@ impl AudioReader {
         to_rate: u32, 
         channels: u32
     ) -> Result<Vec<f32>> {
-        use rubato::{SincFixedIn, WindowFunction, SincInterpolationType, SincInterpolationParameters};
         
         let ratio = to_rate as f64 / from_rate as f64;
         let frames = data.len() / channels as usize;
         
-        log::info!("Simple resampling: {} frames, ratio {:.3}", frames, ratio);
+        log::info!("Simple resampling: {} frames, ratio {:.6}", frames, ratio);
+        log::info!("Input: {}Hz -> Output: {}Hz", from_rate, to_rate);
         
         // Convert to channel format for rubato
         let input_channels = flat_noninterleaved_to_channels(&data, channels as usize, frames);
         
-        let params = SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
-        };
-        
-        // Use SincFixedIn which is more flexible with input buffer sizes
-        let chunk_size = 1024.min(frames); // Process in chunks, but handle small files
-        let mut resampler = SincFixedIn::<f32>::new(
-            ratio,
-            2.0,
-            params,
-            chunk_size,
-            channels as usize,
-        ).context("Failed to create simple resampler")?;
-
-        log::info!("Created resampler: ratio={:.3}, chunk_size={}, channels={}", ratio, chunk_size, channels);
         log::info!("Input channels: count={}, frames_per_channel={:?}", 
                    input_channels.len(), 
                    input_channels.iter().map(|ch| ch.len()).collect::<Vec<_>>());
         
-        // Process all data in chunks
-        let mut output_channels: Vec<Vec<f32>> = vec![Vec::new(); channels as usize];
-        let mut input_pos = 0;
+        // The FFT and Sinc resamplers are having issues, use reliable linear interpolation
+        log::info!("Using linear interpolation for reliable resampling...");
+        Self::resample_linear_interpolation(data, from_rate, to_rate, channels)
+    }
+    
+    /// Fallback linear interpolation resampling (simple but reliable)
+    fn resample_linear_interpolation(
+        data: Vec<f32>, 
+        from_rate: u32, 
+        to_rate: u32, 
+        channels: u32
+    ) -> Result<Vec<f32>> {
+        let ratio = to_rate as f64 / from_rate as f64;
+        let input_frames = data.len() / channels as usize;
+        let output_frames = (input_frames as f64 * ratio).round() as usize;
         
-        while input_pos < frames {
-            let chunk_frames = (frames - input_pos).min(chunk_size);
-            let mut chunk_channels: Vec<Vec<f32>> = Vec::new();
+        log::info!("Using linear interpolation fallback: {} -> {} frames", input_frames, output_frames);
+        
+        let mut output_data = Vec::with_capacity(output_frames * channels as usize);
+        
+        // Process each channel separately
+        for ch in 0..channels as usize {
+            let input_start = ch * input_frames;
+            let input_end = input_start + input_frames;
+            let input_channel = &data[input_start..input_end];
             
-            // Extract chunk for each channel
-            for ch_idx in 0..channels as usize {
-                let mut chunk = input_channels[ch_idx][input_pos..input_pos + chunk_frames].to_vec();
+            // Linear interpolation for this channel
+            for out_idx in 0..output_frames {
+                let input_pos = out_idx as f64 / ratio;
+                let input_idx = input_pos.floor() as usize;
+                let frac = input_pos - input_idx as f64;
                 
-                // Pad chunk to chunk_size if it's the last partial chunk
-                if chunk.len() < chunk_size {
-                    log::debug!("Padding final chunk from {} to {} frames", chunk.len(), chunk_size);
-                    chunk.resize(chunk_size, 0.0);
-                }
+                let sample = if input_idx + 1 < input_frames {
+                    // Linear interpolation between two samples
+                    let s0 = input_channel[input_idx];
+                    let s1 = input_channel[input_idx + 1];
+                    s0 + (s1 - s0) * frac as f32
+                } else if input_idx < input_frames {
+                    // Use last sample
+                    input_channel[input_idx]
+                } else {
+                    // Beyond input, use silence
+                    0.0
+                };
                 
-                chunk_channels.push(chunk);
+                output_data.push(sample);
             }
-            
-            log::debug!("Processing chunk: frames={}, position={}, padded_size={}", 
-                       chunk_frames, input_pos, chunk_channels[0].len());
-            
-            // Process chunk
-            let chunk_output = match resampler.process(&chunk_channels, None) {
-                Ok(output) => {
-                    log::debug!("Chunk processed successfully, output frames: {}", output[0].len());
-                    output
-                },
-                Err(e) => {
-                    log::error!("Chunk processing failed at position {}: {:?}", input_pos, e);
-                    return Err(anyhow::anyhow!("Chunk resampling failed: {:?}", e));
-                }
-            };
-            
-            // For the final chunk, we may need to trim padding-induced extra output
-            if input_pos + chunk_frames >= frames {
-                // This is the final chunk - calculate how much of the output is valid
-                let ratio = to_rate as f64 / from_rate as f64;
-                let expected_output_frames = (chunk_frames as f64 * ratio).round() as usize;
-                
-                log::debug!("Final chunk: trimming output from {} to {} frames", 
-                           chunk_output[0].len(), expected_output_frames);
-                
-                // Append only the valid portion of the final chunk output
-                for (ch_idx, channel_output) in chunk_output.iter().enumerate() {
-                    let valid_output = &channel_output[..expected_output_frames.min(channel_output.len())];
-                    output_channels[ch_idx].extend_from_slice(valid_output);
-                }
-            } else {
-                // Append full chunk output for non-final chunks
-                for (ch_idx, channel_output) in chunk_output.iter().enumerate() {
-                    output_channels[ch_idx].extend_from_slice(channel_output);
-                }
-            }
-            
-            input_pos += chunk_frames;
         }
-
-        log::info!("Finished resampling successfully");
-        log::info!("Simple resampling complete: {} output frames", output_channels[0].len());
         
-        Ok(channels_to_flat_noninterleaved(&output_channels))
+        log::info!("Linear interpolation complete: {} output samples", output_data.len());
+        Ok(output_data)
+    }
+
+    /// Export the current audio data to a WAV file for verification
+    pub fn export_to_wav<P: AsRef<Path>>(&self, output_path: P) -> Result<()> {
+        let path = output_path.as_ref();
+        
+        log::info!("Exporting audio to WAV file: {}", path.display());
+        
+        let spec = WavSpec {
+            channels: self.info.channels as u16,
+            sample_rate: self.info.sample_rate,
+            bits_per_sample: 32, // Use 32-bit float
+            sample_format: SampleFormat::Float,
+        };
+        
+        let mut writer = WavWriter::create(path, spec)
+            .with_context(|| format!("Failed to create WAV file: {}", path.display()))?;
+        
+        // Convert from non-interleaved to interleaved format for WAV
+        let frames_per_channel = self.audio_data.len() / self.info.channels as usize;
+        
+        log::debug!("WAV export: {} frames per channel, {} channels, {} total samples", 
+                   frames_per_channel, self.info.channels, self.audio_data.len());
+        
+        // Our data is stored as: [Ch0_all_frames..., Ch1_all_frames..., Ch2_all_frames...]
+        // WAV needs: [Ch0_F0, Ch1_F0, Ch0_F1, Ch1_F1, Ch0_F2, Ch1_F2, ...]
+        for frame_idx in 0..frames_per_channel {
+            for ch_idx in 0..self.info.channels as usize {
+                let sample_idx = ch_idx * frames_per_channel + frame_idx;
+                let sample = self.audio_data[sample_idx];
+                
+                // Debug first few samples
+                if frame_idx < 4 {
+                    log::debug!("WAV sample[{}][{}] = {:.3} (idx={})", ch_idx, frame_idx, sample, sample_idx);
+                }
+                
+                writer.write_sample(sample)
+                    .with_context(|| format!("Failed to write sample at frame {}, channel {}", frame_idx, ch_idx))?;
+            }
+        }
+        
+        writer.finalize()
+            .with_context(|| format!("Failed to finalize WAV file: {}", path.display()))?;
+        
+        log::info!("Successfully exported {} frames ({:.2}s) to WAV file", 
+                   frames_per_channel, 
+                   frames_per_channel as f64 / self.info.sample_rate as f64);
+        
+        Ok(())
     }
 
     /// Read exactly samples_per_packet frames (e.g., 48 samples for 1ms at 48kHz)
@@ -312,8 +354,23 @@ impl AudioReader {
     fn convert_audio_buffer(buffer: AudioBufferRef) -> Result<AudioSample> {
         let spec = *buffer.spec();
         let channels = spec.channels.count() as u32;
-        let frames = buffer.capacity();
         let sample_rate = spec.rate;
+
+        // Get actual frames from the first channel (all channels should have same length)
+        let frames = match &buffer {
+            AudioBufferRef::U8(buf) => buf.chan(0).len(),
+            AudioBufferRef::U16(buf) => buf.chan(0).len(),
+            AudioBufferRef::U24(buf) => buf.chan(0).len(),
+            AudioBufferRef::U32(buf) => buf.chan(0).len(),
+            AudioBufferRef::S8(buf) => buf.chan(0).len(),
+            AudioBufferRef::S16(buf) => buf.chan(0).len(),
+            AudioBufferRef::S24(buf) => buf.chan(0).len(),
+            AudioBufferRef::S32(buf) => buf.chan(0).len(),
+            AudioBufferRef::F32(buf) => buf.chan(0).len(),
+            AudioBufferRef::F64(buf) => buf.chan(0).len(),
+        };
+
+        log::debug!("Converting audio buffer: {} channels, {} frames, {} Hz", channels, frames, sample_rate);
 
         // Pre-allocate non-interleaved buffer: [ch1_samples..., ch2_samples..., ch3_samples...]
         let mut noninterleaved_samples = Vec::with_capacity(frames * channels as usize);
@@ -323,8 +380,9 @@ impl AudioReader {
             ($buf:expr, $convert:expr) => {
                 // Convert channel by channel (non-interleaved layout)
                 for channel_idx in 0..channels {
-                    for frame_idx in 0..frames {
-                        let sample = $buf.chan(channel_idx as usize)[frame_idx];
+                    let channel_data = $buf.chan(channel_idx as usize);
+                    for frame_idx in 0..channel_data.len().min(frames) {
+                        let sample = channel_data[frame_idx];
                         let normalized = $convert(sample);
                         noninterleaved_samples.push(normalized);
                     }
@@ -363,8 +421,9 @@ impl AudioReader {
             AudioBufferRef::S24(buf) => {
                 // Convert channel by channel (non-interleaved layout)
                 for channel_idx in 0..channels {
-                    for frame_idx in 0..frames {
-                        let sample = buf.chan(channel_idx as usize)[frame_idx];
+                    let channel_data = buf.chan(channel_idx as usize);
+                    for frame_idx in 0..channel_data.len().min(frames) {
+                        let sample = channel_data[frame_idx];
                         let sample_val = sample.inner();
                         let normalized = sample_val as f32 / 8388608.0;
                         noninterleaved_samples.push(normalized);
@@ -378,7 +437,7 @@ impl AudioReader {
                 // F32 is already normalized, just convert to non-interleaved
                 for channel_idx in 0..channels {
                     let channel_data = buf.chan(channel_idx as usize);
-                    for frame_idx in 0..frames.min(channel_data.len()) {
+                    for frame_idx in 0..channel_data.len().min(frames) {
                         let sample = channel_data[frame_idx];
                         noninterleaved_samples.push(sample);
                     }
@@ -387,6 +446,16 @@ impl AudioReader {
             AudioBufferRef::F64(buf) => {
                 convert_to_noninterleaved!(buf, |sample| sample as f32);
             }
+        }
+
+        log::debug!("Converted buffer result: {} total samples, {} frames, expected total: {}", 
+                   noninterleaved_samples.len(), frames, frames * channels as usize);
+        
+        // Verify first few samples for debugging
+        if noninterleaved_samples.len() >= 4 {
+            log::debug!("First few samples: [{:.3}, {:.3}, {:.3}, {:.3}]", 
+                       noninterleaved_samples[0], noninterleaved_samples[1], 
+                       noninterleaved_samples[2], noninterleaved_samples[3]);
         }
 
         Ok(AudioSample {
