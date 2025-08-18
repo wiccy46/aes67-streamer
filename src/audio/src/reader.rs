@@ -453,6 +453,51 @@ impl AudioReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::fs;
+    use tempfile::NamedTempFile;
+
+    // Helper function to create mock stereo audio data in non-interleaved format
+    fn create_mock_audio_data(frames: usize, channels: u32) -> Vec<f32> {
+        let mut data = Vec::with_capacity(frames * channels as usize);
+        
+        // Generate a simple sine wave for each channel
+        for ch in 0..channels {
+            for frame in 0..frames {
+                let frequency = 440.0 + (ch as f32 * 220.0); // Different freq per channel
+                let sample = (2.0 * std::f32::consts::PI * frequency * frame as f32 / 48000.0).sin();
+                data.push(sample * 0.5); // Reduce amplitude to avoid clipping
+            }
+        }
+        data
+    }
+
+    // Helper to create a simple WAV file for testing
+    fn create_test_wav_file(sample_rate: u32, channels: u16, frames: usize) -> NamedTempFile {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        
+        let mut writer = hound::WavWriter::new(&mut temp_file, spec)
+            .expect("Failed to create WAV writer");
+        
+        // Write interleaved audio data
+        for frame in 0..frames {
+            for ch in 0..channels {
+                let frequency = 440.0 + (ch as f32 * 220.0);
+                let sample = (2.0 * std::f32::consts::PI * frequency * frame as f32 / sample_rate as f32).sin();
+                writer.write_sample(sample * 0.5).expect("Failed to write sample");
+            }
+        }
+        
+        writer.finalize().expect("Failed to finalize WAV");
+        temp_file
+    }
 
     #[test]
     fn test_audio_info_creation() {
@@ -483,6 +528,247 @@ mod tests {
         assert_eq!(sample.sample_rate, 44100);
         assert_eq!(sample.frames, 2);
         assert_eq!(sample.data.len(), sample.frames * sample.channels as usize);
+    }
+
+    #[test]
+    fn test_resample_linear_interpolation_upsampling() {
+        // Test upsampling from 44.1kHz to 48kHz
+        let input_frames = 100;
+        let channels = 2;
+        let input_data = create_mock_audio_data(input_frames, channels);
+        
+        let result = AudioReader::resample_linear_interpolation(
+            input_data, 44100, 48000, channels
+        ).expect("Resampling failed");
+        
+        let expected_output_frames = ((input_frames as f64) * (48000.0 / 44100.0)).round() as usize;
+        let expected_total_samples = expected_output_frames * channels as usize;
+        
+        assert_eq!(result.len(), expected_total_samples);
+        
+        // Check that samples are in reasonable range
+        for sample in &result {
+            assert!(sample.abs() <= 1.0, "Sample out of range: {}", sample);
+        }
+    }
+
+    #[test]
+    fn test_resample_linear_interpolation_downsampling() {
+        // Test downsampling from 48kHz to 44.1kHz
+        let input_frames = 100;
+        let channels = 2;
+        let input_data = create_mock_audio_data(input_frames, channels);
+        
+        let result = AudioReader::resample_linear_interpolation(
+            input_data, 48000, 44100, channels
+        ).expect("Resampling failed");
+        
+        let expected_output_frames = ((input_frames as f64) * (44100.0 / 48000.0)).round() as usize;
+        let expected_total_samples = expected_output_frames * channels as usize;
+        
+        assert_eq!(result.len(), expected_total_samples);
+        
+        // Check that samples are in reasonable range
+        for sample in &result {
+            assert!(sample.abs() <= 1.0, "Sample out of range: {}", sample);
+        }
+    }
+
+    #[test]
+    fn test_resample_no_change() {
+        // Test when input and output sample rates are the same
+        let input_frames = 48;
+        let channels = 2;
+        let input_data = create_mock_audio_data(input_frames, channels);
+        let original_data = input_data.clone();
+        
+        let result = AudioReader::resample_linear_interpolation(
+            input_data, 48000, 48000, channels
+        ).expect("Resampling failed");
+        
+        assert_eq!(result.len(), original_data.len());
+        
+        // Should be identical when no resampling is needed
+        for (i, (&original, &resampled)) in original_data.iter().zip(result.iter()).enumerate() {
+            assert!((original - resampled).abs() < 1e-6, 
+                   "Sample {} differs: {} vs {}", i, original, resampled);
+        }
+    }
+
+    #[test]
+    fn test_read_next_frame_sequential() {
+        let temp_file = create_test_wav_file(48000, 2, 144); // 3ms of audio at 48kHz
+        let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
+            .expect("Failed to create reader");
+
+        let mut frames_read = 0;
+        let mut last_sample_data: Option<Vec<f32>> = None;
+
+        // Should be able to read exactly 3 frames (144 samples / 48 samples per frame)
+        while let Some(sample) = reader.read_next_frame().expect("Read failed") {
+            assert_eq!(sample.frames, 48);
+            assert_eq!(sample.channels, 2);
+            assert_eq!(sample.sample_rate, 48000);
+            assert_eq!(sample.data.len(), 48 * 2); // 48 frames × 2 channels
+            
+            // Verify data is different from previous frame (unless it's a DC signal)
+            if let Some(ref prev_data) = last_sample_data {
+                let _is_different = sample.data.iter().zip(prev_data.iter())
+                    .any(|(a, b)| (a - b).abs() > 1e-6);
+                // Note: for sine waves, consecutive frames should be different
+                // This check could be expanded for regression testing
+            }
+            
+            last_sample_data = Some(sample.data.clone());
+            frames_read += 1;
+        }
+
+        assert_eq!(frames_read, 3, "Should read exactly 3 frames");
+        
+        // Next read should return None
+        assert!(reader.read_next_frame().expect("Read failed").is_none());
+    }
+
+    #[test]
+    fn test_read_next_frame_end_of_file() {
+        // Create a very short file (only 24 samples = 0.5ms at 48kHz)
+        let temp_file = create_test_wav_file(48000, 2, 24);
+        let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
+            .expect("Failed to create reader");
+
+        // Should not be able to read a full frame since file is too short
+        let result = reader.read_next_frame().expect("Read failed");
+        assert!(result.is_none(), "Should return None for insufficient data");
+    }
+
+    #[test]
+    fn test_packet_buffer_reuse() {
+        let temp_file = create_test_wav_file(48000, 2, 96); // 2ms of audio
+        let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
+            .expect("Failed to create reader");
+
+        // Read first frame
+        let sample1 = reader.read_next_frame().expect("Read failed")
+            .expect("Should have data");
+        let ptr1 = sample1.data.as_ptr();
+
+        // Read second frame  
+        let sample2 = reader.read_next_frame().expect("Read failed")
+            .expect("Should have data");
+        let ptr2 = sample2.data.as_ptr();
+
+        // The internal buffer is reused, but the returned data is cloned
+        // So the pointers will be different, but we can verify the buffer is working
+        assert_ne!(ptr1, ptr2, "Returned data should be independent clones");
+        
+        // Verify both samples have correct structure
+        assert_eq!(sample1.data.len(), 96); // 48 frames × 2 channels
+        assert_eq!(sample2.data.len(), 96);
+        assert_eq!(sample1.frames, 48);
+        assert_eq!(sample2.frames, 48);
+    }
+
+    #[test]
+    fn test_wav_export_roundtrip() {
+        let temp_input = create_test_wav_file(48000, 2, 96);
+        let reader = AudioReader::with_resampling(temp_input.path(), 48000, 48)
+            .expect("Failed to create reader");
+
+        // Export to another temp file
+        let temp_output = NamedTempFile::new().expect("Failed to create temp output");
+        reader.export_to_wav(temp_output.path()).expect("Export failed");
+
+        // Verify the exported file exists and has content
+        let metadata = fs::metadata(temp_output.path()).expect("Can't read exported file metadata");
+        assert!(metadata.len() > 0, "Exported file should not be empty");
+
+        // Try to read the exported file back
+        let reader2 = AudioReader::with_resampling(temp_output.path(), 48000, 48)
+            .expect("Failed to read exported file");
+        
+        let info = reader2.info();
+        assert_eq!(info.sample_rate, 48000);
+        assert_eq!(info.channels, 2);
+    }
+
+    #[test]
+    fn test_mono_audio_handling() {
+        let temp_file = create_test_wav_file(48000, 1, 48); // Mono audio
+        let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
+            .expect("Failed to create reader");
+
+        let sample = reader.read_next_frame().expect("Read failed")
+            .expect("Should have data");
+        
+        assert_eq!(sample.channels, 1);
+        assert_eq!(sample.frames, 48);
+        assert_eq!(sample.data.len(), 48); // 48 frames × 1 channel
+    }
+
+    #[test]
+    fn test_multichannel_audio_handling() {
+        let temp_file = create_test_wav_file(48000, 8, 48); // 8-channel audio
+        let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
+            .expect("Failed to create reader");
+
+        let sample = reader.read_next_frame().expect("Read failed")
+            .expect("Should have data");
+        
+        assert_eq!(sample.channels, 8);
+        assert_eq!(sample.frames, 48);
+        assert_eq!(sample.data.len(), 48 * 8); // 48 frames × 8 channels
+    }
+
+    #[test]
+    fn test_different_packet_sizes() {
+        let temp_file = create_test_wav_file(48000, 2, 240); // 5ms of audio
+        
+        // Test different packet sizes
+        for &packet_size in &[12, 24, 48, 96] { // 0.25ms, 0.5ms, 1ms, 2ms at 48kHz
+            let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, packet_size)
+                .expect("Failed to create reader");
+
+            let sample = reader.read_next_frame().expect("Read failed");
+            if let Some(sample) = sample {
+                assert_eq!(sample.frames, packet_size);
+                assert_eq!(sample.data.len(), packet_size * 2); // 2 channels
+            }
+        }
+    }
+
+    #[test]
+    fn test_audio_reader_info_consistency() {
+        let temp_file = create_test_wav_file(48000, 2, 96);
+        let reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
+            .expect("Failed to create reader");
+
+        let info = reader.info();
+        assert_eq!(info.sample_rate, 48000);
+        assert_eq!(info.channels, 2);
+        assert_eq!(info.bit_depth, Some(24)); // AES67 standard
+        assert_eq!(info.format, "Loaded");
+        assert!(info.duration.is_some());
+        
+        // Duration should be reasonable for our test data
+        let duration = info.duration.unwrap();
+        assert!(duration.as_millis() > 0);
+        assert!(duration.as_millis() < 100); // Very short test file
+    }
+
+    #[test]
+    fn test_error_handling_nonexistent_file() {
+        let result = AudioReader::new("nonexistent_file.wav");
+        assert!(result.is_err(), "Should fail for nonexistent file");
+    }
+
+    #[test]
+    fn test_error_handling_invalid_file() {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        temp_file.write_all(b"This is not a valid audio file").expect("Write failed");
+        temp_file.flush().expect("Flush failed");
+
+        let result = AudioReader::new(temp_file.path());
+        assert!(result.is_err(), "Should fail for invalid audio file");
     }
 
     #[test]
