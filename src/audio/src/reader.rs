@@ -9,11 +9,10 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use rubato::Resampler;
 use anyhow::Context;
 use hound::{WavWriter, WavSpec, SampleFormat};
 
-use crate::utils::{flat_noninterleaved_to_channels, channels_to_flat_noninterleaved};
+use crate::utils::flat_noninterleaved_to_channels;
 use crate::Result;
 
 #[derive(Debug, Clone)]
@@ -286,20 +285,12 @@ impl AudioReader {
         // Convert from non-interleaved to interleaved format for WAV
         let frames_per_channel = self.audio_data.len() / self.info.channels as usize;
         
-        log::debug!("WAV export: {} frames per channel, {} channels, {} total samples", 
-                   frames_per_channel, self.info.channels, self.audio_data.len());
-        
         // Our data is stored as: [Ch0_all_frames..., Ch1_all_frames..., Ch2_all_frames...]
         // WAV needs: [Ch0_F0, Ch1_F0, Ch0_F1, Ch1_F1, Ch0_F2, Ch1_F2, ...]
         for frame_idx in 0..frames_per_channel {
             for ch_idx in 0..self.info.channels as usize {
                 let sample_idx = ch_idx * frames_per_channel + frame_idx;
                 let sample = self.audio_data[sample_idx];
-                
-                // Debug first few samples
-                if frame_idx < 4 {
-                    log::debug!("WAV sample[{}][{}] = {:.3} (idx={})", ch_idx, frame_idx, sample, sample_idx);
-                }
                 
                 writer.write_sample(sample)
                     .with_context(|| format!("Failed to write sample at frame {}, channel {}", frame_idx, ch_idx))?;
@@ -349,8 +340,6 @@ impl AudioReader {
         }))
     }
 
-
-
     fn convert_audio_buffer(buffer: AudioBufferRef) -> Result<AudioSample> {
         let spec = *buffer.spec();
         let channels = spec.channels.count() as u32;
@@ -369,8 +358,6 @@ impl AudioReader {
             AudioBufferRef::F32(buf) => buf.chan(0).len(),
             AudioBufferRef::F64(buf) => buf.chan(0).len(),
         };
-
-        log::debug!("Converting audio buffer: {} channels, {} frames, {} Hz", channels, frames, sample_rate);
 
         // Pre-allocate non-interleaved buffer: [ch1_samples..., ch2_samples..., ch3_samples...]
         let mut noninterleaved_samples = Vec::with_capacity(frames * channels as usize);
@@ -446,16 +433,6 @@ impl AudioReader {
             AudioBufferRef::F64(buf) => {
                 convert_to_noninterleaved!(buf, |sample| sample as f32);
             }
-        }
-
-        log::debug!("Converted buffer result: {} total samples, {} frames, expected total: {}", 
-                   noninterleaved_samples.len(), frames, frames * channels as usize);
-        
-        // Verify first few samples for debugging
-        if noninterleaved_samples.len() >= 4 {
-            log::debug!("First few samples: [{:.3}, {:.3}, {:.3}, {:.3}]", 
-                       noninterleaved_samples[0], noninterleaved_samples[1], 
-                       noninterleaved_samples[2], noninterleaved_samples[3]);
         }
 
         Ok(AudioSample {
