@@ -247,8 +247,6 @@ ip route get 239.69.83.1
 
 **Audio quality issues**
 ```bash
-# Force sample rate conversion
---sample-rate 48000
 
 # Check for packet loss
 python3 tests/aes67_validator.py --capture

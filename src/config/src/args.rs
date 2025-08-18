@@ -6,7 +6,6 @@ pub struct Args {
     pub address: String,
     pub port: u16,
     pub interface: Option<String>,
-    pub sample_rate: Option<u32>,
     pub ptp_domain: Option<u8>,
     pub config_file: Option<String>,
     pub verbose: bool,
@@ -50,13 +49,6 @@ pub fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
                 .help("Network interface name (e.g., eth0, wlan0)")
         )
         .arg(
-            Arg::new("sample-rate")
-                .long("sample-rate")
-                .value_name("RATE")
-                .help("Target sample rate in Hz (e.g., 48000)")
-                .value_parser(clap::value_parser!(u32))
-        )
-        .arg(
             Arg::new("ptp-domain")
                 .long("ptp-domain")
                 .value_name("DOMAIN")
@@ -84,7 +76,6 @@ pub fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
         address: matches.get_one::<String>("address").unwrap().clone(),
         port: *matches.get_one::<u16>("port").unwrap(),
         interface: matches.get_one::<String>("interface").cloned(),
-        sample_rate: matches.get_one::<u32>("sample-rate").copied(),
         ptp_domain: matches.get_one::<u8>("ptp-domain").copied(),
         config_file: matches.get_one::<String>("config").cloned(),
         verbose: matches.get_flag("verbose"),
@@ -103,7 +94,6 @@ mod tests {
             address: "239.192.1.1".to_string(),
             port: 5004,
             interface: Some("eth0".to_string()),
-            sample_rate: Some(48000),
             ptp_domain: Some(0),
             config_file: None,
             verbose: false,

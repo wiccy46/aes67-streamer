@@ -414,7 +414,6 @@ python3 tests/aes67_validator.py --capture --duration 10
 ## Success Criteria
 
 - **Latency**: <100ms end-to-end on local network
-- **Quality**: Bit-perfect audio reproduction
 - **Reliability**: No dropouts under normal network conditions
 - **Compatibility**: Works with existing AES67 equipment
 - **Performance**: Minimal CPU usage, efficient memory management

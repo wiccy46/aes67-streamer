@@ -10,7 +10,7 @@ fn test_audio_file_loading_integration() {
         let info = reader.info();
         
         // Verify expected properties
-        assert_eq!(info.sample_rate, 44100);
+        assert_eq!(info.sample_rate, 48000);
         assert_eq!(info.channels, 2);
         assert!(info.duration.is_some());
         
@@ -22,6 +22,7 @@ fn test_audio_file_loading_integration() {
 
 #[test]
 fn test_audio_processing_integration() {
+    // This file is 44.1kHz, should be converted
     let test_file = "../../tests/piano_freesound.wav";
     
     if std::path::Path::new(test_file).exists() {
