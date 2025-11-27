@@ -85,22 +85,16 @@ pub struct RtpPacketizer {
     samples_processed: u64,
     /// RTP header template
     header_template: RtpHeader,
-    /// Sample rate for timestamp calculation
-    sample_rate: u32,
-    /// Packet time in microseconds (typically 1000us = 1ms)
-    packet_time_us: u32,
 }
 
 impl RtpPacketizer {
     /// Create new RTP packetizer
-    pub fn new(payload_type: u8, ssrc: u32, sample_rate: u32, packet_time_us: u32) -> Self {
+    pub fn new(payload_type: u8, ssrc: u32) -> Self {
         Self {
             sequence_number: 0,
             base_timestamp: 0,
             samples_processed: 0,
             header_template: RtpHeader::new(payload_type, ssrc),
-            sample_rate,
-            packet_time_us,
         }
     }
 
@@ -237,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_rtp_packetizer() {
-        let mut packetizer = RtpPacketizer::new(97, 0x12345678, 48000, 1000);
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
 
         let sample = AudioSample {
             data: vec![0.5, -0.5, 0.25, -0.25],
@@ -264,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_audio_to_payload_conversion() {
-        let packetizer = RtpPacketizer::new(97, 0, 48000, 1000);
+        let packetizer = RtpPacketizer::new(97, 0);
 
         let sample = AudioSample {
             data: vec![1.0, -1.0, 0.0],
