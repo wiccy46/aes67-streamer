@@ -122,13 +122,7 @@ impl Aes67Streamer {
         // Create RTP packetizer using actual sample rate
         let payload_type = 97; // Dynamic payload type for AES67 (24-bit audio)
         let ssrc = 0x12345678; // TODO: Generate random SSRC
-        let packet_time_us = config.packet_time_ms * 1000;
-        let mut rtp_packetizer = RtpPacketizer::new(
-            payload_type,
-            ssrc,
-            config.target_sample_rate,
-            packet_time_us,
-        );
+        let mut rtp_packetizer = RtpPacketizer::new(payload_type, ssrc);
 
         // Set initial PTP timestamp
         if let Ok(ptp_timestamp) = ptp_client.rtp_timestamp(config.target_sample_rate) {
@@ -242,6 +236,12 @@ impl Aes67Streamer {
             "  Rate: {:.1} packets/sec",
             packets_sent as f64 / total_time.as_secs_f64()
         );
+
+        // Stop background services
+        log::info!("Stopping background services...");
+        self.sap_announcer.stop();
+        self.ptp_client.stop();
+        log::info!("Background services stopped");
 
         Ok(())
     }
