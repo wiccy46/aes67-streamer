@@ -3,7 +3,8 @@ use std::process;
 mod streamer;
 use streamer::{Aes67Streamer, StreamConfig};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     log::info!("Starting AES67 Audio Streamer");
@@ -42,7 +43,7 @@ fn main() {
         args.port,
         args.interface.as_deref(),
         stream_config,
-    ) {
+    ).await {
         Ok(streamer) => streamer,
         Err(e) => {
             log::error!("Failed to create streamer: {e}");
@@ -50,8 +51,8 @@ fn main() {
         }
     };
 
-    if let Err(e) = streamer.start() {
-        log::error!("Streaming failed: {e}");
+    if let Err(e) = streamer.start().await {
+        log::error!("Streaming failed: {:?}", e);
         process::exit(1);
     }
 

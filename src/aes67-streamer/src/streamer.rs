@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use audio::{AudioNode, AudioReader, GainNode};
-use network::{resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer};
+use network::{resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer, SapAnnouncer};
 use ptp::{PtpClient, PtpConfig};
 use std::net::Ipv4Addr;
-use std::thread;
 use std::time::{Duration, Instant};
+use tokio::time;
 
 /// AES67 Audio Streamer
 pub struct Aes67Streamer {
@@ -13,6 +13,7 @@ pub struct Aes67Streamer {
     rtp_packetizer: RtpPacketizer,
     multicast_socket: MulticastSocket,
     ptp_client: PtpClient,
+    sap_announcer: SapAnnouncer,
     config: StreamConfig,
 }
 
@@ -45,7 +46,7 @@ impl Default for StreamConfig {
 /// It loads an audio file, creates a multicast udp socket, 
 /// packetize the audio data, and sends it over the network.
 impl Aes67Streamer {
-    pub fn new(
+    pub async fn new(
         audio_file: &str,
         multicast_addr: &str,
         port: u16,
@@ -91,8 +92,32 @@ impl Aes67Streamer {
             interface_ip: local_ip,
             ..Default::default()
         };
-        let mut ptp_client = PtpClient::new(ptp_config).context("Failed to create PTP client")?;
-        ptp_client.start().context("Failed to start PTP client")?;
+        let ptp_client = PtpClient::new(ptp_config);
+        ptp_client.start().await.context("Failed to start PTP client")?;
+
+        // Setup SAP Announcer
+        // Generate simple SDP
+        let sdp = format!(
+            "v=0\r\n\
+             o=- 123456 123456 IN IP4 {}\r\n\
+             s=AES67 Streamer\r\n\
+             c=IN IP4 {}/{}\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP 97\r\n\
+             a=rtpmap:97 L24/{}/2\r\n\
+             a=ptime:{}\r\n\
+             a=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\r\n\
+             a=mediaclk:direct=0\r\n",
+            local_ip,
+            multicast_ip,
+            1, // TTL
+            port,
+            config.target_sample_rate,
+            config.packet_time_ms
+        );
+        
+        let sap_announcer = SapAnnouncer::new(sdp, local_ip).context("Failed to create SAP announcer")?;
+        sap_announcer.start().await.context("Failed to start SAP announcer")?;
 
         // Create RTP packetizer using actual sample rate
         let payload_type = 97; // Dynamic payload type for AES67 (24-bit audio)
@@ -120,11 +145,12 @@ impl Aes67Streamer {
             rtp_packetizer,
             multicast_socket,
             ptp_client,
+            sap_announcer,
             config,
         })
     }
 
-    pub fn start(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         log::info!("Starting audio stream...");
 
         let mut packets_sent = 0;
@@ -142,10 +168,7 @@ impl Aes67Streamer {
                         .process(&mut sample)
                         .context("Failed to process audio sample")?;
 
-                    // Process PTP synchronization
-                    self.ptp_client
-                        .tick()
-                        .context("Failed to process PTP synchronization")?;
+                    // PTP is handled in background task now
 
                     // Create RTP packet with PTP timestamp
                     let rtp_packet = if let Ok(ptp_timestamp) = self
@@ -175,8 +198,12 @@ impl Aes67Streamer {
                     packets_sent += 1;
                     bytes_sent += sent;
 
+                    if packets_sent % 100 == 0 {
+                        log::info!("Sent packet {}", packets_sent);
+                    }
+
                     if self.config.verbose && packets_sent % 1000 == 0 {
-                        let ptp_stats = self.ptp_client.stats();
+                        let ptp_stats = self.ptp_client.get_stats();
                         log::info!(
                             "Sent {} packets, {} bytes - PTP: {:?}, offset: {}ns",
                             packets_sent,
@@ -192,7 +219,7 @@ impl Aes67Streamer {
                     let now = Instant::now();
                     
                     if now < target_time {
-                        thread::sleep(target_time - now);
+                        time::sleep(target_time - now).await;
                     } else if packets_sent % 1000 == 0 && now > target_time + packet_duration {
                         // Warn if we're falling behind real-time
                         let behind_ms = (now - target_time).as_millis();
@@ -234,15 +261,15 @@ mod tests {
         assert!(!config.verbose);
     }
 
-    #[test]
-    fn test_streamer_creation() {
+    #[tokio::test]
+    async fn test_streamer_creation() {
         // This test requires a valid audio file
         let test_file = "../../tests/piano_freesound.wav";
 
         if std::path::Path::new(test_file).exists() {
             let config = StreamConfig::default();
             let streamer =
-                Aes67Streamer::new(test_file, "239.192.1.1", 5004, Some("127.0.0.1"), config);
+                Aes67Streamer::new(test_file, "239.192.1.1", 5004, Some("127.0.0.1"), config).await;
 
             assert!(
                 streamer.is_ok(),
