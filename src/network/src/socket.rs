@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use socket2::{Socket, Domain, Type, Protocol};
 
 /// Multicast socket configuration for AES67 streaming
 #[derive(Debug, Clone)]
@@ -54,13 +55,29 @@ impl MulticastSocket {
             config.port
         );
 
-        // Create UDP socket bound to local interface
-        let socket = UdpSocket::bind(config.local_socket_addr())
-            .context("Failed to bind UDP socket to local interface")?;
+        // Create socket using socket2
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        
+        // Allow reuse address and port (important for multicast)
+        socket.set_reuse_address(true)?;
+        #[cfg(unix)]
+        socket.set_reuse_port(true)?;
+
+        // Bind to local interface
+        // Note: For sending multicast, we usually bind to 0.0.0.0 or the interface IP.
+        // If we bind to 127.0.0.1, we might have issues sending to multicast group if routing isn't set.
+        // Let's try binding to the specific local address as before.
+        socket.bind(&config.local_socket_addr().into())?;
 
         // Configure multicast settings
-        Self::configure_multicast(&socket, &config)?;
+        socket.set_multicast_ttl_v4(config.ttl as u32)?;
+        socket.set_multicast_loop_v4(true)?;
+        
+        if !config.local_addr.is_unspecified() {
+            socket.set_multicast_if_v4(&config.local_addr)?;
+        }
 
+        let socket = UdpSocket::from(socket);
         let target_addr = config.multicast_socket_addr();
 
         log::info!("Multicast socket created successfully");
@@ -74,20 +91,7 @@ impl MulticastSocket {
         })
     }
 
-    /// Configure multicast-specific socket options
-    fn configure_multicast(socket: &UdpSocket, config: &MulticastConfig) -> Result<()> {
-        socket
-            .set_multicast_ttl_v4(config.ttl as u32)
-            .context("Failed to set multicast TTL")?;
-
-        socket
-            .set_multicast_loop_v4(false)
-            .context("Failed to disable multicast loopback")?;
-
-        log::debug!("Multicast configuration applied: TTL={}", config.ttl);
-
-        Ok(())
-    }
+    // Removed configure_multicast as it's now inline
 
     /// Send RTP packet to multicast group
     pub fn send_packet(&self, packet_data: &[u8]) -> Result<usize> {
