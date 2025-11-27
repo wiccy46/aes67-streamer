@@ -7,4 +7,5 @@ edition = "2024"
 statime = "0.2"
 anyhow = "1.0"
 log = "0.4"
-tokio = { version = "1.0", features = ["net", "time", "rt"] }
+tokio = { version = "1.0", features = ["net", "time", "rt", "macros", "sync"] }
+socket2 = { version = "0.6.1", features = ["all"] }
