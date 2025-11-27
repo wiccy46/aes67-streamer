@@ -38,7 +38,7 @@ pub fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
                 .long("port")
                 .value_name("PORT")
                 .help("UDP port number")
-                .required(true)
+                .default_value("5004")
                 .value_parser(clap::value_parser!(u16))
         )
         .arg(
