@@ -193,12 +193,12 @@ impl Aes67Streamer {
                     bytes_sent += sent;
 
                     if packets_sent % 100 == 0 {
-                        log::info!("Sent packet {}", packets_sent);
+                        log::debug!("Sent packet {}", packets_sent);
                     }
 
                     if self.config.verbose && packets_sent % 1000 == 0 {
                         let ptp_stats = self.ptp_client.get_stats();
-                        log::info!(
+                        log::debug!(
                             "Sent {} packets, {} bytes - PTP: {:?}, offset: {}ns",
                             packets_sent,
                             bytes_sent,
