@@ -44,7 +44,7 @@ cargo build --release
 
 ```bash
 # Stream an audio file to multicast address
-./target/release/aes67-streamer \
+./aes67-streamer \
   --file audio.wav \
   --address 239.69.83.1 \
   --port 5004 \
@@ -55,7 +55,7 @@ cargo build --release
 
 ```bash
 # Stream with custom sample rate and verbose logging
-./target/release/aes67-streamer \
+./aes67-streamer \
   --file audio.wav \
   --address 239.69.83.1 \
   --port 5004 \
@@ -67,16 +67,27 @@ cargo build --release
 ### Testing & Development
 ```bash
 # Local testing with loopback
-aes67-streamer --file test.wav --address 127.0.0.1 --port 5004 --interface 127.0.0.1
+./aes67-streamer --file test.wav --address 127.0.0.1 --port 5004 --interface 127.0.0.1
 
 # Monitor stream with VLC
-vlc rtp://@239.69.83.1:5004
+Add the .sdp file to VLC, example SDP (testing locally with your interface):
+
+v=0
+o=- 123456 123456 IN IP4 127.0.0.1
+s=AES67 Streamer
+c=IN IP4 239.192.1.1/32
+t=0 0
+m=audio 5004 RTP/AVP 97
+a=rtpmap:97 L24/48000/2
+a=ptime:1
+a=recvonly
+
 
 # Use ffplay to receive the stream
-ffplay -protocol_whitelist file,udp,rtp tests/unicast_sdp.sdp
+ffplay -protocol_whitelist file,udp,rtp YOURSDPFILE.sdp
 
 # Capture packets for analysis
-tcpdump -i eth0 -w capture.pcap host 127.0.0.1
+tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 ```
 
 ## 🛠️ Configuration
