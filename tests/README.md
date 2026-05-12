@@ -1,15 +1,15 @@
-# E2E Tests
+# E2E Tests for AES67 Streamer
 
-This directory contains end-to-end tests for the AES67 streamer.
-
-## Running tests
+## Running locally
 
 ```bash
-cargo test --test e2e_stream_test
+cargo test --test e2e_stream_test -- --nocapture
 ```
 
-Future improvements:
-- Use loopback interface for streaming + recording
-- Compare recorded PCM to input WAV using sox or hound
-- GStreamer pipeline for RTP receive in CI
-- CI matrix for different OS/network setups
+## Requirements for full E2E
+- Short test WAV file in `tests/`
+- Loopback networking
+- Tools: `ffmpeg`, `gst-launch-1.0` or pure Rust receiver
+
+## CI
+GitHub Actions on ubuntu-latest will run basic + full loopback tests.

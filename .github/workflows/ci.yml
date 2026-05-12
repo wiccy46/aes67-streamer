@@ -1,0 +1,34 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [ main, add-tests-infra ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build
+      run: cargo build --release
+
+    - name: Run unit + integration tests
+      run: cargo test
+
+    - name: Run E2E stream test
+      run: cargo test --test e2e_stream_test -- --nocapture
