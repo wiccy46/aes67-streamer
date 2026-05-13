@@ -5,10 +5,10 @@ use network::{
     SapAnnouncer,
 };
 use ptp::{PtpClient, PtpConfig};
-use std::future::{pending, Future};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
 /// AES67 Audio Streamer
 pub struct Aes67Streamer {
@@ -160,13 +160,10 @@ impl Aes67Streamer {
 
     #[allow(dead_code)]
     pub async fn start(&mut self) -> Result<()> {
-        self.start_until_shutdown(pending()).await
+        self.run_until_cancelled(CancellationToken::new()).await
     }
 
-    pub async fn start_until_shutdown<F>(&mut self, shutdown: F) -> Result<()>
-    where
-        F: Future<Output = ()>,
-    {
+    pub async fn run_until_cancelled(&mut self, shutdown: CancellationToken) -> Result<()> {
         log::info!("Starting audio stream...");
 
         let mut packets_sent = 0;
@@ -174,12 +171,11 @@ impl Aes67Streamer {
         let start_time = Instant::now();
         let packet_duration = Duration::from_millis(self.config.packet_time_ms as u64);
         let stop_reason: &'static str;
-        tokio::pin!(shutdown);
 
         loop {
             tokio::select! {
                 biased;
-                _ = &mut shutdown => {
+                _ = shutdown.cancelled() => {
                     stop_reason = "shutdown requested";
                     log::info!("Shutdown requested, stopping audio stream...");
                     break;
@@ -259,7 +255,7 @@ impl Aes67Streamer {
                     if now < target_time {
                         tokio::select! {
                             biased;
-                            _ = &mut shutdown => {
+                            _ = shutdown.cancelled() => {
                                 stop_reason = "shutdown requested";
                                 log::info!("Shutdown requested, stopping audio stream...");
                                 break;
@@ -297,8 +293,8 @@ impl Aes67Streamer {
 
         // Stop background services
         log::info!("Stopping background services...");
-        self.sap_announcer.stop();
-        self.ptp_client.stop();
+        self.sap_announcer.shutdown().await;
+        self.ptp_client.shutdown().await;
         log::info!("Background services stopped");
 
         Ok(())
