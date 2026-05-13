@@ -1,12 +1,13 @@
 use anyhow::Result;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
-use tokio::sync::Notify;
-use socket2::{Socket, Domain, Type, Protocol};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
-use crate::messages::{PtpHeader, MessageType, Timestamp};
+use crate::messages::{MessageType, PtpHeader, Timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PtpState {
@@ -71,7 +72,9 @@ impl SimpleClock {
     }
 
     fn now_ns(&self) -> u64 {
-        let sys_time = SystemTime::now().duration_since(self.base_time).unwrap_or_default();
+        let sys_time = SystemTime::now()
+            .duration_since(self.base_time)
+            .unwrap_or_default();
         let sys_ns = sys_time.as_nanos() as u64;
         (sys_ns as i64 + self.offset_ns) as u64
     }
@@ -89,7 +92,9 @@ pub struct PtpClient {
     /// Current PTP statistics
     stats: Arc<Mutex<PtpStats>>,
     /// Stop signal
-    stop_notify: Arc<Notify>,
+    shutdown: CancellationToken,
+    /// Running task handle
+    task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Running flag (for status check)
     is_running: Arc<Mutex<bool>>,
 }
@@ -100,7 +105,8 @@ impl PtpClient {
             config,
             clock: Arc::new(Mutex::new(SimpleClock::new())),
             stats: Arc::new(Mutex::new(PtpStats::default())),
-            stop_notify: Arc::new(Notify::new()),
+            shutdown: CancellationToken::new(),
+            task: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
         }
     }
@@ -109,23 +115,34 @@ impl PtpClient {
         let config = self.config.clone();
         let clock = self.clock.clone();
         let stats = self.stats.clone();
-        let stop_notify = self.stop_notify.clone();
+        let shutdown = self.shutdown.child_token();
         let is_running = self.is_running.clone();
 
         *is_running.lock().unwrap() = true;
 
-        tokio::spawn(async move {
-            if let Err(e) = Self::run_ptp_loop(config, clock, stats, stop_notify).await {
+        let handle = tokio::spawn(async move {
+            if let Err(e) = Self::run_ptp_loop(config, clock, stats, shutdown).await {
                 log::error!("PTP loop error: {}", e);
             }
             *is_running.lock().unwrap() = false;
         });
+        *self.task.lock().unwrap() = Some(handle);
 
         Ok(())
     }
 
     pub fn stop(&self) {
-        self.stop_notify.notify_one();
+        self.shutdown.cancel();
+    }
+
+    pub async fn shutdown(&self) {
+        self.stop();
+        let handle = self.task.lock().unwrap().take();
+        if let Some(handle) = handle {
+            if let Err(e) = handle.await {
+                log::warn!("PTP task failed to join: {e}");
+            }
+        }
     }
 
     pub fn get_time(&self) -> u64 {
@@ -165,10 +182,10 @@ impl PtpClient {
         config: PtpConfig,
         clock: Arc<Mutex<SimpleClock>>,
         stats: Arc<Mutex<PtpStats>>,
-        stop_notify: Arc<Notify>,
+        shutdown: CancellationToken,
     ) -> Result<()> {
         log::info!("Starting PTP client on domain {}", config.domain);
-        
+
         {
             let mut stats = stats.lock().unwrap();
             stats.state = PtpState::Listening;
@@ -182,14 +199,14 @@ impl PtpClient {
 
         let mut event_buf = [0u8; 2048];
         let mut general_buf = [0u8; 2048];
-        
+
         // Simple state tracking
         let mut last_sync_ts: Option<u64> = None;
         let mut last_sync_seq_id: Option<u16> = None;
 
         loop {
             tokio::select! {
-                _ = stop_notify.notified() => {
+                _ = shutdown.cancelled() => {
                     log::info!("PTP loop stopping");
                     break;
                 }
@@ -198,14 +215,14 @@ impl PtpClient {
                         if header.domain_number != config.domain {
                             continue;
                         }
-                        
+
                         match header.message_type {
                             MessageType::Sync => {
                                 // Record arrival time
                                 let arrival_ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
                                 last_sync_ts = Some(arrival_ts);
                                 last_sync_seq_id = Some(header.sequence_id);
-                                
+
                                 let mut stats = stats.lock().unwrap();
                                 stats.sync_count += 1;
                                 if stats.state == PtpState::Listening {
@@ -221,7 +238,7 @@ impl PtpClient {
                         if header.domain_number != config.domain {
                             continue;
                         }
-                        
+
                         match header.message_type {
                             MessageType::FollowUp => {
                                 if let Some(sync_seq) = last_sync_seq_id {
@@ -235,10 +252,10 @@ impl PtpClient {
                                                 // We want slave_time + offset = master_time
                                                 // So offset = origin_ns - arrival_ns
                                                 let offset = origin_ns as i64 - arrival_ns as i64;
-                                                
+
                                                 let mut clock_guard = clock.lock().unwrap();
                                                 clock_guard.adjust_offset(offset);
-                                                
+
                                                 let mut stats = stats.lock().unwrap();
                                                 stats.offset_ns = offset;
                                                 stats.state = PtpState::Slave;
@@ -248,7 +265,7 @@ impl PtpClient {
                                                     header.source_port_identity[4], header.source_port_identity[5],
                                                     header.source_port_identity[6], header.source_port_identity[7]
                                                 ]);
-                                                
+
                                                 log::debug!("Synced with master, offset: {} ns", offset);
                                             }
                                         }
@@ -265,28 +282,28 @@ impl PtpClient {
                 }
             }
         }
-        
+
         Ok(())
     }
 
     fn setup_multicast_socket(port: u16, interface_ip: Ipv4Addr) -> Result<UdpSocket> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        
+
         // Allow reuse address and port
         socket.set_reuse_address(true)?;
         #[cfg(unix)]
         socket.set_reuse_port(true)?;
-        
+
         // Bind to wildcard address
         let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
         socket.bind(&addr.into())?;
-        
+
         // Join multicast group 224.0.1.129 (PTP primary)
         let multi_addr = Ipv4Addr::new(224, 0, 1, 129);
         socket.join_multicast_v4(&multi_addr, &interface_ip)?;
-        
+
         socket.set_nonblocking(true)?;
-        
+
         Ok(UdpSocket::from_std(socket.into())?)
     }
 }
@@ -294,7 +311,6 @@ impl PtpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn test_ptp_config_default() {
@@ -307,9 +323,9 @@ mod tests {
     async fn test_ptp_client_creation() {
         let config = PtpConfig::default();
         let client = PtpClient::new(config);
-        
+
         assert!(!client.is_running());
-        
+
         // We can't easily test start() without network permissions/setup in CI environment
         // but we can verify structure initialization
         let stats = client.get_stats();
