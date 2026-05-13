@@ -54,7 +54,7 @@ cargo build --release
 ### Advanced Usage
 
 ```bash
-# Stream with custom sample rate and verbose logging
+# Stream with a custom PTP domain and verbose logging
 ./aes67-streamer \
   --file audio.wav \
   --address 239.69.83.1 \
@@ -62,6 +62,36 @@ cargo build --release
   --interface 192.168.1.100 \
   --ptp-domain 0 \
   --verbose
+```
+
+### Config File Usage
+
+The streamer can load runtime settings from a TOML config file:
+
+```bash
+./aes67-streamer --config streamer.toml
+```
+
+Example `streamer.toml`:
+
+```toml
+[audio]
+file_path = "audio.wav"
+
+[network]
+multicast_address = "239.69.83.1"
+port = 5004
+interface = "192.168.1.100"
+
+[ptp]
+domain = 0
+```
+
+CLI flags override config file values. For example, this uses the file,
+address, and interface from `streamer.toml`, but streams on port `6000`:
+
+```bash
+./aes67-streamer --config streamer.toml --port 6000
 ```
 
 ### Testing & Development
@@ -102,9 +132,10 @@ tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 
 | Option | Description | Default | Example |
 |--------|-------------|---------|---------|
-| `--file` | Audio file path | Required | `audio.wav` |
-| `--address` | Multicast IP address | Required | `239.69.83.1` |
-| `--port` | UDP port number | Required | `5004` |
+| `--config` | TOML configuration file path | None | `streamer.toml` |
+| `--file` | Audio file path; required unless set as `audio.file_path` in config | Required | `audio.wav` |
+| `--address` | Multicast IP address; required unless set as `network.multicast_address` in config | Required | `239.69.83.1` |
+| `--port` | UDP port number | `5004` | `5004` |
 | `--interface` | Network interface IP | Auto-detect | `192.168.1.100` |
 | `--ptp-domain` | PTP domain number | `0` | `1` |
 | `--duration-seconds` | Stop after a bounded duration | Unlimited | `2` |
