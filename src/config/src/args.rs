@@ -1,4 +1,5 @@
-use clap::{Arg, Command};
+use clap::{Arg, ArgMatches, Command};
+use std::ffi::OsString;
 
 #[derive(Debug, Clone)]
 pub struct Args {
@@ -9,10 +10,24 @@ pub struct Args {
     pub ptp_domain: Option<u8>,
     pub config_file: Option<String>,
     pub verbose: bool,
+    pub duration_seconds: Option<f64>,
 }
 
 pub fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
-    let matches = Command::new("aes67-streamer")
+    parse_args_from(std::env::args_os())
+}
+
+pub fn parse_args_from<I, T>(args: I) -> Result<Args, Box<dyn std::error::Error>>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let matches = cli().try_get_matches_from(args)?;
+    Ok(args_from_matches(&matches))
+}
+
+fn cli() -> Command {
+    Command::new("aes67-streamer")
         .version("0.1.0")
         .author("Jiajun Yang")
         .about("Cross-platform CLI tool for streaming audio files over RTP networks with AES67 compliance")
@@ -63,15 +78,23 @@ pub fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
                 .help("Configuration file path (TOML format)")
         )
         .arg(
+            Arg::new("duration-seconds")
+                .long("duration-seconds")
+                .value_name("SECONDS")
+                .help("Stop streaming after this many seconds")
+                .value_parser(parse_positive_duration_seconds)
+        )
+        .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
                 .help("Enable verbose logging")
                 .action(clap::ArgAction::SetTrue)
         )
-        .get_matches();
+}
 
-    Ok(Args {
+fn args_from_matches(matches: &ArgMatches) -> Args {
+    Args {
         file: matches.get_one::<String>("file").unwrap().clone(),
         address: matches.get_one::<String>("address").unwrap().clone(),
         port: *matches.get_one::<u16>("port").unwrap(),
@@ -79,7 +102,20 @@ pub fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
         ptp_domain: matches.get_one::<u8>("ptp-domain").copied(),
         config_file: matches.get_one::<String>("config").cloned(),
         verbose: matches.get_flag("verbose"),
-    })
+        duration_seconds: matches.get_one::<f64>("duration-seconds").copied(),
+    }
+}
+
+fn parse_positive_duration_seconds(value: &str) -> Result<f64, String> {
+    let duration = value
+        .parse::<f64>()
+        .map_err(|_| "duration must be a number of seconds".to_string())?;
+
+    if duration.is_finite() && duration > 0.0 {
+        Ok(duration)
+    } else {
+        Err("duration must be greater than zero".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -97,10 +133,42 @@ mod tests {
             ptp_domain: Some(0),
             config_file: None,
             verbose: false,
+            duration_seconds: None,
         };
-        
+
         assert_eq!(args.file, "test.wav");
         assert_eq!(args.address, "239.192.1.1");
         assert_eq!(args.port, 5004);
+    }
+
+    #[test]
+    fn test_duration_seconds_parsed() {
+        let args = parse_args_from([
+            "aes67-streamer",
+            "--file",
+            "test.wav",
+            "--address",
+            "239.192.1.1",
+            "--duration-seconds",
+            "1.5",
+        ])
+        .expect("duration should parse");
+
+        assert_eq!(args.duration_seconds, Some(1.5));
+    }
+
+    #[test]
+    fn test_duration_seconds_must_be_positive() {
+        let result = parse_args_from([
+            "aes67-streamer",
+            "--file",
+            "test.wav",
+            "--address",
+            "239.192.1.1",
+            "--duration-seconds",
+            "0",
+        ]);
+
+        assert!(result.is_err());
     }
 }
