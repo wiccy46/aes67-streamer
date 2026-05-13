@@ -14,9 +14,23 @@ async fn test_e2e_streaming_with_config_file() -> Result<()> {
     run_streaming_test(StreamerArgs::ConfigFile).await
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_e2e_streaming_stops_gracefully_on_sigterm() -> Result<()> {
+    run_streaming_test(StreamerArgs::Sigterm).await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_e2e_streaming_stops_gracefully_on_sigint() -> Result<()> {
+    run_streaming_test(StreamerArgs::Sigint).await
+}
+
 enum StreamerArgs {
     Cli,
     ConfigFile,
+    Sigterm,
+    Sigint,
 }
 
 async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
@@ -31,6 +45,8 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
     let (multicast_addr, port) = match args_source {
         StreamerArgs::Cli => ("239.1.2.3", 55005),
         StreamerArgs::ConfigFile => ("239.1.2.4", 55006),
+        StreamerArgs::Sigterm => ("239.1.2.5", 55007),
+        StreamerArgs::Sigint => ("239.1.2.6", 55008),
     };
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -57,9 +73,14 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
         StreamerArgs::ConfigFile => {
             command.arg("--config").arg(resource_config_path());
         }
+        StreamerArgs::Sigterm => {}
+        StreamerArgs::Sigint => {}
     };
 
-    if matches!(args_source, StreamerArgs::Cli) {
+    if matches!(
+        args_source,
+        StreamerArgs::Cli | StreamerArgs::Sigterm | StreamerArgs::Sigint
+    ) {
         command
             .arg("--file")
             .arg(&test_file)
@@ -71,7 +92,11 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
             .arg("127.0.0.1");
     }
 
-    let mut child = command.arg("--duration-seconds").arg("2").spawn()?;
+    if !matches!(args_source, StreamerArgs::Sigterm | StreamerArgs::Sigint) {
+        command.arg("--duration-seconds").arg("2");
+    }
+
+    let mut child = command.spawn()?;
 
     let mut buf = [0u8; 2048];
     let mut packets_received = 0;
@@ -101,6 +126,21 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
 
     assert!(packets_received > 0, "No packets received");
     println!("Received {packets_received} RTP packets");
+
+    if matches!(args_source, StreamerArgs::Sigterm | StreamerArgs::Sigint) {
+        let child_id = child.id().expect("child process should have an id");
+        let signal = match args_source {
+            StreamerArgs::Sigterm => "-TERM",
+            StreamerArgs::Sigint => "-INT",
+            _ => unreachable!("non-signal streamer args should not reach signal branch"),
+        };
+        let status = tokio::process::Command::new("kill")
+            .arg(signal)
+            .arg(child_id.to_string())
+            .status()
+            .await?;
+        assert!(status.success(), "failed to send {signal} to streamer");
+    }
 
     let status = time::timeout(Duration::from_secs(5), child.wait()).await??;
     assert!(status.success(), "streamer exited with {status}");
