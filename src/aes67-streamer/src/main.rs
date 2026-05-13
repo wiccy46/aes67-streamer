@@ -54,10 +54,51 @@ async fn main() {
         }
     };
 
-    if let Err(e) = streamer.start().await {
+    if let Err(e) = streamer.start_until_shutdown(shutdown_signal()).await {
         log::error!("Streaming failed: {:?}", e);
         process::exit(1);
     }
 
     log::info!("AES67 streaming completed successfully")
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let interrupt = tokio::signal::ctrl_c();
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(e) => {
+                log::warn!("Failed to install SIGTERM handler: {e}");
+                if let Err(e) = interrupt.await {
+                    log::warn!("Failed to listen for Ctrl-C: {e}");
+                }
+                return;
+            }
+        };
+
+        tokio::select! {
+            result = interrupt => {
+                if let Err(e) = result {
+                    log::warn!("Failed to listen for Ctrl-C: {e}");
+                } else {
+                    log::info!("Received Ctrl-C");
+                }
+            }
+            _ = terminate.recv() => {
+                log::info!("Received SIGTERM");
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            log::warn!("Failed to listen for Ctrl-C: {e}");
+        } else {
+            log::info!("Received Ctrl-C");
+        }
+    }
 }

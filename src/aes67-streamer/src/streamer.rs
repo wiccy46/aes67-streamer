@@ -5,6 +5,7 @@ use network::{
     SapAnnouncer,
 };
 use ptp::{PtpClient, PtpConfig};
+use std::future::{pending, Future};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 use tokio::time;
@@ -157,17 +158,38 @@ impl Aes67Streamer {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn start(&mut self) -> Result<()> {
+        self.start_until_shutdown(pending()).await
+    }
+
+    pub async fn start_until_shutdown<F>(&mut self, shutdown: F) -> Result<()>
+    where
+        F: Future<Output = ()>,
+    {
         log::info!("Starting audio stream...");
 
         let mut packets_sent = 0;
         let mut bytes_sent = 0;
         let start_time = Instant::now();
         let packet_duration = Duration::from_millis(self.config.packet_time_ms as u64);
+        let stop_reason: &'static str;
+        tokio::pin!(shutdown);
 
         loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    stop_reason = "shutdown requested";
+                    log::info!("Shutdown requested, stopping audio stream...");
+                    break;
+                }
+                _ = async {} => {}
+            }
+
             if let Some(duration) = self.config.duration {
                 if start_time.elapsed() >= duration {
+                    stop_reason = "configured duration reached";
                     log::info!(
                         "Configured stream duration reached after {:.2} seconds",
                         start_time.elapsed().as_secs_f64()
@@ -235,7 +257,15 @@ impl Aes67Streamer {
                     let now = Instant::now();
 
                     if now < target_time {
-                        time::sleep(target_time - now).await;
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown => {
+                                stop_reason = "shutdown requested";
+                                log::info!("Shutdown requested, stopping audio stream...");
+                                break;
+                            }
+                            _ = time::sleep(target_time - now) => {}
+                        }
                     } else if packets_sent % 1000 == 0 && now > target_time + packet_duration {
                         // Warn if we're falling behind real-time
                         let behind_ms = (now - target_time).as_millis();
@@ -247,6 +277,7 @@ impl Aes67Streamer {
                     }
                 }
                 None => {
+                    stop_reason = "end of audio file";
                     log::info!("End of audio file reached");
                     break;
                 }
@@ -255,6 +286,7 @@ impl Aes67Streamer {
 
         let total_time = start_time.elapsed();
         log::info!("Streaming completed:");
+        log::info!("  Stop reason: {stop_reason}");
         log::info!("  Packets sent: {packets_sent}");
         log::info!("  Bytes sent: {bytes_sent}");
         log::info!("  Duration: {:.2} seconds", total_time.as_secs_f64());
