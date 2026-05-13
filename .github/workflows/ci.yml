@@ -1,4 +1,4 @@
-name: E2E Tests
+name: CI
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+        sudo apt-get install -y ffmpeg
 
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
@@ -28,7 +28,7 @@ jobs:
       run: cargo build --release
 
     - name: Run unit + integration tests
-      run: cargo test
+      run: cargo test --workspace
 
-    - name: Run E2E stream test
-      run: cargo test --test e2e_stream_test -- --nocapture
+    - name: Run full media loopback E2E
+      run: bash scripts/e2e_loopback.sh
