@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use socket2::{Socket, Domain, Type, Protocol};
 
 /// Multicast socket configuration for AES67 streaming
 #[derive(Debug, Clone)]
@@ -57,7 +57,7 @@ impl MulticastSocket {
 
         // Create socket using socket2
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        
+
         // Allow reuse address and port (important for multicast)
         socket.set_reuse_address(true)?;
         #[cfg(unix)]
@@ -72,7 +72,7 @@ impl MulticastSocket {
         // Configure multicast settings
         socket.set_multicast_ttl_v4(config.ttl as u32)?;
         socket.set_multicast_loop_v4(true)?;
-        
+
         if !config.local_addr.is_unspecified() {
             socket.set_multicast_if_v4(&config.local_addr)?;
         }
@@ -150,24 +150,84 @@ pub struct SocketStats {
     pub send_buffer_size: usize,
 }
 
-/// Helper function to resolve interface name to IP address
-/// For now, this is a placeholder - in full implementation would use platform-specific APIs
+/// Parse and validate a target stream address.
+///
+/// Production streams should use multicast. Loopback unicast is accepted for
+/// deterministic local and CI media loopback tests.
+pub fn parse_stream_address(address: &str) -> Result<Ipv4Addr> {
+    let ip = address
+        .parse::<Ipv4Addr>()
+        .with_context(|| format!("Invalid stream address '{address}'"))?;
+
+    if ip.is_multicast() || ip.is_loopback() {
+        Ok(ip)
+    } else {
+        Err(anyhow!("Stream address {ip} must be multicast or loopback"))
+    }
+}
+
+/// Resolve an interface name or direct IPv4 address to an interface IPv4 address.
 pub fn resolve_interface_ip(interface_name: &str) -> Result<Ipv4Addr> {
+    let interface_name = interface_name.trim();
+    if interface_name.is_empty() {
+        return Err(anyhow!("Network interface cannot be empty"));
+    }
+
+    if let Ok(ip) = interface_name.parse::<Ipv4Addr>() {
+        return Ok(ip);
+    }
+
     match interface_name.to_lowercase().as_str() {
         "lo" | "loopback" => Ok(Ipv4Addr::new(127, 0, 0, 1)),
-        // For development: parse direct IP addresses
-        ip_str if ip_str.parse::<Ipv4Addr>().is_ok() => ip_str
-            .parse::<Ipv4Addr>()
-            .context("Failed to parse IP address"),
-        // Default to loopback for now - TODO: implement proper interface resolution
         _ => {
-            log::warn!(
-                "Interface '{}' not recognized, using loopback",
-                interface_name
-            );
-            Ok(Ipv4Addr::new(127, 0, 0, 1))
+            if let Some(ip) = lookup_interface_ipv4(interface_name)? {
+                Ok(ip)
+            } else {
+                Err(anyhow!(
+                    "Network interface '{interface_name}' was not found; pass a valid interface name or IPv4 address"
+                ))
+            }
         }
     }
+}
+
+#[cfg(unix)]
+fn lookup_interface_ipv4(interface_name: &str) -> Result<Option<Ipv4Addr>> {
+    use std::ffi::CStr;
+    use std::ptr;
+
+    let mut interfaces: *mut libc::ifaddrs = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("Failed to enumerate interfaces");
+    }
+
+    let mut cursor = interfaces;
+    let mut found = None;
+
+    while !cursor.is_null() {
+        let interface = unsafe { &*cursor };
+
+        if !interface.ifa_name.is_null() && !interface.ifa_addr.is_null() {
+            let name = unsafe { CStr::from_ptr(interface.ifa_name) }.to_string_lossy();
+            let family = unsafe { (*interface.ifa_addr).sa_family as i32 };
+
+            if name == interface_name && family == libc::AF_INET {
+                let sockaddr = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
+                found = Some(Ipv4Addr::from(sockaddr.sin_addr.s_addr.to_ne_bytes()));
+                break;
+            }
+        }
+
+        cursor = interface.ifa_next;
+    }
+
+    unsafe { libc::freeifaddrs(interfaces) };
+    Ok(found)
+}
+
+#[cfg(not(unix))]
+fn lookup_interface_ipv4(_interface_name: &str) -> Result<Option<Ipv4Addr>> {
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -215,9 +275,32 @@ mod tests {
 
         let direct_ip = resolve_interface_ip("192.168.1.100").unwrap();
         assert_eq!(direct_ip, Ipv4Addr::new(192, 168, 1, 100));
+    }
 
-        let unknown_ip = resolve_interface_ip("unknown").unwrap();
-        assert_eq!(unknown_ip, Ipv4Addr::new(127, 0, 0, 1));
+    #[test]
+    fn test_unknown_interface_returns_error() {
+        let result = resolve_interface_ip("definitely-not-a-real-interface");
+        assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_loopback_interface_name_resolves() {
+        let lo_ip = resolve_interface_ip("lo0").unwrap();
+        assert_eq!(lo_ip, Ipv4Addr::new(127, 0, 0, 1));
+    }
+
+    #[test]
+    fn test_stream_address_validation() {
+        assert_eq!(
+            parse_stream_address("239.69.67.67").unwrap(),
+            Ipv4Addr::new(239, 69, 67, 67)
+        );
+        assert_eq!(
+            parse_stream_address("127.0.0.1").unwrap(),
+            Ipv4Addr::new(127, 0, 0, 1)
+        );
+        assert!(parse_stream_address("192.168.1.100").is_err());
     }
 
     #[test]
