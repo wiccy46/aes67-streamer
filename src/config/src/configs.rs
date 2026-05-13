@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
@@ -118,10 +119,11 @@ impl Default for PerformanceConfig {
     }
 }
 
-
-pub fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path)?;
-    let config: Config = toml::from_str(&content)?;
+pub fn load_config(path: &str) -> Result<Config> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read config file {path}"))?;
+    let config: Config =
+        toml::from_str(&content).with_context(|| format!("failed to parse config file {path}"))?;
     Ok(config)
 }
 
