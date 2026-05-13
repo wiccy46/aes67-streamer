@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use audio::{AudioNode, AudioReader, GainNode};
 use network::{
-    resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer, SapAnnouncer,
+    parse_stream_address, resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer,
+    SapAnnouncer,
 };
 use ptp::{PtpClient, PtpConfig};
 use std::net::Ipv4Addr;
@@ -85,9 +86,8 @@ impl Aes67Streamer {
             Ipv4Addr::new(127, 0, 0, 1)
         };
 
-        let multicast_ip: Ipv4Addr = multicast_addr
-            .parse()
-            .context("Invalid multicast address")?;
+        let multicast_ip: Ipv4Addr =
+            parse_stream_address(multicast_addr).context("Invalid stream address")?;
 
         let multicast_config = MulticastConfig::new(multicast_ip, port, local_ip);
         let multicast_socket =
