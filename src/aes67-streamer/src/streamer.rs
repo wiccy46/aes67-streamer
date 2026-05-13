@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use audio::{AudioNode, AudioReader, GainNode};
-use network::{resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer, SapAnnouncer};
+use network::{
+    resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer, SapAnnouncer,
+};
 use ptp::{PtpClient, PtpConfig};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -28,6 +30,8 @@ pub struct StreamConfig {
     /// PTP domain (0 for AES67)
     pub ptp_domain: u8,
     pub verbose: bool,
+    /// Optional maximum stream duration for tests and scripted runs.
+    pub duration: Option<Duration>,
 }
 
 impl Default for StreamConfig {
@@ -38,12 +42,13 @@ impl Default for StreamConfig {
             gain_db: 0.0,
             ptp_domain: 0,
             verbose: false,
+            duration: None,
         }
     }
 }
 
 /// An Aes67Streamer is the main entry of the app
-/// It loads an audio file, creates a multicast udp socket, 
+/// It loads an audio file, creates a multicast udp socket,
 /// packetize the audio data, and sends it over the network.
 impl Aes67Streamer {
     pub async fn new(
@@ -54,7 +59,8 @@ impl Aes67Streamer {
         config: StreamConfig,
     ) -> Result<Self> {
         log::info!("Initializing AES67 Streamer...");
-        let samples_per_packet = config.target_sample_rate as usize / (config.packet_time_ms as usize * 1000);
+        let samples_per_packet =
+            config.target_sample_rate as usize / (config.packet_time_ms as usize * 1000);
 
         let audio_reader =
             AudioReader::with_resampling(audio_file, config.target_sample_rate, samples_per_packet)
@@ -93,7 +99,10 @@ impl Aes67Streamer {
             ..Default::default()
         };
         let ptp_client = PtpClient::new(ptp_config);
-        ptp_client.start().await.context("Failed to start PTP client")?;
+        ptp_client
+            .start()
+            .await
+            .context("Failed to start PTP client")?;
 
         // Setup SAP Announcer
         // Generate simple SDP
@@ -115,9 +124,13 @@ impl Aes67Streamer {
             config.target_sample_rate,
             config.packet_time_ms
         );
-        
-        let sap_announcer = SapAnnouncer::new(sdp, local_ip).context("Failed to create SAP announcer")?;
-        sap_announcer.start().await.context("Failed to start SAP announcer")?;
+
+        let sap_announcer =
+            SapAnnouncer::new(sdp, local_ip).context("Failed to create SAP announcer")?;
+        sap_announcer
+            .start()
+            .await
+            .context("Failed to start SAP announcer")?;
 
         // Create RTP packetizer using actual sample rate
         let payload_type = 97; // Dynamic payload type for AES67 (24-bit audio)
@@ -153,6 +166,15 @@ impl Aes67Streamer {
         let packet_duration = Duration::from_millis(self.config.packet_time_ms as u64);
 
         loop {
+            if let Some(duration) = self.config.duration {
+                if start_time.elapsed() >= duration {
+                    log::info!(
+                        "Configured stream duration reached after {:.2} seconds",
+                        start_time.elapsed().as_secs_f64()
+                    );
+                    break;
+                }
+            }
 
             // Read next audio frame
             match self.audio_reader.read_next_frame()? {
@@ -211,13 +233,17 @@ impl Aes67Streamer {
                     // Calculate when this packet should be sent based on audio timeline
                     let target_time = start_time + packet_duration * packets_sent as u32;
                     let now = Instant::now();
-                    
+
                     if now < target_time {
                         time::sleep(target_time - now).await;
                     } else if packets_sent % 1000 == 0 && now > target_time + packet_duration {
                         // Warn if we're falling behind real-time
                         let behind_ms = (now - target_time).as_millis();
-                        log::warn!("Streaming falling behind by {}ms at packet {}", behind_ms, packets_sent);
+                        log::warn!(
+                            "Streaming falling behind by {}ms at packet {}",
+                            behind_ms,
+                            packets_sent
+                        );
                     }
                 }
                 None => {
@@ -258,6 +284,7 @@ mod tests {
         assert_eq!(config.packet_time_ms, 1);
         assert_eq!(config.gain_db, 0.0);
         assert_eq!(config.ptp_domain, 0);
+        assert_eq!(config.duration, None);
         assert!(!config.verbose);
     }
 

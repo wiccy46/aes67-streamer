@@ -1,4 +1,5 @@
 use std::process;
+use std::time::Duration;
 
 mod streamer;
 use streamer::{Aes67Streamer, StreamConfig};
@@ -14,7 +15,8 @@ async fn main() {
     };
 
     let default_level = if args.verbose { "debug" } else { "info" };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level)).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
+        .init();
 
     log::info!("Starting AES67 Audio Streamer");
     log::debug!("Parsed arguments: {args:?}");
@@ -28,10 +30,11 @@ async fn main() {
 
     let stream_config = StreamConfig {
         target_sample_rate: 48000, // AES67 always requires 48kHz
-        packet_time_ms: 1, // 1ms packets for AES67
-        gain_db: 0.0,      // Unity gain for now
+        packet_time_ms: 1,         // 1ms packets for AES67
+        gain_db: 0.0,              // Unity gain for now
         ptp_domain: args.ptp_domain.unwrap_or(0),
         verbose: args.verbose,
+        duration: args.duration_seconds.map(Duration::from_secs_f64),
     };
 
     // Create and start streamer
@@ -41,7 +44,9 @@ async fn main() {
         args.port,
         args.interface.as_deref(),
         stream_config,
-    ).await {
+    )
+    .await
+    {
         Ok(streamer) => streamer,
         Err(e) => {
             log::error!("Failed to create streamer: {e}");
