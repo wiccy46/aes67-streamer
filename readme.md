@@ -66,6 +66,12 @@ cargo build --release
 
 ### Testing & Development
 ```bash
+# Run unit and integration tests
+cargo test --workspace
+
+# Run full media loopback E2E test with ffmpeg/ffprobe
+bash scripts/e2e_loopback.sh
+
 # Local testing with loopback
 ./aes67-streamer --file test.wav --address 127.0.0.1 --port 5004 --interface 127.0.0.1
 
@@ -101,6 +107,7 @@ tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 | `--port` | UDP port number | Required | `5004` |
 | `--interface` | Network interface IP | Auto-detect | `192.168.1.100` |
 | `--ptp-domain` | PTP domain number | `0` | `1` |
+| `--duration-seconds` | Stop after a bounded duration | Unlimited | `2` |
 | `--verbose` | Enable verbose logging | `false` | - |
 
 ### AES67 Defaults
