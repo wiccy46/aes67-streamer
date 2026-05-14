@@ -58,12 +58,16 @@ echo "Building aes67-streamer..."
 cargo build -p aes67-streamer
 
 echo "Generating deterministic test WAV..."
+# Generate known-good 48 kHz stereo PCM so the receiver validation can assert
+# sample rate, channels, duration, and non-silence deterministically.
 ffmpeg -nostdin -y -v error \
     -f lavfi -i "sine=frequency=997:duration=${DURATION_SECONDS}:sample_rate=48000" \
     -filter:a "pan=stereo|c0=c0|c1=c0" \
     -c:a pcm_s24le \
     "$INPUT_WAV"
 
+# ffmpeg receives RTP from SDP, so keep this in sync with the streamer's
+# payload type, packet time, sample rate, channel count, address, and port.
 cat > "$SDP_FILE" <<SDP
 v=0
 o=- 123456 123456 IN IP4 ${INTERFACE}
@@ -77,8 +81,12 @@ a=recvonly
 SDP
 
 echo "Starting ffmpeg RTP receiver on ${ADDRESS}:${PORT}..."
+# Start the receiver before the streamer to avoid dropping the first RTP burst.
+# localaddr is required for multicast loopback so ffmpeg joins/listens on the
+# same interface that the streamer uses.
 ffmpeg -nostdin -y -v warning \
     -protocol_whitelist file,udp,rtp \
+    -localaddr "$INTERFACE" \
     -i "$SDP_FILE" \
     -t "$DURATION_SECONDS" \
     -c:a pcm_s24le \
@@ -88,6 +96,8 @@ receiver_pid=$!
 sleep 1
 
 echo "Running aes67-streamer for ${DURATION_SECONDS}s..."
+# Run a bounded stream so this script is deterministic in CI and local smoke
+# tests without requiring manual signal handling.
 RUST_LOG=info target/debug/aes67-streamer \
     --file "$INPUT_WAV" \
     --address "$ADDRESS" \
@@ -108,16 +118,31 @@ receiver_pid=""
 
 [[ -s "$RECORDED_WAV" ]] || fail_with_logs "Recorded WAV was not created"
 
+# Validate the media structurally before checking loudness. ffmpeg can create a
+# header-only WAV when no RTP packets are decoded; reject missing duration,
+# unreadable frame counts, and empty-output receiver logs explicitly.
 sample_rate="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of default=nw=1:nk=1 "$RECORDED_WAV")"
 channels="$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=nw=1:nk=1 "$RECORDED_WAV")"
 duration="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$RECORDED_WAV")"
+read_frames="$(ffprobe -v error -count_frames -select_streams a:0 -show_entries stream=nb_read_frames -of default=nw=1:nk=1 "$RECORDED_WAV")"
 
 [[ "$sample_rate" == "48000" ]] || fail_with_logs "Expected 48000 Hz recording, got ${sample_rate}"
 [[ "$channels" == "2" ]] || fail_with_logs "Expected stereo recording, got ${channels} channel(s)"
+[[ -n "$duration" && "$duration" != "N/A" ]] || fail_with_logs "Recording duration was not detected"
+[[ -n "$read_frames" && "$read_frames" != "N/A" && "$read_frames" != "0" ]] || fail_with_logs "Recording contains no readable audio frames"
+if grep -q "Output file is empty" "$FFMPEG_LOG"; then
+    fail_with_logs "ffmpeg receiver produced an empty output file"
+fi
 awk -v duration="$duration" 'BEGIN { exit !(duration >= 0.5) }' || fail_with_logs "Recording duration too short: ${duration}s"
 
+# Validate that the decoded audio has samples and is not silent. volumedetect may
+# print an initial zero sample count during setup, so use the final count.
 ffmpeg -nostdin -v info -i "$RECORDED_WAV" -af volumedetect -f null - >"$VOLUME_LOG" 2>&1 || fail_with_logs "Volume validation failed"
-if grep -q "max_volume: -inf" "$VOLUME_LOG"; then
+volume_samples="$(awk '/n_samples:/ { samples=$NF } END { print samples }' "$VOLUME_LOG")"
+[[ -n "$volume_samples" && "$volume_samples" != "0" ]] || fail_with_logs "Recorded WAV contains zero audio samples"
+max_volume="$(awk '/max_volume:/ { print $NF }' "$VOLUME_LOG")"
+[[ -n "$max_volume" ]] || fail_with_logs "Recorded WAV volume could not be measured"
+if [[ "$max_volume" == "-inf" ]]; then
     fail_with_logs "Recorded WAV is silent"
 fi
 

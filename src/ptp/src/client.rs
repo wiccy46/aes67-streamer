@@ -1,13 +1,15 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::ffi::CStr;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::messages::{MessageType, PtpHeader, Timestamp};
+use crate::messages::{AnnounceMessage, ClockIdentity, MessageType, PtpHeader, Timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PtpState {
@@ -25,6 +27,7 @@ pub struct PtpConfig {
     pub priority1: u8,
     pub priority2: u8,
     pub interface_ip: Ipv4Addr,
+    pub clock_identity: Option<ClockIdentity>,
 }
 
 impl Default for PtpConfig {
@@ -34,6 +37,7 @@ impl Default for PtpConfig {
             priority1: 128,
             priority2: 128,
             interface_ip: Ipv4Addr::new(0, 0, 0, 0),
+            clock_identity: None,
         }
     }
 }
@@ -45,7 +49,8 @@ pub struct PtpStats {
     pub sync_count: u64,
     pub announce_count: u64,
     pub state: PtpState,
-    pub master_identity: Option<[u8; 8]>,
+    pub local_identity: ClockIdentity,
+    pub master_identity: Option<ClockIdentity>,
 }
 
 impl Default for PtpState {
@@ -101,10 +106,20 @@ pub struct PtpClient {
 
 impl PtpClient {
     pub fn new(config: PtpConfig) -> Self {
+        let local_identity = config
+            .clock_identity
+            .or_else(|| discover_clock_identity(config.interface_ip).ok())
+            .unwrap_or_else(|| ClockIdentity::from_local_ipv4(config.interface_ip));
+
+        let stats = PtpStats {
+            local_identity,
+            ..Default::default()
+        };
+
         Self {
             config,
             clock: Arc::new(Mutex::new(SimpleClock::new())),
-            stats: Arc::new(Mutex::new(PtpStats::default())),
+            stats: Arc::new(Mutex::new(stats)),
             shutdown: CancellationToken::new(),
             task: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
@@ -157,8 +172,14 @@ impl PtpClient {
             sync_count: guard.sync_count,
             announce_count: guard.announce_count,
             state: guard.state,
+            local_identity: guard.local_identity,
             master_identity: guard.master_identity,
         }
+    }
+
+    pub fn reference_clock_identity(&self) -> ClockIdentity {
+        let stats = self.stats.lock().unwrap();
+        stats.master_identity.unwrap_or(stats.local_identity)
     }
 
     pub fn rtp_timestamp(&self, sample_rate: u32) -> Result<u32> {
@@ -259,12 +280,17 @@ impl PtpClient {
                                                 let mut stats = stats.lock().unwrap();
                                                 stats.offset_ns = offset;
                                                 stats.state = PtpState::Slave;
-                                                stats.master_identity = Some([
-                                                    header.source_port_identity[0], header.source_port_identity[1],
-                                                    header.source_port_identity[2], header.source_port_identity[3],
-                                                    header.source_port_identity[4], header.source_port_identity[5],
-                                                    header.source_port_identity[6], header.source_port_identity[7]
-                                                ]);
+                                                stats.master_identity =
+                                                    Some(ClockIdentity::from_bytes([
+                                                        header.source_port_identity[0],
+                                                        header.source_port_identity[1],
+                                                        header.source_port_identity[2],
+                                                        header.source_port_identity[3],
+                                                        header.source_port_identity[4],
+                                                        header.source_port_identity[5],
+                                                        header.source_port_identity[6],
+                                                        header.source_port_identity[7],
+                                                    ]));
 
                                                 log::debug!("Synced with master, offset: {} ns", offset);
                                             }
@@ -275,6 +301,9 @@ impl PtpClient {
                             MessageType::Announce => {
                                 let mut stats = stats.lock().unwrap();
                                 stats.announce_count += 1;
+                                if let Ok(announce) = AnnounceMessage::from_bytes(&general_buf[..len]) {
+                                    stats.master_identity = Some(announce.grandmaster_identity);
+                                }
                             }
                             _ => {}
                         }
@@ -308,6 +337,144 @@ impl PtpClient {
     }
 }
 
+fn discover_clock_identity(interface_ip: Ipv4Addr) -> Result<ClockIdentity> {
+    let interface_name = interface_name_for_ipv4(interface_ip)?
+        .with_context(|| format!("no interface found for {interface_ip}"))?;
+    let mac = mac_address_for_interface(&interface_name)?
+        .with_context(|| format!("no MAC address found for interface {interface_name}"))?;
+    Ok(ClockIdentity::from_mac_address(mac))
+}
+
+#[cfg(unix)]
+fn interface_name_for_ipv4(interface_ip: Ipv4Addr) -> Result<Option<String>> {
+    let mut interfaces: *mut libc::ifaddrs = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to enumerate interfaces");
+    }
+
+    let mut cursor = interfaces;
+    let mut found = None;
+
+    while !cursor.is_null() {
+        let interface = unsafe { &*cursor };
+
+        if !interface.ifa_name.is_null() && !interface.ifa_addr.is_null() {
+            let name = unsafe { CStr::from_ptr(interface.ifa_name) }.to_string_lossy();
+            let family = unsafe { (*interface.ifa_addr).sa_family as i32 };
+
+            if family == libc::AF_INET {
+                let sockaddr = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
+                let ip = Ipv4Addr::from(sockaddr.sin_addr.s_addr.to_ne_bytes());
+                if ip == interface_ip {
+                    found = Some(name.into_owned());
+                    break;
+                }
+            }
+        }
+
+        cursor = unsafe { (*cursor).ifa_next };
+    }
+
+    unsafe { libc::freeifaddrs(interfaces) };
+    Ok(found)
+}
+
+#[cfg(not(unix))]
+fn interface_name_for_ipv4(_interface_ip: Ipv4Addr) -> Result<Option<String>> {
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn mac_address_for_interface(interface_name: &str) -> Result<Option<[u8; 6]>> {
+    let mut interfaces: *mut libc::ifaddrs = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to enumerate interfaces");
+    }
+
+    let mut cursor = interfaces;
+    let mut found = None;
+
+    while !cursor.is_null() {
+        let interface = unsafe { &*cursor };
+
+        if !interface.ifa_name.is_null() && !interface.ifa_addr.is_null() {
+            let name = unsafe { CStr::from_ptr(interface.ifa_name) }.to_string_lossy();
+            let family = unsafe { (*interface.ifa_addr).sa_family as i32 };
+
+            if name == interface_name && family == libc::AF_PACKET {
+                let sockaddr = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_ll) };
+                if sockaddr.sll_halen >= 6 {
+                    let mut mac = [0u8; 6];
+                    mac.copy_from_slice(&sockaddr.sll_addr[..6]);
+                    found = Some(mac);
+                    break;
+                }
+            }
+        }
+
+        cursor = unsafe { (*cursor).ifa_next };
+    }
+
+    unsafe { libc::freeifaddrs(interfaces) };
+    Ok(found)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+fn mac_address_for_interface(interface_name: &str) -> Result<Option<[u8; 6]>> {
+    let mut interfaces: *mut libc::ifaddrs = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to enumerate interfaces");
+    }
+
+    let mut cursor = interfaces;
+    let mut found = None;
+
+    while !cursor.is_null() {
+        let interface = unsafe { &*cursor };
+
+        if !interface.ifa_name.is_null() && !interface.ifa_addr.is_null() {
+            let name = unsafe { CStr::from_ptr(interface.ifa_name) }.to_string_lossy();
+            let family = unsafe { (*interface.ifa_addr).sa_family as i32 };
+
+            if name == interface_name && family == libc::AF_LINK {
+                let sockaddr = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_dl) };
+                if sockaddr.sdl_alen >= 6 {
+                    let offset = sockaddr.sdl_nlen as usize;
+                    let mut mac = [0u8; 6];
+                    for (index, byte) in mac.iter_mut().enumerate() {
+                        *byte = sockaddr.sdl_data[offset + index] as u8;
+                    }
+                    found = Some(mac);
+                    break;
+                }
+            }
+        }
+
+        cursor = unsafe { (*cursor).ifa_next };
+    }
+
+    unsafe { libc::freeifaddrs(interfaces) };
+    Ok(found)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+)))]
+fn mac_address_for_interface(_interface_name: &str) -> Result<Option<[u8; 6]>> {
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +484,7 @@ mod tests {
         let config = PtpConfig::default();
         assert_eq!(config.domain, 0);
         assert_eq!(config.priority1, 128);
+        assert_eq!(config.clock_identity, None);
     }
 
     #[tokio::test]
@@ -330,5 +498,7 @@ mod tests {
         // but we can verify structure initialization
         let stats = client.get_stats();
         assert_eq!(stats.state, PtpState::Initializing);
+        assert_ne!(stats.local_identity, ClockIdentity::default());
+        assert_eq!(client.reference_clock_identity(), stats.local_identity);
     }
 }

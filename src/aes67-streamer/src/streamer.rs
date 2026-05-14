@@ -4,7 +4,7 @@ use network::{
     parse_stream_address, resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer,
     SapAnnouncer,
 };
-use ptp::{PtpClient, PtpConfig};
+use ptp::{ClockIdentity, PtpClient, PtpConfig};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 use tokio::time;
@@ -118,7 +118,22 @@ impl Aes67Streamer {
             .await
             .context("Failed to start PTP client")?;
 
-        let sdp = build_sdp(local_ip, multicast_ip, port, audio_info.channels, &config);
+        let ptp_stats = ptp_client.get_stats();
+        let clock_identity = ptp_client.reference_clock_identity();
+        if ptp_stats.master_identity.is_none() {
+            log::warn!(
+                "No PTP grandmaster observed yet; SDP will use local clock identity {clock_identity}"
+            );
+        }
+
+        let sdp = build_sdp(
+            local_ip,
+            multicast_ip,
+            port,
+            audio_info.channels,
+            clock_identity,
+            &config,
+        );
         log::info!("Generated SDP:\n{sdp}");
 
         let sap_announcer = if config.sap {
@@ -322,6 +337,7 @@ fn build_sdp(
     multicast_ip: Ipv4Addr,
     port: u16,
     audio_channels: u32,
+    clock_identity: ClockIdentity,
     config: &StreamConfig,
 ) -> String {
     format!(
@@ -333,7 +349,7 @@ fn build_sdp(
          m=audio {} RTP/AVP {}\r\n\
          a=rtpmap:{} L24/{}/{}\r\n\
          a=ptime:{}\r\n\
-         a=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\r\n\
+         a=ts-refclk:ptp=IEEE1588-2008:{}:{}\r\n\
          a=mediaclk:direct=0\r\n",
         local_ip,
         config.session_name,
@@ -344,7 +360,9 @@ fn build_sdp(
         config.payload_type,
         config.target_sample_rate,
         audio_channels,
-        config.packet_time_ms
+        config.packet_time_ms,
+        clock_identity,
+        config.ptp_domain
     )
 }
 
@@ -402,6 +420,7 @@ mod tests {
             Ipv4Addr::new(239, 10, 20, 30),
             6000,
             8,
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]),
             &config,
         );
 
@@ -410,6 +429,7 @@ mod tests {
         assert!(sdp.contains("m=audio 6000 RTP/AVP 101\r\n"));
         assert!(sdp.contains("a=rtpmap:101 L24/48000/8\r\n"));
         assert!(sdp.contains("a=ptime:2\r\n"));
+        assert!(sdp.contains("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:0\r\n"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time;
@@ -37,6 +38,7 @@ async fn test_e2e_stream_metadata_controls_rtp_header() -> Result<()> {
     run_streaming_test(StreamerArgs::Metadata).await
 }
 
+#[derive(Clone, Copy)]
 enum StreamerArgs {
     Cli,
     ConfigFile,
@@ -63,7 +65,7 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/aes67-streamer")
         });
-    let (multicast_addr, port) = match args_source {
+    let (multicast_addr, preferred_port) = match args_source {
         StreamerArgs::Cli => ("239.1.2.3", 55005),
         StreamerArgs::ConfigFile => ("239.1.2.4", 55006),
         StreamerArgs::Sigterm => ("239.1.2.5", 55007),
@@ -72,19 +74,7 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
         StreamerArgs::Metadata => ("239.1.2.8", 55010),
     };
 
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-    #[cfg(unix)]
-    socket.set_reuse_port(true)?;
-
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()?;
-    socket.bind(&addr.into())?;
-
-    let multi_addr: std::net::Ipv4Addr = multicast_addr.parse()?;
-    let interface: std::net::Ipv4Addr = "127.0.0.1".parse()?;
-    socket.join_multicast_v4(&multi_addr, &interface)?;
-    socket.set_nonblocking(true)?;
-    let listener = tokio::net::UdpSocket::from_std(socket.into())?;
+    let (listener, port) = bind_rtp_listener(multicast_addr, preferred_port)?;
 
     println!("Listener bound to {}", listener.local_addr()?);
 
@@ -225,6 +215,54 @@ fn resource_config_path() -> PathBuf {
 
 fn resource_metadata_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/resources/e2e-metadata.toml")
+}
+
+fn bind_rtp_listener(
+    multicast_addr: &str,
+    preferred_port: u16,
+) -> Result<(tokio::net::UdpSocket, u16)> {
+    match bind_rtp_listener_to_port(multicast_addr, preferred_port) {
+        Ok(listener) => {
+            let port = listener.local_addr()?.port();
+            Ok((listener, port))
+        }
+        Err(error) if error.kind() == ErrorKind::AddrInUse => {
+            let listener = bind_rtp_listener_to_port(multicast_addr, 0)?;
+            let port = listener.local_addr()?.port();
+            Ok((listener, port))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn bind_rtp_listener_to_port(
+    multicast_addr: &str,
+    port: u16,
+) -> std::io::Result<tokio::net::UdpSocket> {
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse().map_err(|error| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid listener address: {error}"),
+        )
+    })?;
+    socket.bind(&addr.into())?;
+
+    let multi_addr: std::net::Ipv4Addr = multicast_addr.parse().map_err(|error| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid multicast address: {error}"),
+        )
+    })?;
+    let interface: std::net::Ipv4Addr = "127.0.0.1".parse().expect("loopback IP should parse");
+    socket.join_multicast_v4(&multi_addr, &interface)?;
+    socket.set_nonblocking(true)?;
+
+    tokio::net::UdpSocket::from_std(socket.into())
 }
 
 fn create_short_loop_wav() -> Result<PathBuf> {
