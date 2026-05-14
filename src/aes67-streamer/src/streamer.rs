@@ -40,7 +40,7 @@ pub struct StreamConfig {
     pub ttl: u8,
     pub sap: bool,
     pub payload_type: u8,
-    pub ssrc: u32,
+    pub ssrc: Option<u32>,
     pub session_name: String,
 }
 
@@ -57,7 +57,7 @@ impl Default for StreamConfig {
             ttl: 32,
             sap: true,
             payload_type: 97,
-            ssrc: 0x12345678,
+            ssrc: None,
             session_name: "AES67 Stream".to_string(),
         }
     }
@@ -158,7 +158,11 @@ impl Aes67Streamer {
         };
 
         // Create RTP packetizer using actual sample rate
-        let mut rtp_packetizer = RtpPacketizer::new(config.payload_type, config.ssrc);
+        let ssrc = resolve_ssrc(config.ssrc);
+        if config.ssrc.is_none() {
+            log::info!("Generated RTP SSRC: 0x{ssrc:08X}");
+        }
+        let mut rtp_packetizer = RtpPacketizer::new(config.payload_type, ssrc);
 
         // Set initial PTP timestamp
         if let Ok(ptp_timestamp) = ptp_client.rtp_timestamp(config.target_sample_rate) {
@@ -374,6 +378,19 @@ fn samples_per_packet(sample_rate: u32, packet_time_ms: u32) -> usize {
     (sample_rate as usize * packet_time_ms as usize) / 1000
 }
 
+fn resolve_ssrc(configured_ssrc: Option<u32>) -> u32 {
+    configured_ssrc.unwrap_or_else(generate_random_ssrc)
+}
+
+fn generate_random_ssrc() -> u32 {
+    loop {
+        let ssrc = rand::random::<u32>();
+        if ssrc != 0 && ssrc != 0x12345678 {
+            return ssrc;
+        }
+    }
+}
+
 fn build_sdp(context: &SdpContext, clock_identity: ClockIdentity, config: &StreamConfig) -> String {
     format!(
         "v=0\r\n\
@@ -436,9 +453,22 @@ mod tests {
         assert_eq!(config.ttl, 32);
         assert!(config.sap);
         assert_eq!(config.payload_type, 97);
-        assert_eq!(config.ssrc, 0x12345678);
+        assert_eq!(config.ssrc, None);
         assert_eq!(config.session_name, "AES67 Stream");
         assert!(!config.verbose);
+    }
+
+    #[test]
+    fn generated_ssrc_when_unspecified_is_nonzero_and_not_legacy_default() {
+        let generated = resolve_ssrc(None);
+
+        assert_ne!(generated, 0);
+        assert_ne!(generated, 0x12345678);
+    }
+
+    #[test]
+    fn configured_ssrc_is_used_without_randomization() {
+        assert_eq!(resolve_ssrc(Some(0xDEADBEEF)), 0xDEADBEEF);
     }
 
     #[tokio::test]

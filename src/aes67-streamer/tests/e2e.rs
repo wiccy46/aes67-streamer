@@ -160,6 +160,10 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
                             3735928559,
                             "SSRC should match stream metadata"
                         );
+                    } else if matches!(args_source, StreamerArgs::Cli | StreamerArgs::ConfigFile) {
+                        let ssrc = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                        assert_ne!(ssrc, 0, "generated SSRC should be non-zero");
+                        assert_ne!(ssrc, 0x12345678, "generated SSRC should not use the old fixed default");
                     }
                 }
             }
