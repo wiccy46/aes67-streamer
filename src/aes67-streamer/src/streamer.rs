@@ -186,11 +186,6 @@ impl Aes67Streamer {
         })
     }
 
-    #[allow(dead_code)]
-    pub async fn start(&mut self) -> Result<()> {
-        self.run_until_cancelled(CancellationToken::new()).await
-    }
-
     pub async fn run_until_cancelled(&mut self, shutdown: CancellationToken) -> Result<()> {
         log::info!("Starting audio stream...");
 

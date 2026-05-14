@@ -193,10 +193,10 @@ impl AudioReader {
             // The audio_sample.data is in non-interleaved format: [Ch0_frames..., Ch1_frames...]
             let frames_per_channel = audio_sample.frames;
 
-            for ch_idx in 0..channels as usize {
+            for (ch_idx, channel_buffer) in channel_buffers.iter_mut().enumerate() {
                 let start_idx = ch_idx * frames_per_channel;
                 let end_idx = start_idx + frames_per_channel;
-                channel_buffers[ch_idx].extend_from_slice(&audio_sample.data[start_idx..end_idx]);
+                channel_buffer.extend_from_slice(&audio_sample.data[start_idx..end_idx]);
             }
         }
 
@@ -454,8 +454,7 @@ impl AudioReader {
                 // Convert channel by channel (non-interleaved layout)
                 for channel_idx in 0..channels {
                     let channel_data = buf.chan(channel_idx as usize);
-                    for frame_idx in 0..channel_data.len().min(frames) {
-                        let sample = channel_data[frame_idx];
+                    for sample in channel_data.iter().take(channel_data.len().min(frames)) {
                         let sample_val = sample.inner();
                         let normalized = sample_val as f32 / 8388608.0;
                         noninterleaved_samples.push(normalized);
@@ -469,9 +468,8 @@ impl AudioReader {
                 // F32 is already normalized, just convert to non-interleaved
                 for channel_idx in 0..channels {
                     let channel_data = buf.chan(channel_idx as usize);
-                    for frame_idx in 0..channel_data.len().min(frames) {
-                        let sample = channel_data[frame_idx];
-                        noninterleaved_samples.push(sample);
+                    for sample in channel_data.iter().take(channel_data.len().min(frames)) {
+                        noninterleaved_samples.push(*sample);
                     }
                 }
             }
@@ -887,7 +885,7 @@ mod tests {
             while frame_count < max_frames {
                 match reader.read_next_frame().expect("Failed to read frame") {
                     Some(sample) => {
-                        assert!(sample.data.len() > 0);
+                        assert!(!sample.data.is_empty());
                         assert_eq!(sample.channels, expected_channels);
                         assert_eq!(sample.sample_rate, expected_sample_rate);
                         frame_count += 1;

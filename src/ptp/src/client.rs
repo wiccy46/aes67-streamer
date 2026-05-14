@@ -14,8 +14,9 @@ use crate::messages::{
     Timestamp,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum PtpState {
+    #[default]
     Initializing,
     Listening,
     Uncalibrated,
@@ -54,12 +55,6 @@ pub struct PtpStats {
     pub state: PtpState,
     pub local_identity: ClockIdentity,
     pub master_identity: Option<ClockIdentity>,
-}
-
-impl Default for PtpState {
-    fn default() -> Self {
-        PtpState::Initializing
-    }
 }
 
 /// A simple clock abstraction that can be adjusted
@@ -170,8 +165,9 @@ impl PtpClient {
         self.stop();
         let handle = self.task.lock().unwrap().take();
         if let Some(handle) = handle {
-            if let Err(e) = handle.await {
-                log::warn!("PTP task failed to join: {e}");
+            match handle.await {
+                Ok(()) => {}
+                Err(e) => log::warn!("PTP task failed to join: {e}"),
             }
         }
     }
@@ -271,11 +267,6 @@ impl PtpClient {
         *self.is_running.lock().unwrap()
     }
 
-    // Legacy method for compatibility with existing code
-    pub fn tick(&mut self) {
-        // No-op in async implementation
-    }
-
     async fn run_ptp_loop(
         config: PtpConfig,
         clock: Arc<Mutex<SimpleClock>>,
@@ -322,20 +313,17 @@ impl PtpClient {
                             continue;
                         }
 
-                        match header.message_type {
-                            MessageType::Sync => {
-                                // Record arrival time
-                                let arrival_ts = SimpleClock::system_now_ns()?;
-                                last_sync_ts = Some(arrival_ts);
-                                last_sync_seq_id = Some(header.sequence_id);
+                        if header.message_type == MessageType::Sync {
+                            // Record arrival time
+                            let arrival_ts = SimpleClock::system_now_ns()?;
+                            last_sync_ts = Some(arrival_ts);
+                            last_sync_seq_id = Some(header.sequence_id);
 
-                                let mut stats = stats.lock().unwrap();
-                                stats.sync_count += 1;
-                                if stats.state == PtpState::Listening {
-                                    stats.state = PtpState::Uncalibrated;
-                                }
+                            let mut stats = stats.lock().unwrap();
+                            stats.sync_count += 1;
+                            if stats.state == PtpState::Listening {
+                                stats.state = PtpState::Uncalibrated;
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -347,61 +335,66 @@ impl PtpClient {
 
                         match header.message_type {
                             MessageType::FollowUp => {
-                                if let Some(sync_seq) = last_sync_seq_id {
-                                    if header.sequence_id == sync_seq {
-                                        // Found matching FollowUp
-                                        if let Ok(origin_ts) = Timestamp::from_bytes(&general_buf[34..44]) {
-                                            let origin_ns = origin_ts.as_nanos() as u64;
-                                            if let Some(arrival_ns) = last_sync_ts {
-                                                let offset = origin_ns as i64 - arrival_ns as i64;
-                                                clock.lock().unwrap().set_offset(offset);
+                                let (Some(sync_seq), Some(arrival_ns)) =
+                                    (last_sync_seq_id, last_sync_ts)
+                                else {
+                                    continue;
+                                };
 
-                                                {
-                                                    let mut stats = stats.lock().unwrap();
-                                                    stats.offset_ns = offset;
-                                                    stats.state = PtpState::Uncalibrated;
-                                                    stats.master_identity =
-                                                        Some(ClockIdentity::from_bytes([
-                                                            header.source_port_identity[0],
-                                                            header.source_port_identity[1],
-                                                            header.source_port_identity[2],
-                                                            header.source_port_identity[3],
-                                                            header.source_port_identity[4],
-                                                            header.source_port_identity[5],
-                                                            header.source_port_identity[6],
-                                                            header.source_port_identity[7],
-                                                        ]));
-                                                }
-
-                                                let delay_req_sent_ns = SimpleClock::system_now_ns()?;
-                                                let delay_req = DelayReqMessage {
-                                                    domain_number: config.domain,
-                                                    source_port_identity: local_port_identity,
-                                                    sequence_id: delay_req_sequence_id,
-                                                    origin_timestamp: Timestamp::from_nanos(delay_req_sent_ns),
-                                                };
-                                                pending_delay_request = Some(PendingDelayRequest {
-                                                    sequence_id: delay_req_sequence_id,
-                                                    sent_ns: delay_req_sent_ns,
-                                                    sync_origin_ns: origin_ns,
-                                                    sync_arrival_ns: arrival_ns,
-                                                    requesting_port_identity: local_port_identity,
-                                                });
-                                                delay_req_sequence_id = delay_req_sequence_id.wrapping_add(1);
-
-                                                let delay_req_bytes = delay_req.to_bytes();
-                                                if let Err(error) = event_socket
-                                                    .send_to(&delay_req_bytes, ptp_event_addr)
-                                                    .await
-                                                {
-                                                    log::warn!("Failed to send PTP DelayReq: {error}");
-                                                }
-
-                                                log::debug!("Synced with master, one-way offset: {} ns", offset);
-                                            }
-                                        }
-                                    }
+                                if header.sequence_id != sync_seq {
+                                    continue;
                                 }
+
+                                let Ok(origin_ts) = Timestamp::from_bytes(&general_buf[34..44])
+                                else {
+                                    continue;
+                                };
+
+                                let origin_ns = origin_ts.as_nanos() as u64;
+                                let offset = origin_ns as i64 - arrival_ns as i64;
+                                clock.lock().unwrap().set_offset(offset);
+
+                                {
+                                    let mut stats = stats.lock().unwrap();
+                                    stats.offset_ns = offset;
+                                    stats.state = PtpState::Uncalibrated;
+                                    stats.master_identity = Some(ClockIdentity::from_bytes([
+                                        header.source_port_identity[0],
+                                        header.source_port_identity[1],
+                                        header.source_port_identity[2],
+                                        header.source_port_identity[3],
+                                        header.source_port_identity[4],
+                                        header.source_port_identity[5],
+                                        header.source_port_identity[6],
+                                        header.source_port_identity[7],
+                                    ]));
+                                }
+
+                                let delay_req_sent_ns = SimpleClock::system_now_ns()?;
+                                let delay_req = DelayReqMessage {
+                                    domain_number: config.domain,
+                                    source_port_identity: local_port_identity,
+                                    sequence_id: delay_req_sequence_id,
+                                    origin_timestamp: Timestamp::from_nanos(delay_req_sent_ns),
+                                };
+                                pending_delay_request = Some(PendingDelayRequest {
+                                    sequence_id: delay_req_sequence_id,
+                                    sent_ns: delay_req_sent_ns,
+                                    sync_origin_ns: origin_ns,
+                                    sync_arrival_ns: arrival_ns,
+                                    requesting_port_identity: local_port_identity,
+                                });
+                                delay_req_sequence_id = delay_req_sequence_id.wrapping_add(1);
+
+                                let delay_req_bytes = delay_req.to_bytes();
+                                if let Err(error) = event_socket
+                                    .send_to(&delay_req_bytes, ptp_event_addr)
+                                    .await
+                                {
+                                    log::warn!("Failed to send PTP DelayReq: {error}");
+                                }
+
+                                log::debug!("Synced with master, one-way offset: {} ns", offset);
                             }
                             MessageType::DelayResp => {
                                 let _ = Self::apply_delay_resp_bytes(

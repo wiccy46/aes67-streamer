@@ -102,35 +102,32 @@ impl RtpPacketizer {
     pub fn set_base_timestamp(&mut self, timestamp: u32) {
         self.base_timestamp = timestamp;
     }
-    
+
     /// Create RTP packet from audio sample with explicit timestamp
-    pub fn create_packet_with_timestamp(&mut self, sample: &AudioSample, timestamp: u32) -> Result<RtpPacket> {
-        // Create header for this packet
-        let mut header = self.header_template.clone();
-        header.sequence_number = self.sequence_number;
-        header.timestamp = timestamp;
-        
-        // Convert audio sample to byte payload
-        let payload = self.audio_to_payload(sample)?;
-        
-        // Update state
-        self.sequence_number = self.sequence_number.wrapping_add(1);
-        self.samples_processed += sample.frames as u64;
-        
-        Ok(RtpPacket { header, payload })
+    pub fn create_packet_with_timestamp(
+        &mut self,
+        sample: &AudioSample,
+        timestamp: u32,
+    ) -> Result<RtpPacket> {
+        self.create_packet_at_timestamp(sample, timestamp)
     }
 
     /// Create RTP packet from audio sample
     pub fn create_packet(&mut self, sample: &AudioSample) -> Result<RtpPacket> {
         let timestamp = self.base_timestamp + (self.samples_processed as u32);
+        self.create_packet_at_timestamp(sample, timestamp)
+    }
 
+    fn create_packet_at_timestamp(
+        &mut self,
+        sample: &AudioSample,
+        timestamp: u32,
+    ) -> Result<RtpPacket> {
         let mut header = self.header_template.clone();
         header.sequence_number = self.sequence_number;
         header.timestamp = timestamp;
-
         let payload = self.audio_to_payload(sample)?;
 
-        // Update state
         self.sequence_number = self.sequence_number.wrapping_add(1);
         self.samples_processed += sample.frames as u64;
 
@@ -254,6 +251,43 @@ mod tests {
         let packet2 = packetizer.create_packet(&sample).unwrap();
         assert_eq!(packet2.header.sequence_number, 1);
         assert_eq!(packet2.header.timestamp, 2); // 2 frames processed
+    }
+
+    #[test]
+    fn explicit_timestamp_packets_still_advance_packetizer_state() {
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        let sample = AudioSample {
+            data: vec![0.5, -0.5, 0.25, -0.25],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 2,
+        };
+
+        let packet = packetizer
+            .create_packet_with_timestamp(&sample, 0xABCDEF01)
+            .unwrap();
+
+        assert_eq!(packet.header.timestamp, 0xABCDEF01);
+        assert_eq!(packet.header.sequence_number, 0);
+        assert_eq!(packetizer.sequence_number(), 1);
+        assert_eq!(packetizer.samples_processed(), 2);
+    }
+
+    #[test]
+    fn reset_clears_sequence_and_sample_position() {
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        let sample = AudioSample {
+            data: vec![0.5, -0.5, 0.25, -0.25],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 2,
+        };
+        packetizer.create_packet(&sample).unwrap();
+
+        packetizer.reset();
+
+        assert_eq!(packetizer.sequence_number(), 0);
+        assert_eq!(packetizer.samples_processed(), 0);
     }
 
     #[test]
