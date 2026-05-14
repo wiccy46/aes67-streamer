@@ -60,7 +60,7 @@ impl Default for StreamConfig {
             interface: None,
             packet_time_ms: Some(1),
             payload_type: Some(97),
-            ssrc: Some(0x12345678),
+            ssrc: None,
             ttl: Some(32),
             sap: Some(true),
             ptp_domain: Some(0),
@@ -97,6 +97,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.stream.port, Some(5004));
         assert_eq!(config.stream.payload_type, Some(97));
+        assert_eq!(config.stream.ssrc, None);
         assert_eq!(config.runtime.verbose, Some(false));
     }
 

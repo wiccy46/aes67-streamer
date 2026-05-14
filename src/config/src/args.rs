@@ -18,7 +18,7 @@ pub struct Args {
     pub ttl: u8,
     pub sap: bool,
     pub payload_type: u8,
-    pub ssrc: u32,
+    pub ssrc: Option<u32>,
     pub session_name: String,
     pub packet_time_ms: u32,
 }
@@ -237,10 +237,8 @@ fn merged_payload_type(config: Option<&Config>) -> Result<u8> {
     Ok(payload_type)
 }
 
-fn merged_ssrc(config: Option<&Config>) -> u32 {
-    config
-        .and_then(|config| config.stream.ssrc)
-        .unwrap_or(0x12345678)
+fn merged_ssrc(config: Option<&Config>) -> Option<u32> {
+    config.and_then(|config| config.stream.ssrc)
 }
 
 fn merged_session_name(config: Option<&Config>) -> String {
@@ -318,7 +316,7 @@ mod tests {
             ttl: 32,
             sap: true,
             payload_type: 97,
-            ssrc: 0x12345678,
+            ssrc: None,
             session_name: "AES67 Stream".to_string(),
             packet_time_ms: 1,
         };
@@ -389,6 +387,7 @@ mod tests {
         assert_eq!(args.port, 6000);
         assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
         assert_eq!(args.ptp_domain, Some(7));
+        assert_eq!(args.ssrc, None);
         assert!(args.loop_playback);
 
         fs::remove_file(path).ok();
@@ -509,7 +508,7 @@ mod tests {
 
         assert_eq!(args.ttl, 12);
         assert_eq!(args.payload_type, 101);
-        assert_eq!(args.ssrc, 3735928559);
+        assert_eq!(args.ssrc, Some(3735928559));
         assert_eq!(args.session_name, "Configured Stream");
         assert_eq!(args.packet_time_ms, 2);
         assert_eq!(args.gain_db, -6.0);
@@ -561,7 +560,7 @@ mod tests {
         assert!(args.verbose);
         assert_eq!(args.ttl, 12);
         assert_eq!(args.payload_type, 101);
-        assert_eq!(args.ssrc, 3735928559);
+        assert_eq!(args.ssrc, Some(3735928559));
         assert_eq!(args.session_name, "Configured Stream");
         assert_eq!(args.packet_time_ms, 2);
         assert_eq!(args.gain_db, -6.0);
