@@ -7,115 +7,71 @@ pub struct Config {
     #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
-    pub network: NetworkConfig,
+    pub stream: StreamConfig,
     #[serde(default)]
-    pub rtp: RtpConfig,
-    #[serde(default)]
-    pub ptp: PtpConfig,
-    #[serde(default)]
-    pub performance: PerformanceConfig,
+    pub runtime: RuntimeConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioConfig {
-    pub file_path: Option<String>,
-    pub sample_rate: Option<u32>,
-    pub channels: Option<u8>,
-    pub bit_depth: Option<u8>,
+    pub file: Option<String>,
     #[serde(rename = "loop")]
     pub loop_playback: Option<bool>,
+    pub duration_seconds: Option<f64>,
+    pub gain_db: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkConfig {
-    pub multicast_address: Option<String>,
+pub struct StreamConfig {
+    pub name: Option<String>,
+    pub address: Option<String>,
     pub port: Option<u16>,
     pub interface: Option<String>,
-    pub ttl: Option<u8>,
-    pub buffer_size: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RtpConfig {
+    pub packet_time_ms: Option<u32>,
     pub payload_type: Option<u8>,
     pub ssrc: Option<u32>,
-    pub session_name: Option<String>,
-    pub packet_time_us: Option<u32>,
+    pub ttl: Option<u8>,
+    pub sap: Option<bool>,
+    pub ptp_domain: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PtpConfig {
-    pub domain: Option<u8>,
-    pub priority1: Option<u8>,
-    pub priority2: Option<u8>,
-    pub announce_interval_ms: Option<u32>,
-    pub sync_interval_ms: Option<u32>,
-    pub clock_source: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerformanceConfig {
-    pub enable_rt_scheduling: Option<bool>,
-    pub audio_thread_priority: Option<String>,
-    pub network_thread_priority: Option<String>,
-    pub buffer_size_ms: Option<u32>,
+pub struct RuntimeConfig {
+    pub verbose: Option<bool>,
 }
 
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            file_path: None,
-            sample_rate: Some(48000),
-            channels: Some(2),
-            bit_depth: Some(24),
+            file: None,
             loop_playback: Some(false),
+            duration_seconds: None,
+            gain_db: Some(0.0),
         }
     }
 }
 
-impl Default for NetworkConfig {
+impl Default for StreamConfig {
     fn default() -> Self {
         Self {
-            multicast_address: Some("239.192.1.1".to_string()),
+            name: Some("AES67 Stream".to_string()),
+            address: Some("239.192.1.1".to_string()),
             port: Some(5004),
             interface: None,
-            ttl: Some(32),
-            buffer_size: Some(65536),
-        }
-    }
-}
-
-impl Default for RtpConfig {
-    fn default() -> Self {
-        Self {
+            packet_time_ms: Some(1),
             payload_type: Some(97),
             ssrc: Some(0x12345678),
-            session_name: Some("AES67 Stream".to_string()),
-            packet_time_us: Some(1000),
+            ttl: Some(32),
+            sap: Some(true),
+            ptp_domain: Some(0),
         }
     }
 }
 
-impl Default for PtpConfig {
+impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            domain: Some(0),
-            priority1: Some(128),
-            priority2: Some(128),
-            announce_interval_ms: Some(1000),
-            sync_interval_ms: Some(125),
-            clock_source: Some("auto".to_string()),
-        }
-    }
-}
-
-impl Default for PerformanceConfig {
-    fn default() -> Self {
-        Self {
-            enable_rt_scheduling: Some(true),
-            audio_thread_priority: Some("high".to_string()),
-            network_thread_priority: Some("high".to_string()),
-            buffer_size_ms: Some(15),
+            verbose: Some(false),
         }
     }
 }
@@ -139,17 +95,17 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.audio.sample_rate, Some(48000));
-        assert_eq!(config.network.port, Some(5004));
-        assert_eq!(config.rtp.payload_type, Some(97));
+        assert_eq!(config.stream.port, Some(5004));
+        assert_eq!(config.stream.payload_type, Some(97));
+        assert_eq!(config.runtime.verbose, Some(false));
     }
 
     #[test]
     fn test_config_serialization() {
         let config = Config::default();
         let toml_str = toml::to_string(&config).unwrap();
-        assert!(toml_str.contains("sample_rate"));
         assert!(toml_str.contains("loop"));
-        assert!(toml_str.contains("multicast_address"));
+        assert!(toml_str.contains("address"));
+        assert!(toml_str.contains("verbose"));
     }
 }

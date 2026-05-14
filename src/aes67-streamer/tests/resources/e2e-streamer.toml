@@ -1,7 +1,7 @@
 [audio]
-file_path = "../../tests/piano_freesound.wav"
+file = "../../tests/piano_freesound.wav"
 
-[network]
-multicast_address = "239.1.2.4"
+[stream]
+address = "239.1.2.4"
 port = 55006
 interface = "127.0.0.1"

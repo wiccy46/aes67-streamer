@@ -76,16 +76,25 @@ Example `streamer.toml`:
 
 ```toml
 [audio]
-file_path = "audio.wav"
+file = "audio.wav"
 loop = false
+duration_seconds = 30
+gain_db = 0.0
 
-[network]
-multicast_address = "239.69.83.1"
+[stream]
+name = "AES67 Stream"
+address = "239.69.83.1"
 port = 5004
 interface = "192.168.1.100"
+packet_time_ms = 1
+payload_type = 97
+ssrc = 305419896
+ttl = 32
+sap = true
+ptp_domain = 0
 
-[ptp]
-domain = 0
+[runtime]
+verbose = false
 ```
 
 CLI flags override config file values. For example, this uses the file,
@@ -107,6 +116,24 @@ Looping is disabled by default. In TOML, use:
 [audio]
 loop = true
 ```
+
+Keep the CLI for common startup choices. Use TOML for stream metadata and
+audio-over-IP tuning:
+
+```toml
+[audio]
+gain_db = -3.0
+
+[stream]
+payload_type = 97
+ssrc = 305419896
+packet_time_ms = 1
+ttl = 32
+```
+
+The streamer generates SDP from the loaded file and stream settings and logs it
+at startup. SDP file export can be added later without making users hand-write
+SDP in the config.
 
 ### Testing & Development
 ```bash
@@ -147,8 +174,8 @@ tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 | Option | Description | Default | Example |
 |--------|-------------|---------|---------|
 | `--config` | TOML configuration file path | None | `streamer.toml` |
-| `--file` | Audio file path; required unless set as `audio.file_path` in config | Required | `audio.wav` |
-| `--address` | Multicast IP address; required unless set as `network.multicast_address` in config | Required | `239.69.83.1` |
+| `--file` | Audio file path; required unless set as `audio.file` in config | Required | `audio.wav` |
+| `--address` | Multicast IP address; required unless set as `stream.address` in config | Required | `239.69.83.1` |
 | `--port` | UDP port number | `5004` | `5004` |
 | `--interface` | Network interface IP | Auto-detect | `192.168.1.100` |
 | `--ptp-domain` | PTP domain number | `0` | `1` |

@@ -17,7 +17,7 @@ pub struct Aes67Streamer {
     rtp_packetizer: RtpPacketizer,
     multicast_socket: MulticastSocket,
     ptp_client: PtpClient,
-    sap_announcer: SapAnnouncer,
+    sap_announcer: Option<SapAnnouncer>,
     config: StreamConfig,
 }
 
@@ -35,6 +35,11 @@ pub struct StreamConfig {
     /// Optional maximum stream duration for tests and scripted runs.
     pub duration: Option<Duration>,
     pub loop_playback: bool,
+    pub ttl: u8,
+    pub sap: bool,
+    pub payload_type: u8,
+    pub ssrc: u32,
+    pub session_name: String,
 }
 
 impl Default for StreamConfig {
@@ -47,6 +52,11 @@ impl Default for StreamConfig {
             verbose: false,
             duration: None,
             loop_playback: false,
+            ttl: 32,
+            sap: true,
+            payload_type: 97,
+            ssrc: 0x12345678,
+            session_name: "AES67 Stream".to_string(),
         }
     }
 }
@@ -64,7 +74,7 @@ impl Aes67Streamer {
     ) -> Result<Self> {
         log::info!("Initializing AES67 Streamer...");
         let samples_per_packet =
-            config.target_sample_rate as usize / (config.packet_time_ms as usize * 1000);
+            samples_per_packet(config.target_sample_rate, config.packet_time_ms);
 
         let audio_reader =
             AudioReader::with_resampling(audio_file, config.target_sample_rate, samples_per_packet)
@@ -92,7 +102,8 @@ impl Aes67Streamer {
         let multicast_ip: Ipv4Addr =
             parse_stream_address(multicast_addr).context("Invalid stream address")?;
 
-        let multicast_config = MulticastConfig::new(multicast_ip, port, local_ip);
+        let mut multicast_config = MulticastConfig::new(multicast_ip, port, local_ip);
+        multicast_config.ttl = config.ttl;
         let multicast_socket =
             MulticastSocket::new(multicast_config).context("Failed to create multicast socket")?;
 
@@ -107,38 +118,23 @@ impl Aes67Streamer {
             .await
             .context("Failed to start PTP client")?;
 
-        // Setup SAP Announcer
-        // Generate simple SDP
-        let sdp = format!(
-            "v=0\r\n\
-             o=- 123456 123456 IN IP4 {}\r\n\
-             s=AES67 Streamer\r\n\
-             c=IN IP4 {}/{}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP 97\r\n\
-             a=rtpmap:97 L24/{}/2\r\n\
-             a=ptime:{}\r\n\
-             a=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\r\n\
-             a=mediaclk:direct=0\r\n",
-            local_ip,
-            multicast_ip,
-            1, // TTL
-            port,
-            config.target_sample_rate,
-            config.packet_time_ms
-        );
+        let sdp = build_sdp(local_ip, multicast_ip, port, audio_info.channels, &config);
+        log::info!("Generated SDP:\n{sdp}");
 
-        let sap_announcer =
-            SapAnnouncer::new(sdp, local_ip).context("Failed to create SAP announcer")?;
-        sap_announcer
-            .start()
-            .await
-            .context("Failed to start SAP announcer")?;
+        let sap_announcer = if config.sap {
+            let sap_announcer =
+                SapAnnouncer::new(sdp, local_ip).context("Failed to create SAP announcer")?;
+            sap_announcer
+                .start()
+                .await
+                .context("Failed to start SAP announcer")?;
+            Some(sap_announcer)
+        } else {
+            None
+        };
 
         // Create RTP packetizer using actual sample rate
-        let payload_type = 97; // Dynamic payload type for AES67 (24-bit audio)
-        let ssrc = 0x12345678; // TODO: Generate random SSRC
-        let mut rtp_packetizer = RtpPacketizer::new(payload_type, ssrc);
+        let mut rtp_packetizer = RtpPacketizer::new(config.payload_type, config.ssrc);
 
         // Set initial PTP timestamp
         if let Ok(ptp_timestamp) = ptp_client.rtp_timestamp(config.target_sample_rate) {
@@ -307,12 +303,49 @@ impl Aes67Streamer {
 
         // Stop background services
         log::info!("Stopping background services...");
-        self.sap_announcer.shutdown().await;
+        if let Some(sap_announcer) = &self.sap_announcer {
+            sap_announcer.shutdown().await;
+        }
         self.ptp_client.shutdown().await;
         log::info!("Background services stopped");
 
         Ok(())
     }
+}
+
+fn samples_per_packet(sample_rate: u32, packet_time_ms: u32) -> usize {
+    (sample_rate as usize * packet_time_ms as usize) / 1000
+}
+
+fn build_sdp(
+    local_ip: Ipv4Addr,
+    multicast_ip: Ipv4Addr,
+    port: u16,
+    audio_channels: u32,
+    config: &StreamConfig,
+) -> String {
+    format!(
+        "v=0\r\n\
+         o=- 123456 123456 IN IP4 {}\r\n\
+         s={}\r\n\
+         c=IN IP4 {}/{}\r\n\
+         t=0 0\r\n\
+         m=audio {} RTP/AVP {}\r\n\
+         a=rtpmap:{} L24/{}/{}\r\n\
+         a=ptime:{}\r\n\
+         a=ts-refclk:ptp=IEEE1588-2008:00-00-00-00-00-00-00-00:0\r\n\
+         a=mediaclk:direct=0\r\n",
+        local_ip,
+        config.session_name,
+        multicast_ip,
+        config.ttl,
+        port,
+        config.payload_type,
+        config.payload_type,
+        config.target_sample_rate,
+        audio_channels,
+        config.packet_time_ms
+    )
 }
 
 #[cfg(test)]
@@ -328,6 +361,11 @@ mod tests {
         assert_eq!(config.ptp_domain, 0);
         assert_eq!(config.duration, None);
         assert!(!config.loop_playback);
+        assert_eq!(config.ttl, 32);
+        assert!(config.sap);
+        assert_eq!(config.payload_type, 97);
+        assert_eq!(config.ssrc, 0x12345678);
+        assert_eq!(config.session_name, "AES67 Stream");
         assert!(!config.verbose);
     }
 
@@ -347,5 +385,36 @@ mod tests {
                 streamer.err()
             );
         }
+    }
+
+    #[test]
+    fn test_sdp_uses_stream_metadata() {
+        let config = StreamConfig {
+            payload_type: 101,
+            session_name: "Configured Stream".to_string(),
+            packet_time_ms: 2,
+            ttl: 12,
+            ..Default::default()
+        };
+
+        let sdp = build_sdp(
+            Ipv4Addr::new(127, 0, 0, 1),
+            Ipv4Addr::new(239, 10, 20, 30),
+            6000,
+            8,
+            &config,
+        );
+
+        assert!(sdp.contains("s=Configured Stream\r\n"));
+        assert!(sdp.contains("c=IN IP4 239.10.20.30/12\r\n"));
+        assert!(sdp.contains("m=audio 6000 RTP/AVP 101\r\n"));
+        assert!(sdp.contains("a=rtpmap:101 L24/48000/8\r\n"));
+        assert!(sdp.contains("a=ptime:2\r\n"));
+    }
+
+    #[test]
+    fn test_samples_per_packet_uses_packet_time() {
+        assert_eq!(samples_per_packet(48_000, 1), 48);
+        assert_eq!(samples_per_packet(48_000, 2), 96);
     }
 }
