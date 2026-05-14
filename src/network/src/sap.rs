@@ -98,8 +98,9 @@ impl SapAnnouncer {
         self.stop();
         let handle = self.task.lock().unwrap().take();
         if let Some(handle) = handle {
-            if let Err(e) = handle.await {
-                log::warn!("SAP announcer task failed to join: {e}");
+            match handle.await {
+                Ok(()) => {}
+                Err(e) => log::warn!("SAP announcer task failed to join: {e}"),
             }
         }
     }
@@ -112,11 +113,12 @@ fn build_sap_packet(sdp_payload: &str) -> Vec<u8> {
     // Msg Id Hash (2 bytes): 0x1234 (random)
     // Originating Source (4 bytes): 0.0.0.0 (or actual IP)
     // Payload Type (MIME): "application/sdp" -> but SAP usually just puts SDP text after header
-    let mut packet = Vec::new();
-    packet.push(0x20); // Header
-    packet.push(0x00); // Auth Len
-    packet.push(0x12); // Msg Id Hash
-    packet.push(0x34);
+    let mut packet = vec![
+        0x20, // Header
+        0x00, // Auth Len
+        0x12, // Msg Id Hash
+        0x34,
+    ];
     packet.extend_from_slice(&[0, 0, 0, 0]); // Originating Source (should be IP)
     packet.extend_from_slice(sdp_payload.as_bytes());
     packet
