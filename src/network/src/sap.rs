@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct SapAnnouncer {
     socket: Arc<UdpSocket>,
-    sdp_payload: String,
+    sdp_payload: Arc<Mutex<String>>,
     shutdown: CancellationToken,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -37,10 +37,18 @@ impl SapAnnouncer {
 
         Ok(Self {
             socket: Arc::new(socket),
-            sdp_payload,
+            sdp_payload: Arc::new(Mutex::new(sdp_payload)),
             shutdown: CancellationToken::new(),
             task: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn update_sdp_payload(&self, sdp_payload: String) {
+        *self.sdp_payload.lock().unwrap() = sdp_payload;
+    }
+
+    pub fn sdp_payload(&self) -> String {
+        self.sdp_payload.lock().unwrap().clone()
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -57,23 +65,6 @@ impl SapAnnouncer {
         // Msg Id Hash = 0 (should be random/unique but 0 is fine for simple)
         // Originating Source = Interface IP (we'll just use 0.0.0.0 or handle it in packet construction)
 
-        // Construct SAP packet
-        // Header (1 byte): 00100000 (V=1, others 0) -> 0x20
-        // Auth Len (1 byte): 0x00
-        // Msg Id Hash (2 bytes): 0x1234 (random)
-        // Originating Source (4 bytes): 0.0.0.0 (or actual IP)
-        // Payload Type (MIME): "application/sdp" -> but SAP usually just puts SDP text after header
-
-        let mut packet = Vec::new();
-        packet.push(0x20); // Header
-        packet.push(0x00); // Auth Len
-        packet.push(0x12); // Msg Id Hash
-        packet.push(0x34);
-        packet.extend_from_slice(&[0, 0, 0, 0]); // Originating Source (should be IP)
-
-        // Payload
-        packet.extend_from_slice(sdp_payload.as_bytes());
-
         log::info!("Starting SAP announcer to {}", sap_addr);
 
         let handle = tokio::spawn(async move {
@@ -84,6 +75,7 @@ impl SapAnnouncer {
                         break;
                     }
                     _ = interval.tick() => {
+                        let packet = build_sap_packet(&sdp_payload.lock().unwrap());
                         if let Err(e) = socket.send_to(&packet, sap_addr).await {
                             log::warn!("Failed to send SAP announcement: {}", e);
                         } else {
@@ -110,5 +102,38 @@ impl SapAnnouncer {
                 log::warn!("SAP announcer task failed to join: {e}");
             }
         }
+    }
+}
+
+fn build_sap_packet(sdp_payload: &str) -> Vec<u8> {
+    // Construct SAP packet
+    // Header (1 byte): 00100000 (V=1, others 0) -> 0x20
+    // Auth Len (1 byte): 0x00
+    // Msg Id Hash (2 bytes): 0x1234 (random)
+    // Originating Source (4 bytes): 0.0.0.0 (or actual IP)
+    // Payload Type (MIME): "application/sdp" -> but SAP usually just puts SDP text after header
+    let mut packet = Vec::new();
+    packet.push(0x20); // Header
+    packet.push(0x00); // Auth Len
+    packet.push(0x12); // Msg Id Hash
+    packet.push(0x34);
+    packet.extend_from_slice(&[0, 0, 0, 0]); // Originating Source (should be IP)
+    packet.extend_from_slice(sdp_payload.as_bytes());
+    packet
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sap_announcer_updates_sdp_payload() {
+        let announcer =
+            SapAnnouncer::new("v=0\r\ns=old\r\n".to_string(), Ipv4Addr::new(127, 0, 0, 1))
+                .expect("SAP announcer should be created");
+
+        announcer.update_sdp_payload("v=0\r\ns=new\r\n".to_string());
+
+        assert_eq!(announcer.sdp_payload(), "v=0\r\ns=new\r\n");
     }
 }

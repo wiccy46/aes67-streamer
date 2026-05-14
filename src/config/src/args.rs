@@ -282,15 +282,19 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_CONFIG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn write_temp_config(contents: &str) -> PathBuf {
         let id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be valid")
             .as_nanos();
+        let sequence = TEMP_CONFIG_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "aes67-streamer-config-test-{}-{id}.toml",
+            "aes67-streamer-config-test-{}-{id}-{sequence}.toml",
             std::process::id()
         ));
         fs::write(&path, contents).expect("temp config should be writable");

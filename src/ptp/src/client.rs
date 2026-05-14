@@ -182,6 +182,26 @@ impl PtpClient {
         stats.master_identity.unwrap_or(stats.local_identity)
     }
 
+    pub fn apply_announce_bytes(&self, bytes: &[u8]) -> Result<()> {
+        Self::apply_announce_bytes_to_stats(&self.config, &self.stats, bytes)
+    }
+
+    fn apply_announce_bytes_to_stats(
+        config: &PtpConfig,
+        stats: &Arc<Mutex<PtpStats>>,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let announce = AnnounceMessage::from_bytes(bytes)?;
+        if announce.domain_number != config.domain {
+            return Ok(());
+        }
+
+        let mut stats = stats.lock().unwrap();
+        stats.announce_count += 1;
+        stats.master_identity = Some(announce.grandmaster_identity);
+        Ok(())
+    }
+
     pub fn rtp_timestamp(&self, sample_rate: u32) -> Result<u32> {
         let now_ns = self.get_time();
         // Calculate RTP timestamp based on PTP time
@@ -299,11 +319,11 @@ impl PtpClient {
                                 }
                             }
                             MessageType::Announce => {
-                                let mut stats = stats.lock().unwrap();
-                                stats.announce_count += 1;
-                                if let Ok(announce) = AnnounceMessage::from_bytes(&general_buf[..len]) {
-                                    stats.master_identity = Some(announce.grandmaster_identity);
-                                }
+                                let _ = Self::apply_announce_bytes_to_stats(
+                                    &config,
+                                    &stats,
+                                    &general_buf[..len],
+                                );
                             }
                             _ => {}
                         }
@@ -500,5 +520,46 @@ mod tests {
         assert_eq!(stats.state, PtpState::Initializing);
         assert_ne!(stats.local_identity, ClockIdentity::default());
         assert_eq!(client.reference_clock_identity(), stats.local_identity);
+    }
+
+    #[test]
+    fn announce_updates_reference_identity_and_ignores_wrong_domain() {
+        let client = PtpClient::new(PtpConfig {
+            domain: 7,
+            clock_identity: Some(ClockIdentity::from_bytes([
+                0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+            ])),
+            ..Default::default()
+        });
+        let first_master =
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]);
+        let wrong_domain_master =
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0xaa, 0xbb, 0xcc]);
+        let second_master =
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x65, 0x43, 0x21]);
+
+        client
+            .apply_announce_bytes(&announce_packet(7, first_master))
+            .expect("valid announce should be accepted");
+        assert_eq!(client.reference_clock_identity(), first_master);
+
+        client
+            .apply_announce_bytes(&announce_packet(8, wrong_domain_master))
+            .expect("wrong-domain announce should be ignored");
+        assert_eq!(client.reference_clock_identity(), first_master);
+
+        client
+            .apply_announce_bytes(&announce_packet(7, second_master))
+            .expect("later grandmaster should be accepted");
+        assert_eq!(client.reference_clock_identity(), second_master);
+    }
+
+    fn announce_packet(domain: u8, grandmaster_identity: ClockIdentity) -> Vec<u8> {
+        let mut bytes = vec![0u8; 64];
+        bytes[0] = 0x0b;
+        bytes[1] = 0x02;
+        bytes[4] = domain;
+        bytes[53..61].copy_from_slice(&grandmaster_identity.as_bytes());
+        bytes
     }
 }

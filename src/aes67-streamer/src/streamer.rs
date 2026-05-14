@@ -18,6 +18,8 @@ pub struct Aes67Streamer {
     multicast_socket: MulticastSocket,
     ptp_client: PtpClient,
     sap_announcer: Option<SapAnnouncer>,
+    sdp_context: SdpContext,
+    clock_identity: ClockIdentity,
     config: StreamConfig,
 }
 
@@ -59,6 +61,14 @@ impl Default for StreamConfig {
             session_name: "AES67 Stream".to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SdpContext {
+    local_ip: Ipv4Addr,
+    multicast_ip: Ipv4Addr,
+    port: u16,
+    audio_channels: u32,
 }
 
 /// An Aes67Streamer is the main entry of the app
@@ -126,14 +136,13 @@ impl Aes67Streamer {
             );
         }
 
-        let sdp = build_sdp(
+        let sdp_context = SdpContext {
             local_ip,
             multicast_ip,
             port,
-            audio_info.channels,
-            clock_identity,
-            &config,
-        );
+            audio_channels: audio_info.channels,
+        };
+        let sdp = build_sdp(&sdp_context, clock_identity, &config);
         log::info!("Generated SDP:\n{sdp}");
 
         let sap_announcer = if config.sap {
@@ -167,6 +176,8 @@ impl Aes67Streamer {
             multicast_socket,
             ptp_client,
             sap_announcer,
+            sdp_context,
+            clock_identity,
             config,
         })
     }
@@ -183,6 +194,10 @@ impl Aes67Streamer {
         let mut bytes_sent = 0;
         let start_time = Instant::now();
         let packet_duration = Duration::from_millis(self.config.packet_time_ms as u64);
+        let mut next_sdp_refresh_check = start_time + Duration::from_secs(10);
+        let debug_packet_logging = log::log_enabled!(log::Level::Debug);
+        let mut next_debug_packet_log = 100;
+        let mut next_verbose_stats_log = 1000;
         let stop_reason: &'static str;
 
         loop {
@@ -245,11 +260,18 @@ impl Aes67Streamer {
                     packets_sent += 1;
                     bytes_sent += sent;
 
-                    if packets_sent % 100 == 0 {
+                    if debug_packet_logging && packets_sent >= next_debug_packet_log {
                         log::debug!("Sent packet {}", packets_sent);
+                        next_debug_packet_log += 100;
                     }
 
-                    if self.config.verbose && packets_sent % 1000 == 0 {
+                    let packet_sent_at = Instant::now();
+                    if packet_sent_at >= next_sdp_refresh_check {
+                        self.refresh_sdp_if_ptp_reference_changed();
+                        next_sdp_refresh_check = packet_sent_at + Duration::from_secs(10);
+                    }
+
+                    if self.config.verbose && packets_sent >= next_verbose_stats_log {
                         let ptp_stats = self.ptp_client.get_stats();
                         log::debug!(
                             "Sent {} packets, {} bytes - PTP: {:?}, offset: {}ns",
@@ -258,12 +280,13 @@ impl Aes67Streamer {
                             ptp_stats.state,
                             ptp_stats.offset_ns
                         );
+                        next_verbose_stats_log += 1000;
                     }
 
                     // Timing control - maintain packet rate
                     // Calculate when this packet should be sent based on audio timeline
                     let target_time = start_time + packet_duration * packets_sent as u32;
-                    let now = Instant::now();
+                    let now = packet_sent_at;
 
                     if now < target_time {
                         tokio::select! {
@@ -326,20 +349,32 @@ impl Aes67Streamer {
 
         Ok(())
     }
+
+    fn refresh_sdp_if_ptp_reference_changed(&mut self) {
+        let next_identity = self.ptp_client.reference_clock_identity();
+        if let Some(sdp) = refresh_sdp_for_clock_identity(
+            &mut self.clock_identity,
+            next_identity,
+            &self.sdp_context,
+            &self.config,
+        ) {
+            if let Some(sap_announcer) = &self.sap_announcer {
+                sap_announcer.update_sdp_payload(sdp.clone());
+            }
+            log::info!(
+                "PTP reference changed; refreshed SDP/SAP announcement for {}",
+                self.clock_identity
+            );
+            log::info!("Generated SDP:\n{sdp}");
+        }
+    }
 }
 
 fn samples_per_packet(sample_rate: u32, packet_time_ms: u32) -> usize {
     (sample_rate as usize * packet_time_ms as usize) / 1000
 }
 
-fn build_sdp(
-    local_ip: Ipv4Addr,
-    multicast_ip: Ipv4Addr,
-    port: u16,
-    audio_channels: u32,
-    clock_identity: ClockIdentity,
-    config: &StreamConfig,
-) -> String {
+fn build_sdp(context: &SdpContext, clock_identity: ClockIdentity, config: &StreamConfig) -> String {
     format!(
         "v=0\r\n\
          o=- 123456 123456 IN IP4 {}\r\n\
@@ -351,19 +386,38 @@ fn build_sdp(
          a=ptime:{}\r\n\
          a=ts-refclk:ptp=IEEE1588-2008:{}:{}\r\n\
          a=mediaclk:direct=0\r\n",
-        local_ip,
+        context.local_ip,
         config.session_name,
-        multicast_ip,
+        context.multicast_ip,
         config.ttl,
-        port,
+        context.port,
         config.payload_type,
         config.payload_type,
         config.target_sample_rate,
-        audio_channels,
+        context.audio_channels,
         config.packet_time_ms,
         clock_identity,
         config.ptp_domain
     )
+}
+
+fn refresh_sdp_for_clock_identity(
+    current_identity: &mut ClockIdentity,
+    next_identity: ClockIdentity,
+    context: &SdpContext,
+    config: &StreamConfig,
+) -> Option<String> {
+    if *current_identity == next_identity {
+        return None;
+    }
+
+    log::info!(
+        "PTP reference changed: {} -> {}",
+        current_identity,
+        next_identity
+    );
+    *current_identity = next_identity;
+    Some(build_sdp(context, next_identity, config))
 }
 
 #[cfg(test)]
@@ -415,11 +469,14 @@ mod tests {
             ..Default::default()
         };
 
+        let context = SdpContext {
+            local_ip: Ipv4Addr::new(127, 0, 0, 1),
+            multicast_ip: Ipv4Addr::new(239, 10, 20, 30),
+            port: 6000,
+            audio_channels: 8,
+        };
         let sdp = build_sdp(
-            Ipv4Addr::new(127, 0, 0, 1),
-            Ipv4Addr::new(239, 10, 20, 30),
-            6000,
-            8,
+            &context,
             ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]),
             &config,
         );
@@ -436,5 +493,34 @@ mod tests {
     fn test_samples_per_packet_uses_packet_time() {
         assert_eq!(samples_per_packet(48_000, 1), 48);
         assert_eq!(samples_per_packet(48_000, 2), 96);
+    }
+
+    #[test]
+    fn refresh_sdp_when_clock_identity_changes_builds_updated_sdp_once() {
+        let mut current_identity =
+            ClockIdentity::from_bytes([0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01]);
+        let next_identity =
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]);
+        let context = SdpContext {
+            local_ip: Ipv4Addr::new(127, 0, 0, 1),
+            multicast_ip: Ipv4Addr::new(239, 10, 20, 30),
+            port: 6000,
+            audio_channels: 2,
+        };
+        let config = StreamConfig::default();
+
+        let refreshed =
+            refresh_sdp_for_clock_identity(&mut current_identity, next_identity, &context, &config)
+                .expect("identity change should rebuild SDP");
+
+        assert_eq!(current_identity, next_identity);
+        assert!(refreshed.contains("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:0\r\n"));
+        assert!(refresh_sdp_for_clock_identity(
+            &mut current_identity,
+            next_identity,
+            &context,
+            &config,
+        )
+        .is_none());
     }
 }
