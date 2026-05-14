@@ -22,6 +22,7 @@ pub struct AudioConfig {
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     pub bit_depth: Option<u8>,
+    #[serde(rename = "loop")]
     pub loop_playback: Option<bool>,
 }
 
@@ -148,6 +149,7 @@ mod tests {
         let config = Config::default();
         let toml_str = toml::to_string(&config).unwrap();
         assert!(toml_str.contains("sample_rate"));
+        assert!(toml_str.contains("loop"));
         assert!(toml_str.contains("multicast_address"));
     }
 }

@@ -77,6 +77,7 @@ Example `streamer.toml`:
 ```toml
 [audio]
 file_path = "audio.wav"
+loop = false
 
 [network]
 multicast_address = "239.69.83.1"
@@ -92,6 +93,19 @@ address, and interface from `streamer.toml`, but streams on port `6000`:
 
 ```bash
 ./aes67-streamer --config streamer.toml --port 6000
+```
+
+To continuously repeat a source file, enable loop:
+
+```bash
+./aes67-streamer --file audio.wav --address 239.69.83.1 --loop
+```
+
+Looping is disabled by default. In TOML, use:
+
+```toml
+[audio]
+loop = true
 ```
 
 ### Testing & Development
@@ -139,6 +153,7 @@ tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 | `--interface` | Network interface IP | Auto-detect | `192.168.1.100` |
 | `--ptp-domain` | PTP domain number | `0` | `1` |
 | `--duration-seconds` | Stop after a bounded duration | Unlimited | `2` |
+| `--loop` | Repeat the audio file instead of stopping at end-of-file | `false` | - |
 | `--verbose` | Enable verbose logging | `false` | - |
 
 ### AES67 Defaults

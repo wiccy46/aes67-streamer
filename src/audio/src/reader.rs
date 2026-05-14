@@ -2,6 +2,8 @@ use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
+use anyhow::Context;
+use hound::{SampleFormat, WavSpec, WavWriter};
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -9,8 +11,6 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use anyhow::Context;
-use hound::{WavWriter, WavSpec, SampleFormat};
 
 use crate::utils::flat_noninterleaved_to_channels;
 use crate::Result;
@@ -26,7 +26,7 @@ pub struct AudioInfo {
 
 #[derive(Debug, Clone)]
 pub struct AudioSample {
-    /// Non-interleaved audio data: [ch1_samples..., ch2_samples..., ch3_samples...] 
+    /// Non-interleaved audio data: [ch1_samples..., ch2_samples..., ch3_samples...]
     /// For stereo: [L1, L2, L3, ..., R1, R2, R3, ...]
     /// More efficient for channel-based processing
     pub data: Vec<f32>,
@@ -54,20 +54,20 @@ impl AudioReader {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::with_resampling(path, 48000, 48)
     }
-    
+
     /// Create new audio reader with target sample rate and packet size
     pub fn with_resampling<P: AsRef<Path>>(
-        path: P, 
+        path: P,
         target_sample_rate: u32,
         samples_per_packet: usize,
     ) -> Result<Self> {
         // Load entire audio file into memory first
         let (audio_data, channels) = Self::load_audio_file(path.as_ref(), target_sample_rate)?;
-        
+
         // Calculate duration
         let total_frames = audio_data.len() / channels as usize;
         let duration = Duration::from_secs_f64(total_frames as f64 / target_sample_rate as f64);
-        
+
         log::info!(
             "Audio file loaded: {} samples total, {} channels, {:.2}s duration, {} samples per packet",
             audio_data.len(),
@@ -109,6 +109,16 @@ impl AudioReader {
         &self.info
     }
 
+    pub fn rewind(&mut self) {
+        self.read_position = 0;
+    }
+
+    pub fn can_read_full_packet(&self) -> bool {
+        let channels = self.info.channels as usize;
+        let frames_per_channel = self.audio_data.len() / channels;
+        frames_per_channel >= self.samples_per_packet
+    }
+
     /// Load entire audio file into memory with optional resampling
     fn load_audio_file(path: &Path, target_sample_rate: u32) -> Result<(Vec<f32>, u32)> {
         let file = File::open(path)?;
@@ -141,24 +151,35 @@ impl AudioReader {
 
         let track_id = track.id;
         let decoder_opts = DecoderOptions::default();
-        let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts)?;
+        let mut decoder =
+            symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts)?;
 
         let codec_params = &track.codec_params;
-        let sample_rate = codec_params.sample_rate
+        let sample_rate = codec_params
+            .sample_rate
             .ok_or_else(|| anyhow::anyhow!("Audio file is missing sample rate"))?;
-        let channels = codec_params.channels
+        let channels = codec_params
+            .channels
             .map(|ch| ch.count() as u32)
             .ok_or_else(|| anyhow::anyhow!("Audio file is missing channel information"))?;
 
-        log::info!("Loading audio file: {} Hz, {} channels", sample_rate, channels);
+        log::info!(
+            "Loading audio file: {} Hz, {} channels",
+            sample_rate,
+            channels
+        );
 
         // Collect all audio data properly in non-interleaved format
         let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::new(); channels as usize];
-        
+
         loop {
             let packet = match format_reader.next_packet() {
                 Ok(packet) => packet,
-                Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(SymphoniaError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    break
+                }
                 Err(e) => return Err(e.into()),
             };
 
@@ -168,17 +189,17 @@ impl AudioReader {
 
             let decoded = decoder.decode(&packet)?;
             let audio_sample = Self::convert_audio_buffer(decoded)?;
-            
+
             // The audio_sample.data is in non-interleaved format: [Ch0_frames..., Ch1_frames...]
             let frames_per_channel = audio_sample.frames;
-            
+
             for ch_idx in 0..channels as usize {
                 let start_idx = ch_idx * frames_per_channel;
                 let end_idx = start_idx + frames_per_channel;
                 channel_buffers[ch_idx].extend_from_slice(&audio_sample.data[start_idx..end_idx]);
             }
         }
-        
+
         // Concatenate all channel buffers into final non-interleaved format
         let mut all_samples = Vec::new();
         for channel_buffer in &channel_buffers {
@@ -187,11 +208,19 @@ impl AudioReader {
 
         log::info!("Loaded {} samples from file", all_samples.len());
 
-
         // Apply resampling if needed (AES67 requires 48kHz)
         if target_sample_rate != sample_rate {
-            log::info!("Resampling from {} Hz to {} Hz (AES67 compliance)", sample_rate, target_sample_rate);
-            all_samples = Self::resample_audio_data_simple(all_samples, sample_rate, target_sample_rate, channels)?;
+            log::info!(
+                "Resampling from {} Hz to {} Hz (AES67 compliance)",
+                sample_rate,
+                target_sample_rate
+            );
+            all_samples = Self::resample_audio_data_simple(
+                all_samples,
+                sample_rate,
+                target_sample_rate,
+                channels,
+            )?;
             log::info!("Resampled to {} samples", all_samples.len());
         } else {
             log::info!("No resampling needed: already at {} Hz", sample_rate);
@@ -201,48 +230,52 @@ impl AudioReader {
     }
 
     fn resample_audio_data_simple(
-        data: Vec<f32>, 
-        from_rate: u32, 
-        to_rate: u32, 
-        channels: u32
+        data: Vec<f32>,
+        from_rate: u32,
+        to_rate: u32,
+        channels: u32,
     ) -> Result<Vec<f32>> {
-        use rubato::{Resampler, FastFixedIn, PolynomialDegree};
+        use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 
         let ratio = to_rate as f64 / from_rate as f64;
         let frames = data.len() / channels as usize;
-        
-        log::info!("High-quality resampling with Rubato: {} frames, ratio {:.6}", frames, ratio);
+
+        log::info!(
+            "High-quality resampling with Rubato: {} frames, ratio {:.6}",
+            frames,
+            ratio
+        );
         log::info!("Input: {}Hz -> Output: {}Hz", from_rate, to_rate);
-        
+
         // Convert to channel format for rubato
         let input_channels = flat_noninterleaved_to_channels(&data, channels as usize, frames);
-        
+
         // Create resampler
         // FastFixedIn is good for synchronous resampling
         let mut resampler = FastFixedIn::<f32>::new(
             ratio,
-            1.0, // Max relative ratio difference
+            1.0,                      // Max relative ratio difference
             PolynomialDegree::Septic, // High quality
-            1024, // Chunk size
+            1024,                     // Chunk size
             channels as usize,
         )?;
 
-        // Rubato requires input to be chunks of specific size, but FastFixedIn can handle arbitrary input 
+        // Rubato requires input to be chunks of specific size, but FastFixedIn can handle arbitrary input
         // if we process it correctly or use the `process` method which handles buffering?
-        // Actually FastFixedIn requires fixed input size. 
+        // Actually FastFixedIn requires fixed input size.
         // Let's use `process` with chunks.
-        
+
         let mut output_channels = vec![Vec::new(); channels as usize];
         let chunk_size = resampler.input_frames_next();
-        
+
         // Process in chunks
         let mut input_pos = 0;
         while input_pos < frames {
             let end = (input_pos + chunk_size).min(frames);
             let len = end - input_pos;
-            
+
             let mut chunk_input = vec![Vec::with_capacity(chunk_size); channels as usize];
-            
+
             for (ch_idx, ch_data) in input_channels.iter().enumerate() {
                 chunk_input[ch_idx].extend_from_slice(&ch_data[input_pos..end]);
                 // Pad with zeros if last chunk is smaller
@@ -250,63 +283,70 @@ impl AudioReader {
                     chunk_input[ch_idx].resize(chunk_size, 0.0);
                 }
             }
-            
+
             let chunk_output = resampler.process(&chunk_input, None)?;
-            
+
             for (ch_idx, ch_out) in chunk_output.iter().enumerate() {
                 output_channels[ch_idx].extend_from_slice(ch_out);
             }
-            
+
             input_pos += chunk_size;
         }
-        
+
         // Flatten back to non-interleaved format
         let mut output_data = Vec::new();
         for ch_buffer in output_channels {
             output_data.extend(ch_buffer);
         }
-        
+
         Ok(output_data)
     }
 
     /// Export the current audio data to a WAV file for verification
     pub fn export_to_wav<P: AsRef<Path>>(&self, output_path: P) -> Result<()> {
         let path = output_path.as_ref();
-        
+
         log::info!("Exporting audio to WAV file: {}", path.display());
-        
+
         let spec = WavSpec {
             channels: self.info.channels as u16,
             sample_rate: self.info.sample_rate,
             bits_per_sample: 32, // Use 32-bit float
             sample_format: SampleFormat::Float,
         };
-        
+
         let mut writer = WavWriter::create(path, spec)
             .with_context(|| format!("Failed to create WAV file: {}", path.display()))?;
-        
+
         // Convert from non-interleaved to interleaved format for WAV
         let frames_per_channel = self.audio_data.len() / self.info.channels as usize;
-        
+
         // Our data is stored as: [Ch0_all_frames..., Ch1_all_frames..., Ch2_all_frames...]
         // WAV needs: [Ch0_F0, Ch1_F0, Ch0_F1, Ch1_F1, Ch0_F2, Ch1_F2, ...]
         for frame_idx in 0..frames_per_channel {
             for ch_idx in 0..self.info.channels as usize {
                 let sample_idx = ch_idx * frames_per_channel + frame_idx;
                 let sample = self.audio_data[sample_idx];
-                
-                writer.write_sample(sample)
-                    .with_context(|| format!("Failed to write sample at frame {}, channel {}", frame_idx, ch_idx))?;
+
+                writer.write_sample(sample).with_context(|| {
+                    format!(
+                        "Failed to write sample at frame {}, channel {}",
+                        frame_idx, ch_idx
+                    )
+                })?;
             }
         }
-        
-        writer.finalize()
+
+        writer
+            .finalize()
             .with_context(|| format!("Failed to finalize WAV file: {}", path.display()))?;
-        
-        log::info!("Successfully exported {} frames ({:.2}s) to WAV file", 
-                   frames_per_channel, 
-                   frames_per_channel as f64 / self.info.sample_rate as f64);
-        
+
+        log::info!(
+            "Successfully exported {} frames ({:.2}s) to WAV file",
+            frames_per_channel,
+            frames_per_channel as f64 / self.info.sample_rate as f64
+        );
+
         Ok(())
     }
 
@@ -314,26 +354,27 @@ impl AudioReader {
     pub fn read_next_frame(&mut self) -> Result<Option<AudioSample>> {
         let channels = self.info.channels as usize;
         let frames_per_channel = self.audio_data.len() / channels;
-        
+
         // Check if we have enough frames left
         if self.read_position + self.samples_per_packet > frames_per_channel {
             return Ok(None); // End of file
         }
-        
+
         // Reuse the pre-allocated buffer to avoid allocations
         self.packet_buffer.clear();
-        
+
         for ch in 0..channels {
             let channel_start = ch * frames_per_channel;
             let frame_start = channel_start + self.read_position;
             let frame_end = frame_start + self.samples_per_packet;
-            
-            self.packet_buffer.extend_from_slice(&self.audio_data[frame_start..frame_end]);
+
+            self.packet_buffer
+                .extend_from_slice(&self.audio_data[frame_start..frame_end]);
         }
-        
+
         // Advance read position
         self.read_position += self.samples_per_packet;
-        
+
         Ok(Some(AudioSample {
             data: self.packet_buffer.clone(), // Clone the reused buffer data
             channels: self.info.channels,
@@ -451,19 +492,20 @@ impl AudioReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::fs;
+    use std::io::Write;
     use tempfile::NamedTempFile;
 
     // Helper function to create mock stereo audio data in non-interleaved format
     fn create_mock_audio_data(frames: usize, channels: u32) -> Vec<f32> {
         let mut data = Vec::with_capacity(frames * channels as usize);
-        
+
         // Generate a simple sine wave for each channel
         for ch in 0..channels {
             for frame in 0..frames {
                 let frequency = 440.0 + (ch as f32 * 220.0); // Different freq per channel
-                let sample = (2.0 * std::f32::consts::PI * frequency * frame as f32 / 48000.0).sin();
+                let sample =
+                    (2.0 * std::f32::consts::PI * frequency * frame as f32 / 48000.0).sin();
                 data.push(sample * 0.5); // Reduce amplitude to avoid clipping
             }
         }
@@ -473,26 +515,30 @@ mod tests {
     // Helper to create a simple WAV file for testing
     fn create_test_wav_file(sample_rate: u32, channels: u16, frames: usize) -> NamedTempFile {
         let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-        
+
         let spec = hound::WavSpec {
             channels,
             sample_rate,
             bits_per_sample: 32,
             sample_format: hound::SampleFormat::Float,
         };
-        
-        let mut writer = hound::WavWriter::new(&mut temp_file, spec)
-            .expect("Failed to create WAV writer");
-        
+
+        let mut writer =
+            hound::WavWriter::new(&mut temp_file, spec).expect("Failed to create WAV writer");
+
         // Write interleaved audio data
         for frame in 0..frames {
             for ch in 0..channels {
                 let frequency = 440.0 + (ch as f32 * 220.0);
-                let sample = (2.0 * std::f32::consts::PI * frequency * frame as f32 / sample_rate as f32).sin();
-                writer.write_sample(sample * 0.5).expect("Failed to write sample");
+                let sample = (2.0 * std::f32::consts::PI * frequency * frame as f32
+                    / sample_rate as f32)
+                    .sin();
+                writer
+                    .write_sample(sample * 0.5)
+                    .expect("Failed to write sample");
             }
         }
-        
+
         writer.finalize().expect("Failed to finalize WAV");
         temp_file
     }
@@ -534,19 +580,18 @@ mod tests {
         let input_frames = 4096; // Use larger size for rubato
         let channels = 2;
         let input_data = create_mock_audio_data(input_frames, channels);
-        
-        let result = AudioReader::resample_audio_data_simple(
-            input_data, 44100, 48000, channels
-        ).expect("Resampling failed");
-        
+
+        let result = AudioReader::resample_audio_data_simple(input_data, 44100, 48000, channels)
+            .expect("Resampling failed");
+
         let expected_output_frames = ((input_frames as f64) * (48000.0 / 44100.0)).round() as usize;
         let expected_total_samples = expected_output_frames * channels as usize;
-        
+
         // Rubato might produce slightly different number of frames due to padding/chunking
         // So we check if it's close enough (within 1 chunk size)
         assert!(result.len() >= expected_total_samples.saturating_sub(2048));
         assert!(result.len() <= expected_total_samples + 2048);
-        
+
         // Check that samples are in reasonable range
         for sample in &result {
             assert!(sample.abs() <= 1.5, "Sample out of range: {}", sample);
@@ -559,17 +604,16 @@ mod tests {
         let input_frames = 4096;
         let channels = 2;
         let input_data = create_mock_audio_data(input_frames, channels);
-        
-        let result = AudioReader::resample_audio_data_simple(
-            input_data, 48000, 44100, channels
-        ).expect("Resampling failed");
-        
+
+        let result = AudioReader::resample_audio_data_simple(input_data, 48000, 44100, channels)
+            .expect("Resampling failed");
+
         let expected_output_frames = ((input_frames as f64) * (44100.0 / 48000.0)).round() as usize;
         let expected_total_samples = expected_output_frames * channels as usize;
-        
+
         assert!(result.len() >= expected_total_samples.saturating_sub(2048));
         assert!(result.len() <= expected_total_samples + 2048);
-        
+
         // Check that samples are in reasonable range
         for sample in &result {
             assert!(sample.abs() <= 1.5, "Sample out of range: {}", sample);
@@ -582,18 +626,18 @@ mod tests {
         // Note: rubato might still process it, or we might skip it in the caller
         // In our implementation, we call rubato regardless if we call this function
         // But the caller `load_audio_file` checks for equality before calling
-        
+
         let input_frames = 1024;
         let channels = 2;
         let input_data = create_mock_audio_data(input_frames, channels);
-        
-        let result = AudioReader::resample_audio_data_simple(
-            input_data.clone(), 48000, 48000, channels
-        ).expect("Resampling failed");
-        
+
+        let result =
+            AudioReader::resample_audio_data_simple(input_data.clone(), 48000, 48000, channels)
+                .expect("Resampling failed");
+
         // Rubato with ratio 1.0 should preserve length approximately
         assert!(result.len() >= input_data.len() - 2048);
-        
+
         // Should be similar
         // We can't expect exact equality with rubato even at 1.0 ratio due to filtering
     }
@@ -613,21 +657,24 @@ mod tests {
             assert_eq!(sample.channels, 2);
             assert_eq!(sample.sample_rate, 48000);
             assert_eq!(sample.data.len(), 48 * 2); // 48 frames × 2 channels
-            
+
             // Verify data is different from previous frame (unless it's a DC signal)
             if let Some(ref prev_data) = last_sample_data {
-                let _is_different = sample.data.iter().zip(prev_data.iter())
+                let _is_different = sample
+                    .data
+                    .iter()
+                    .zip(prev_data.iter())
                     .any(|(a, b)| (a - b).abs() > 1e-6);
                 // Note: for sine waves, consecutive frames should be different
                 // This check could be expanded for regression testing
             }
-            
+
             last_sample_data = Some(sample.data.clone());
             frames_read += 1;
         }
 
         assert_eq!(frames_read, 3, "Should read exactly 3 frames");
-        
+
         // Next read should return None
         assert!(reader.read_next_frame().expect("Read failed").is_none());
     }
@@ -645,25 +692,59 @@ mod tests {
     }
 
     #[test]
+    fn test_rewind_resets_reader_to_first_packet() {
+        let temp_file = create_test_wav_file(48000, 2, 144);
+        let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
+            .expect("Failed to create reader");
+
+        let first = reader
+            .read_next_frame()
+            .expect("Read failed")
+            .expect("Should have first packet");
+        let second = reader
+            .read_next_frame()
+            .expect("Read failed")
+            .expect("Should have second packet");
+
+        assert_ne!(
+            first.data, second.data,
+            "test data should advance between packets"
+        );
+
+        reader.rewind();
+
+        let first_after_rewind = reader
+            .read_next_frame()
+            .expect("Read failed")
+            .expect("Should have first packet after rewind");
+
+        assert_eq!(first.data, first_after_rewind.data);
+    }
+
+    #[test]
     fn test_packet_buffer_reuse() {
         let temp_file = create_test_wav_file(48000, 2, 96); // 2ms of audio
         let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
             .expect("Failed to create reader");
 
         // Read first frame
-        let sample1 = reader.read_next_frame().expect("Read failed")
+        let sample1 = reader
+            .read_next_frame()
+            .expect("Read failed")
             .expect("Should have data");
         let ptr1 = sample1.data.as_ptr();
 
-        // Read second frame  
-        let sample2 = reader.read_next_frame().expect("Read failed")
+        // Read second frame
+        let sample2 = reader
+            .read_next_frame()
+            .expect("Read failed")
             .expect("Should have data");
         let ptr2 = sample2.data.as_ptr();
 
         // The internal buffer is reused, but the returned data is cloned
         // So the pointers will be different, but we can verify the buffer is working
         assert_ne!(ptr1, ptr2, "Returned data should be independent clones");
-        
+
         // Verify both samples have correct structure
         assert_eq!(sample1.data.len(), 96); // 48 frames × 2 channels
         assert_eq!(sample2.data.len(), 96);
@@ -679,7 +760,9 @@ mod tests {
 
         // Export to another temp file
         let temp_output = NamedTempFile::new().expect("Failed to create temp output");
-        reader.export_to_wav(temp_output.path()).expect("Export failed");
+        reader
+            .export_to_wav(temp_output.path())
+            .expect("Export failed");
 
         // Verify the exported file exists and has content
         let metadata = fs::metadata(temp_output.path()).expect("Can't read exported file metadata");
@@ -688,7 +771,7 @@ mod tests {
         // Try to read the exported file back
         let reader2 = AudioReader::with_resampling(temp_output.path(), 48000, 48)
             .expect("Failed to read exported file");
-        
+
         let info = reader2.info();
         assert_eq!(info.sample_rate, 48000);
         assert_eq!(info.channels, 2);
@@ -700,9 +783,11 @@ mod tests {
         let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
             .expect("Failed to create reader");
 
-        let sample = reader.read_next_frame().expect("Read failed")
+        let sample = reader
+            .read_next_frame()
+            .expect("Read failed")
             .expect("Should have data");
-        
+
         assert_eq!(sample.channels, 1);
         assert_eq!(sample.frames, 48);
         assert_eq!(sample.data.len(), 48); // 48 frames × 1 channel
@@ -714,9 +799,11 @@ mod tests {
         let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
             .expect("Failed to create reader");
 
-        let sample = reader.read_next_frame().expect("Read failed")
+        let sample = reader
+            .read_next_frame()
+            .expect("Read failed")
             .expect("Should have data");
-        
+
         assert_eq!(sample.channels, 8);
         assert_eq!(sample.frames, 48);
         assert_eq!(sample.data.len(), 48 * 8); // 48 frames × 8 channels
@@ -725,9 +812,10 @@ mod tests {
     #[test]
     fn test_different_packet_sizes() {
         let temp_file = create_test_wav_file(48000, 2, 240); // 5ms of audio
-        
+
         // Test different packet sizes
-        for &packet_size in &[12, 24, 48, 96] { // 0.25ms, 0.5ms, 1ms, 2ms at 48kHz
+        for &packet_size in &[12, 24, 48, 96] {
+            // 0.25ms, 0.5ms, 1ms, 2ms at 48kHz
             let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, packet_size)
                 .expect("Failed to create reader");
 
@@ -751,7 +839,7 @@ mod tests {
         assert_eq!(info.bit_depth, Some(24)); // AES67 standard
         assert_eq!(info.format, "Loaded");
         assert!(info.duration.is_some());
-        
+
         // Duration should be reasonable for our test data
         let duration = info.duration.unwrap();
         assert!(duration.as_millis() > 0);
@@ -767,7 +855,9 @@ mod tests {
     #[test]
     fn test_error_handling_invalid_file() {
         let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-        temp_file.write_all(b"This is not a valid audio file").expect("Write failed");
+        temp_file
+            .write_all(b"This is not a valid audio file")
+            .expect("Write failed");
         temp_file.flush().expect("Flush failed");
 
         let result = AudioReader::new(temp_file.path());

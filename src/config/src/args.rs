@@ -13,6 +13,7 @@ pub struct Args {
     pub config_file: Option<String>,
     pub verbose: bool,
     pub duration_seconds: Option<f64>,
+    pub loop_playback: bool,
 }
 
 pub fn parse_args() -> Result<Args> {
@@ -85,6 +86,12 @@ fn cli() -> Command {
                 .value_parser(parse_positive_duration_seconds)
         )
         .arg(
+            Arg::new("loop")
+                .long("loop")
+                .help("Loop the audio file instead of stopping at end-of-file")
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
@@ -136,6 +143,7 @@ fn args_from_matches(matches: &ArgMatches) -> Result<Args> {
         config_file,
         verbose: matches.get_flag("verbose"),
         duration_seconds: matches.get_one::<f64>("duration-seconds").copied(),
+        loop_playback: merged_loop_playback(matches, config.as_ref()),
     })
 }
 
@@ -166,6 +174,16 @@ fn merged_port(matches: &ArgMatches, config: Option<&Config>) -> u16 {
         .and_then(|config| config.network.port)
         .or_else(|| matches.get_one::<u16>("port").copied())
         .unwrap_or(5004)
+}
+
+fn merged_loop_playback(matches: &ArgMatches, config: Option<&Config>) -> bool {
+    if matches.value_source("loop") == Some(ValueSource::CommandLine) {
+        return true;
+    }
+
+    config
+        .and_then(|config| config.audio.loop_playback)
+        .unwrap_or(false)
 }
 
 fn missing_required_value(name: &str, cli_flag: &str, config_key: &str) -> anyhow::Error {
@@ -216,11 +234,13 @@ mod tests {
             config_file: None,
             verbose: false,
             duration_seconds: None,
+            loop_playback: false,
         };
 
         assert_eq!(args.file, "test.wav");
         assert_eq!(args.address, "239.192.1.1");
         assert_eq!(args.port, 5004);
+        assert!(!args.loop_playback);
     }
 
     #[test]
@@ -237,6 +257,7 @@ mod tests {
         .expect("duration should parse");
 
         assert_eq!(args.duration_seconds, Some(1.5));
+        assert!(!args.loop_playback);
     }
 
     #[test]
@@ -260,6 +281,7 @@ mod tests {
             r#"
                 [audio]
                 file_path = "configured.wav"
+                loop = true
 
                 [network]
                 multicast_address = "239.10.20.30"
@@ -283,6 +305,7 @@ mod tests {
         assert_eq!(args.port, 6000);
         assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
         assert_eq!(args.ptp_domain, Some(7));
+        assert!(args.loop_playback);
 
         fs::remove_file(path).ok();
     }
@@ -293,6 +316,7 @@ mod tests {
             r#"
                 [audio]
                 file_path = "configured.wav"
+                loop = false
 
                 [network]
                 multicast_address = "239.10.20.30"
@@ -326,6 +350,7 @@ mod tests {
         assert_eq!(args.port, 7000);
         assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
         assert_eq!(args.ptp_domain, Some(9));
+        assert!(!args.loop_playback);
 
         fs::remove_file(path).ok();
     }
@@ -358,5 +383,20 @@ mod tests {
         ]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn loop_playback_cli_flag_enables_looping() {
+        let args = parse_args_from([
+            "aes67-streamer",
+            "--file",
+            "test.wav",
+            "--address",
+            "239.192.1.1",
+            "--loop",
+        ])
+        .expect("loop flag should parse");
+
+        assert!(args.loop_playback);
     }
 }
