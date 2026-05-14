@@ -37,6 +37,7 @@ async fn main() {
         ptp_domain: args.ptp_domain.unwrap_or(0),
         verbose: args.verbose,
         duration: args.duration_seconds.map(Duration::from_secs_f64),
+        loop_playback: args.loop_playback,
     };
 
     // Create and start streamer

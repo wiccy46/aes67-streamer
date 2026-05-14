@@ -25,6 +25,7 @@ dependencies = [
  "audio",
  "config",
  "env_logger",
+ "hound",
  "log",
  "network",
  "ptp",

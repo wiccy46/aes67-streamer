@@ -34,6 +34,7 @@ pub struct StreamConfig {
     pub verbose: bool,
     /// Optional maximum stream duration for tests and scripted runs.
     pub duration: Option<Duration>,
+    pub loop_playback: bool,
 }
 
 impl Default for StreamConfig {
@@ -45,6 +46,7 @@ impl Default for StreamConfig {
             ptp_domain: 0,
             verbose: false,
             duration: None,
+            loop_playback: false,
         }
     }
 }
@@ -273,6 +275,18 @@ impl Aes67Streamer {
                     }
                 }
                 None => {
+                    if self.config.loop_playback {
+                        if self.audio_reader.can_read_full_packet() {
+                            log::debug!("End of audio file reached, restarting from beginning");
+                            self.audio_reader.rewind();
+                            continue;
+                        }
+
+                        log::warn!(
+                            "Loop playback requested, but audio file is shorter than one packet"
+                        );
+                    }
+
                     stop_reason = "end of audio file";
                     log::info!("End of audio file reached");
                     break;
@@ -313,6 +327,7 @@ mod tests {
         assert_eq!(config.gain_db, 0.0);
         assert_eq!(config.ptp_domain, 0);
         assert_eq!(config.duration, None);
+        assert!(!config.loop_playback);
         assert!(!config.verbose);
     }
 
