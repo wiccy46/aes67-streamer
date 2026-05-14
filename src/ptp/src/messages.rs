@@ -116,7 +116,7 @@ impl PtpHeader {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timestamp {
     pub seconds: u64,
     pub nanoseconds: u32,
@@ -126,6 +126,22 @@ pub struct Timestamp {
 pub struct AnnounceMessage {
     pub domain_number: u8,
     pub grandmaster_identity: ClockIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DelayReqMessage {
+    pub domain_number: u8,
+    pub source_port_identity: [u8; 10],
+    pub sequence_id: u16,
+    pub origin_timestamp: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DelayRespMessage {
+    pub domain_number: u8,
+    pub sequence_id: u16,
+    pub receive_timestamp: Timestamp,
+    pub requesting_port_identity: [u8; 10],
 }
 
 impl AnnounceMessage {
@@ -149,7 +165,53 @@ impl AnnounceMessage {
     }
 }
 
+impl DelayReqMessage {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![0u8; 44];
+        bytes[0] = MessageType::DelayReq as u8;
+        bytes[1] = 0x02;
+        bytes[2..4].copy_from_slice(&(44u16).to_be_bytes());
+        bytes[4] = self.domain_number;
+        bytes[20..30].copy_from_slice(&self.source_port_identity);
+        bytes[30..32].copy_from_slice(&self.sequence_id.to_be_bytes());
+        bytes[32] = 1;
+        bytes[33] = 0x7f;
+        bytes[34..44].copy_from_slice(&self.origin_timestamp.to_bytes());
+        bytes
+    }
+}
+
+impl DelayRespMessage {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let header = PtpHeader::from_bytes(bytes)?;
+        if header.message_type != MessageType::DelayResp {
+            return Err(anyhow!("PTP message is not a DelayResp message"));
+        }
+
+        if bytes.len() < 54 {
+            return Err(anyhow!("Packet too short for PTP DelayResp message"));
+        }
+
+        let mut requesting_port_identity = [0u8; 10];
+        requesting_port_identity.copy_from_slice(&bytes[44..54]);
+
+        Ok(Self {
+            domain_number: header.domain_number,
+            sequence_id: header.sequence_id,
+            receive_timestamp: Timestamp::from_bytes(&bytes[34..44])?,
+            requesting_port_identity,
+        })
+    }
+}
+
 impl Timestamp {
+    pub fn from_nanos(nanos: u64) -> Self {
+        Self {
+            seconds: nanos / 1_000_000_000,
+            nanoseconds: (nanos % 1_000_000_000) as u32,
+        }
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 10 {
             return Err(anyhow!("Buffer too short for Timestamp"));
@@ -169,6 +231,16 @@ impl Timestamp {
 
     pub fn as_nanos(&self) -> u128 {
         (self.seconds as u128 * 1_000_000_000) + self.nanoseconds as u128
+    }
+
+    pub fn to_bytes(&self) -> [u8; 10] {
+        let mut bytes = [0u8; 10];
+        let seconds_msb = (self.seconds >> 32) as u16;
+        let seconds_lsb = self.seconds as u32;
+        bytes[0..2].copy_from_slice(&seconds_msb.to_be_bytes());
+        bytes[2..6].copy_from_slice(&seconds_lsb.to_be_bytes());
+        bytes[6..10].copy_from_slice(&self.nanoseconds.to_be_bytes());
+        bytes
     }
 }
 
@@ -204,6 +276,64 @@ mod tests {
         assert_eq!(
             announce.grandmaster_identity.to_string(),
             "00-1D-C1-FF-FE-12-34-56"
+        );
+    }
+
+    #[test]
+    fn delay_req_message_serializes_header_and_origin_timestamp() {
+        let source_port_identity = [0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01, 0x00, 0x01];
+        let delay_req = DelayReqMessage {
+            domain_number: 7,
+            source_port_identity,
+            sequence_id: 42,
+            origin_timestamp: Timestamp {
+                seconds: 12,
+                nanoseconds: 345,
+            },
+        };
+
+        let bytes = delay_req.to_bytes();
+        let header = PtpHeader::from_bytes(&bytes).expect("delay request header should parse");
+        let timestamp =
+            Timestamp::from_bytes(&bytes[34..44]).expect("origin timestamp should parse");
+
+        assert_eq!(bytes.len(), 44);
+        assert_eq!(header.message_type, MessageType::DelayReq);
+        assert_eq!(header.version, 2);
+        assert_eq!(header.domain_number, 7);
+        assert_eq!(header.source_port_identity, source_port_identity);
+        assert_eq!(header.sequence_id, 42);
+        assert_eq!(header.control_field, 1);
+        assert_eq!(timestamp.seconds, 12);
+        assert_eq!(timestamp.nanoseconds, 345);
+    }
+
+    #[test]
+    fn delay_resp_message_extracts_receive_timestamp_and_requesting_port_identity() {
+        let requesting_port_identity = [0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01, 0x00, 0x01];
+        let mut bytes = vec![0u8; 54];
+        bytes[0] = 0x09;
+        bytes[1] = 0x02;
+        bytes[4] = 7;
+        bytes[30..32].copy_from_slice(&42u16.to_be_bytes());
+        bytes[34..44].copy_from_slice(
+            &Timestamp {
+                seconds: 20,
+                nanoseconds: 800,
+            }
+            .to_bytes(),
+        );
+        bytes[44..54].copy_from_slice(&requesting_port_identity);
+
+        let delay_resp = DelayRespMessage::from_bytes(&bytes).expect("delay response should parse");
+
+        assert_eq!(delay_resp.domain_number, 7);
+        assert_eq!(delay_resp.sequence_id, 42);
+        assert_eq!(delay_resp.receive_timestamp.seconds, 20);
+        assert_eq!(delay_resp.receive_timestamp.nanoseconds, 800);
+        assert_eq!(
+            delay_resp.requesting_port_identity,
+            requesting_port_identity
         );
     }
 }
