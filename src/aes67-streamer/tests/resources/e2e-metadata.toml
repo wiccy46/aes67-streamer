@@ -1,0 +1,13 @@
+[audio]
+file = "../../tests/piano_freesound.wav"
+gain_db = -6.0
+
+[stream]
+name = "Configured Stream"
+address = "239.1.2.8"
+port = 55010
+interface = "127.0.0.1"
+packet_time_ms = 2
+payload_type = 101
+ssrc = 3735928559
+ttl = 12

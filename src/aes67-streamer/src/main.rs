@@ -32,12 +32,17 @@ async fn main() {
 
     let stream_config = StreamConfig {
         target_sample_rate: 48000, // AES67 always requires 48kHz
-        packet_time_ms: 1,         // 1ms packets for AES67
-        gain_db: 0.0,              // Unity gain for now
+        packet_time_ms: args.packet_time_ms,
+        gain_db: args.gain_db,
         ptp_domain: args.ptp_domain.unwrap_or(0),
         verbose: args.verbose,
         duration: args.duration_seconds.map(Duration::from_secs_f64),
         loop_playback: args.loop_playback,
+        ttl: args.ttl,
+        sap: args.sap,
+        payload_type: args.payload_type,
+        ssrc: args.ssrc,
+        session_name: args.session_name,
     };
 
     // Create and start streamer

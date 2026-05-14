@@ -14,6 +14,13 @@ pub struct Args {
     pub verbose: bool,
     pub duration_seconds: Option<f64>,
     pub loop_playback: bool,
+    pub gain_db: f32,
+    pub ttl: u8,
+    pub sap: bool,
+    pub payload_type: u8,
+    pub ssrc: u32,
+    pub session_name: String,
+    pub packet_time_ms: u32,
 }
 
 pub fn parse_args() -> Result<Args> {
@@ -108,25 +115,17 @@ fn args_from_matches(matches: &ArgMatches) -> Result<Args> {
     };
 
     let file = cli_string(matches, "file")
-        .or_else(|| {
-            config
-                .as_ref()
-                .and_then(|config| config.audio.file_path.clone())
-        })
-        .ok_or_else(|| missing_required_value("audio file", "--file", "audio.file_path"))?;
+        .or_else(|| config.as_ref().and_then(|config| config.audio.file.clone()))
+        .ok_or_else(|| missing_required_value("audio file", "--file", "audio.file"))?;
 
     let address = cli_string(matches, "address")
         .or_else(|| {
             config
                 .as_ref()
-                .and_then(|config| config.network.multicast_address.clone())
+                .and_then(|config| config.stream.address.clone())
         })
         .ok_or_else(|| {
-            missing_required_value(
-                "multicast address",
-                "--address",
-                "network.multicast_address",
-            )
+            missing_required_value("multicast address", "--address", "stream.address")
         })?;
 
     Ok(Args {
@@ -136,14 +135,28 @@ fn args_from_matches(matches: &ArgMatches) -> Result<Args> {
         interface: cli_string(matches, "interface").or_else(|| {
             config
                 .as_ref()
-                .and_then(|config| config.network.interface.clone())
+                .and_then(|config| config.stream.interface.clone())
         }),
         ptp_domain: cli_u8(matches, "ptp-domain")
-            .or_else(|| config.as_ref().and_then(|config| config.ptp.domain)),
+            .or_else(|| config.as_ref().and_then(|config| config.stream.ptp_domain)),
         config_file,
-        verbose: matches.get_flag("verbose"),
-        duration_seconds: matches.get_one::<f64>("duration-seconds").copied(),
+        verbose: matches.get_flag("verbose") || merged_verbose(config.as_ref()),
+        duration_seconds: matches
+            .get_one::<f64>("duration-seconds")
+            .copied()
+            .or_else(|| {
+                config
+                    .as_ref()
+                    .and_then(|config| config.audio.duration_seconds)
+            }),
         loop_playback: merged_loop_playback(matches, config.as_ref()),
+        gain_db: merged_gain_db(config.as_ref()),
+        ttl: merged_ttl(config.as_ref())?,
+        sap: merged_sap(config.as_ref()),
+        payload_type: merged_payload_type(config.as_ref())?,
+        ssrc: merged_ssrc(config.as_ref()),
+        session_name: merged_session_name(config.as_ref()),
+        packet_time_ms: merged_packet_time_ms(config.as_ref())?,
     })
 }
 
@@ -171,9 +184,15 @@ fn merged_port(matches: &ArgMatches, config: Option<&Config>) -> u16 {
     }
 
     config
-        .and_then(|config| config.network.port)
+        .and_then(|config| config.stream.port)
         .or_else(|| matches.get_one::<u16>("port").copied())
         .unwrap_or(5004)
+}
+
+fn merged_verbose(config: Option<&Config>) -> bool {
+    config
+        .and_then(|config| config.runtime.verbose)
+        .unwrap_or(false)
 }
 
 fn merged_loop_playback(matches: &ArgMatches, config: Option<&Config>) -> bool {
@@ -184,6 +203,62 @@ fn merged_loop_playback(matches: &ArgMatches, config: Option<&Config>) -> bool {
     config
         .and_then(|config| config.audio.loop_playback)
         .unwrap_or(false)
+}
+
+fn merged_gain_db(config: Option<&Config>) -> f32 {
+    config
+        .and_then(|config| config.audio.gain_db)
+        .unwrap_or(0.0)
+}
+
+fn merged_ttl(config: Option<&Config>) -> Result<u8> {
+    let ttl = config.and_then(|config| config.stream.ttl).unwrap_or(32);
+
+    if ttl == 0 {
+        return Err(anyhow!("stream.ttl must be greater than zero"));
+    }
+
+    Ok(ttl)
+}
+
+fn merged_sap(config: Option<&Config>) -> bool {
+    config.and_then(|config| config.stream.sap).unwrap_or(true)
+}
+
+fn merged_payload_type(config: Option<&Config>) -> Result<u8> {
+    let payload_type = config
+        .and_then(|config| config.stream.payload_type)
+        .unwrap_or(97);
+
+    if payload_type > 127 {
+        return Err(anyhow!("stream.payload_type must be between 0 and 127"));
+    }
+
+    Ok(payload_type)
+}
+
+fn merged_ssrc(config: Option<&Config>) -> u32 {
+    config
+        .and_then(|config| config.stream.ssrc)
+        .unwrap_or(0x12345678)
+}
+
+fn merged_session_name(config: Option<&Config>) -> String {
+    config
+        .and_then(|config| config.stream.name.clone())
+        .unwrap_or_else(|| "AES67 Stream".to_string())
+}
+
+fn merged_packet_time_ms(config: Option<&Config>) -> Result<u32> {
+    let Some(packet_time_ms) = config.and_then(|config| config.stream.packet_time_ms) else {
+        return Ok(1);
+    };
+
+    if packet_time_ms == 0 {
+        return Err(anyhow!("stream.packet_time_ms must be greater than zero"));
+    }
+
+    Ok(packet_time_ms)
 }
 
 fn missing_required_value(name: &str, cli_flag: &str, config_key: &str) -> anyhow::Error {
@@ -235,6 +310,13 @@ mod tests {
             verbose: false,
             duration_seconds: None,
             loop_playback: false,
+            gain_db: 0.0,
+            ttl: 32,
+            sap: true,
+            payload_type: 97,
+            ssrc: 0x12345678,
+            session_name: "AES67 Stream".to_string(),
+            packet_time_ms: 1,
         };
 
         assert_eq!(args.file, "test.wav");
@@ -280,16 +362,14 @@ mod tests {
         let path = write_temp_config(
             r#"
                 [audio]
-                file_path = "configured.wav"
+                file = "configured.wav"
                 loop = true
 
-                [network]
-                multicast_address = "239.10.20.30"
+                [stream]
+                address = "239.10.20.30"
                 port = 6000
                 interface = "127.0.0.1"
-
-                [ptp]
-                domain = 7
+                ptp_domain = 7
             "#,
         );
 
@@ -315,16 +395,14 @@ mod tests {
         let path = write_temp_config(
             r#"
                 [audio]
-                file_path = "configured.wav"
+                file = "configured.wav"
                 loop = false
 
-                [network]
-                multicast_address = "239.10.20.30"
+                [stream]
+                address = "239.10.20.30"
                 port = 6000
                 interface = "lo0"
-
-                [ptp]
-                domain = 7
+                ptp_domain = 7
             "#,
         );
 
@@ -398,5 +476,123 @@ mod tests {
         .expect("loop flag should parse");
 
         assert!(args.loop_playback);
+    }
+
+    #[test]
+    fn config_file_supplies_stream_metadata() {
+        let path = write_temp_config(
+            r#"
+                [audio]
+                file = "configured.wav"
+                gain_db = -6.0
+
+                [stream]
+                address = "239.10.20.30"
+                ttl = 12
+                payload_type = 101
+                ssrc = 3735928559
+                name = "Configured Stream"
+                packet_time_ms = 2
+            "#,
+        );
+
+        let args = parse_args_from([
+            "aes67-streamer",
+            "--config",
+            path.to_str().expect("temp path should be utf-8"),
+        ])
+        .expect("config file should supply stream metadata");
+
+        assert_eq!(args.ttl, 12);
+        assert_eq!(args.payload_type, 101);
+        assert_eq!(args.ssrc, 3735928559);
+        assert_eq!(args.session_name, "Configured Stream");
+        assert_eq!(args.packet_time_ms, 2);
+        assert_eq!(args.gain_db, -6.0);
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn new_config_layout_supplies_audio_stream_and_runtime_values() {
+        let path = write_temp_config(
+            r#"
+                [audio]
+                file = "configured.wav"
+                loop = true
+                duration_seconds = 1.5
+                gain_db = -6.0
+
+                [stream]
+                name = "Configured Stream"
+                address = "239.10.20.30"
+                port = 6000
+                interface = "127.0.0.1"
+                packet_time_ms = 2
+                payload_type = 101
+                ssrc = 3735928559
+                ttl = 12
+                sap = false
+                ptp_domain = 7
+
+                [runtime]
+                verbose = true
+            "#,
+        );
+
+        let args = parse_args_from([
+            "aes67-streamer",
+            "--config",
+            path.to_str().expect("temp path should be utf-8"),
+        ])
+        .expect("new config layout should supply runtime values");
+
+        assert_eq!(args.file, "configured.wav");
+        assert_eq!(args.address, "239.10.20.30");
+        assert_eq!(args.port, 6000);
+        assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
+        assert_eq!(args.ptp_domain, Some(7));
+        assert_eq!(args.duration_seconds, Some(1.5));
+        assert!(args.loop_playback);
+        assert!(args.verbose);
+        assert_eq!(args.ttl, 12);
+        assert_eq!(args.payload_type, 101);
+        assert_eq!(args.ssrc, 3735928559);
+        assert_eq!(args.session_name, "Configured Stream");
+        assert_eq!(args.packet_time_ms, 2);
+        assert_eq!(args.gain_db, -6.0);
+        assert!(!args.sap);
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn invalid_config_metadata_is_an_error() {
+        let path = write_temp_config(
+            r#"
+                [audio]
+                file = "configured.wav"
+
+                [stream]
+                address = "239.10.20.30"
+                ttl = 0
+                payload_type = 128
+            "#,
+        );
+
+        let config = load_config(path.to_str().expect("temp path should be utf-8"))
+            .expect("config should parse before validation");
+        assert_eq!(config.stream.ttl, Some(0));
+        assert_eq!(config.stream.payload_type, Some(128));
+
+        let result = parse_args_from([
+            "aes67-streamer",
+            "--config",
+            path.to_str().expect("temp path should be utf-8"),
+        ]);
+
+        assert!(result.is_err());
+
+        fs::remove_file(path).ok();
     }
 }
