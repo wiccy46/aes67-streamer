@@ -1,5 +1,6 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::convert::TryInto;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MessageType {
@@ -46,6 +47,43 @@ pub struct PtpHeader {
     pub log_message_interval: i8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClockIdentity([u8; 8]);
+
+impl ClockIdentity {
+    pub fn from_bytes(bytes: [u8; 8]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn from_mac_address(mac: [u8; 6]) -> Self {
+        Self([mac[0], mac[1], mac[2], 0xff, 0xfe, mac[3], mac[4], mac[5]])
+    }
+
+    pub fn from_local_ipv4(ip: std::net::Ipv4Addr) -> Self {
+        let octets = ip.octets();
+        Self([
+            0x02, 0x00, 0x00, 0xff, 0xfe, octets[1], octets[2], octets[3],
+        ])
+    }
+
+    pub fn as_bytes(&self) -> [u8; 8] {
+        self.0
+    }
+}
+
+impl fmt::Display for ClockIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, byte) in self.0.iter().enumerate() {
+            if index > 0 {
+                write!(f, "-")?;
+            }
+            write!(f, "{byte:02X}")?;
+        }
+
+        Ok(())
+    }
+}
+
 impl PtpHeader {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 34 {
@@ -55,12 +93,12 @@ impl PtpHeader {
         let message_type = MessageType::from(bytes[0]);
         let version = bytes[1] & 0x0F;
         let domain_number = bytes[4];
-        
+
         let correction_field = i64::from_be_bytes(bytes[8..16].try_into()?);
-        
+
         let mut source_port_identity = [0u8; 10];
         source_port_identity.copy_from_slice(&bytes[20..30]);
-        
+
         let sequence_id = u16::from_be_bytes(bytes[30..32].try_into()?);
         let control_field = bytes[32];
         let log_message_interval = bytes[33] as i8;
@@ -84,25 +122,88 @@ pub struct Timestamp {
     pub nanoseconds: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnnounceMessage {
+    pub domain_number: u8,
+    pub grandmaster_identity: ClockIdentity,
+}
+
+impl AnnounceMessage {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let header = PtpHeader::from_bytes(bytes)?;
+        if header.message_type != MessageType::Announce {
+            return Err(anyhow!("PTP message is not an Announce message"));
+        }
+
+        if bytes.len() < 61 {
+            return Err(anyhow!("Packet too short for PTP Announce message"));
+        }
+
+        let mut grandmaster_identity = [0u8; 8];
+        grandmaster_identity.copy_from_slice(&bytes[53..61]);
+
+        Ok(Self {
+            domain_number: header.domain_number,
+            grandmaster_identity: ClockIdentity::from_bytes(grandmaster_identity),
+        })
+    }
+}
+
 impl Timestamp {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 10 {
             return Err(anyhow!("Buffer too short for Timestamp"));
         }
-        
+
         let seconds_msb = u16::from_be_bytes(bytes[0..2].try_into()?);
         let seconds_lsb = u32::from_be_bytes(bytes[2..6].try_into()?);
         let seconds = ((seconds_msb as u64) << 32) | (seconds_lsb as u64);
-        
+
         let nanoseconds = u32::from_be_bytes(bytes[6..10].try_into()?);
-        
+
         Ok(Self {
             seconds,
             nanoseconds,
         })
     }
-    
+
     pub fn as_nanos(&self) -> u128 {
         (self.seconds as u128 * 1_000_000_000) + self.nanoseconds as u128
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_identity_formats_as_ptp_sdp_token() {
+        let identity = ClockIdentity::from_bytes([0xac, 0xde, 0x48, 0xff, 0xfe, 0x23, 0x45, 0x67]);
+
+        assert_eq!(identity.to_string(), "AC-DE-48-FF-FE-23-45-67");
+    }
+
+    #[test]
+    fn clock_identity_can_be_derived_from_eui48_mac() {
+        let identity = ClockIdentity::from_mac_address([0xac, 0xde, 0x48, 0x23, 0x45, 0x67]);
+
+        assert_eq!(identity.to_string(), "AC-DE-48-FF-FE-23-45-67");
+    }
+
+    #[test]
+    fn announce_message_extracts_grandmaster_identity() {
+        let mut bytes = vec![0u8; 64];
+        bytes[0] = 0x0b;
+        bytes[1] = 0x02;
+        bytes[4] = 7;
+        bytes[53..61].copy_from_slice(&[0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]);
+
+        let announce = AnnounceMessage::from_bytes(&bytes).expect("announce should parse");
+
+        assert_eq!(announce.domain_number, 7);
+        assert_eq!(
+            announce.grandmaster_identity.to_string(),
+            "00-1D-C1-FF-FE-12-34-56"
+        );
     }
 }
