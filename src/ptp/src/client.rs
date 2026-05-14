@@ -9,7 +9,10 @@ use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::messages::{AnnounceMessage, ClockIdentity, MessageType, PtpHeader, Timestamp};
+use crate::messages::{
+    AnnounceMessage, ClockIdentity, DelayReqMessage, DelayRespMessage, MessageType, PtpHeader,
+    Timestamp,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PtpState {
@@ -84,9 +87,22 @@ impl SimpleClock {
         (sys_ns as i64 + self.offset_ns) as u64
     }
 
-    fn adjust_offset(&mut self, delta_ns: i64) {
-        self.offset_ns += delta_ns;
+    fn set_offset(&mut self, offset_ns: i64) {
+        self.offset_ns = offset_ns;
     }
+
+    fn system_now_ns() -> Result<u64> {
+        Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingDelayRequest {
+    sequence_id: u16,
+    sent_ns: u64,
+    sync_origin_ns: u64,
+    sync_arrival_ns: u64,
+    requesting_port_identity: [u8; 10],
 }
 
 pub struct PtpClient {
@@ -202,6 +218,47 @@ impl PtpClient {
         Ok(())
     }
 
+    fn apply_delay_resp_bytes(
+        clock: &Arc<Mutex<SimpleClock>>,
+        stats: &Arc<Mutex<PtpStats>>,
+        pending_delay_request: &mut Option<PendingDelayRequest>,
+        bytes: &[u8],
+        domain: u8,
+    ) -> Result<()> {
+        let delay_resp = DelayRespMessage::from_bytes(bytes)?;
+        if delay_resp.domain_number != domain {
+            return Ok(());
+        }
+
+        let Some(pending) = *pending_delay_request else {
+            return Ok(());
+        };
+
+        if delay_resp.sequence_id != pending.sequence_id
+            || delay_resp.requesting_port_identity != pending.requesting_port_identity
+        {
+            return Ok(());
+        }
+
+        let master_to_slave = pending.sync_arrival_ns as i128 - pending.sync_origin_ns as i128;
+        let slave_to_master =
+            delay_resp.receive_timestamp.as_nanos() as i128 - pending.sent_ns as i128;
+        let mean_path_delay = (master_to_slave + slave_to_master) / 2;
+        let offset = (slave_to_master - master_to_slave) / 2;
+
+        {
+            let mut clock = clock.lock().unwrap();
+            clock.set_offset(offset as i64);
+        }
+
+        let mut stats = stats.lock().unwrap();
+        stats.mean_path_delay_ns = mean_path_delay as i64;
+        stats.offset_ns = offset as i64;
+        stats.state = PtpState::Slave;
+        *pending_delay_request = None;
+        Ok(())
+    }
+
     pub fn rtp_timestamp(&self, sample_rate: u32) -> Result<u32> {
         let now_ns = self.get_time();
         // Calculate RTP timestamp based on PTP time
@@ -242,8 +299,16 @@ impl PtpClient {
         let mut general_buf = [0u8; 2048];
 
         // Simple state tracking
+        let local_port_identity = {
+            let stats = stats.lock().unwrap();
+            source_port_identity(stats.local_identity)
+        };
+        let ptp_event_addr = SocketAddrV4::new(Ipv4Addr::new(224, 0, 1, 129), 319);
+
         let mut last_sync_ts: Option<u64> = None;
         let mut last_sync_seq_id: Option<u16> = None;
+        let mut delay_req_sequence_id: u16 = 0;
+        let mut pending_delay_request: Option<PendingDelayRequest> = None;
 
         loop {
             tokio::select! {
@@ -260,7 +325,7 @@ impl PtpClient {
                         match header.message_type {
                             MessageType::Sync => {
                                 // Record arrival time
-                                let arrival_ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
+                                let arrival_ts = SimpleClock::system_now_ns()?;
                                 last_sync_ts = Some(arrival_ts);
                                 last_sync_seq_id = Some(header.sequence_id);
 
@@ -288,35 +353,64 @@ impl PtpClient {
                                         if let Ok(origin_ts) = Timestamp::from_bytes(&general_buf[34..44]) {
                                             let origin_ns = origin_ts.as_nanos() as u64;
                                             if let Some(arrival_ns) = last_sync_ts {
-                                                // Calculate offset
-                                                // offset = master_time - slave_time
-                                                // We want slave_time + offset = master_time
-                                                // So offset = origin_ns - arrival_ns
                                                 let offset = origin_ns as i64 - arrival_ns as i64;
+                                                clock.lock().unwrap().set_offset(offset);
 
-                                                let mut clock_guard = clock.lock().unwrap();
-                                                clock_guard.adjust_offset(offset);
+                                                {
+                                                    let mut stats = stats.lock().unwrap();
+                                                    stats.offset_ns = offset;
+                                                    stats.state = PtpState::Uncalibrated;
+                                                    stats.master_identity =
+                                                        Some(ClockIdentity::from_bytes([
+                                                            header.source_port_identity[0],
+                                                            header.source_port_identity[1],
+                                                            header.source_port_identity[2],
+                                                            header.source_port_identity[3],
+                                                            header.source_port_identity[4],
+                                                            header.source_port_identity[5],
+                                                            header.source_port_identity[6],
+                                                            header.source_port_identity[7],
+                                                        ]));
+                                                }
 
-                                                let mut stats = stats.lock().unwrap();
-                                                stats.offset_ns = offset;
-                                                stats.state = PtpState::Slave;
-                                                stats.master_identity =
-                                                    Some(ClockIdentity::from_bytes([
-                                                        header.source_port_identity[0],
-                                                        header.source_port_identity[1],
-                                                        header.source_port_identity[2],
-                                                        header.source_port_identity[3],
-                                                        header.source_port_identity[4],
-                                                        header.source_port_identity[5],
-                                                        header.source_port_identity[6],
-                                                        header.source_port_identity[7],
-                                                    ]));
+                                                let delay_req_sent_ns = SimpleClock::system_now_ns()?;
+                                                let delay_req = DelayReqMessage {
+                                                    domain_number: config.domain,
+                                                    source_port_identity: local_port_identity,
+                                                    sequence_id: delay_req_sequence_id,
+                                                    origin_timestamp: Timestamp::from_nanos(delay_req_sent_ns),
+                                                };
+                                                pending_delay_request = Some(PendingDelayRequest {
+                                                    sequence_id: delay_req_sequence_id,
+                                                    sent_ns: delay_req_sent_ns,
+                                                    sync_origin_ns: origin_ns,
+                                                    sync_arrival_ns: arrival_ns,
+                                                    requesting_port_identity: local_port_identity,
+                                                });
+                                                delay_req_sequence_id = delay_req_sequence_id.wrapping_add(1);
 
-                                                log::debug!("Synced with master, offset: {} ns", offset);
+                                                let delay_req_bytes = delay_req.to_bytes();
+                                                if let Err(error) = event_socket
+                                                    .send_to(&delay_req_bytes, ptp_event_addr)
+                                                    .await
+                                                {
+                                                    log::warn!("Failed to send PTP DelayReq: {error}");
+                                                }
+
+                                                log::debug!("Synced with master, one-way offset: {} ns", offset);
                                             }
                                         }
                                     }
                                 }
+                            }
+                            MessageType::DelayResp => {
+                                let _ = Self::apply_delay_resp_bytes(
+                                    &clock,
+                                    &stats,
+                                    &mut pending_delay_request,
+                                    &general_buf[..len],
+                                    config.domain,
+                                );
                             }
                             MessageType::Announce => {
                                 let _ = Self::apply_announce_bytes_to_stats(
@@ -355,6 +449,13 @@ impl PtpClient {
 
         Ok(UdpSocket::from_std(socket.into())?)
     }
+}
+
+fn source_port_identity(clock_identity: ClockIdentity) -> [u8; 10] {
+    let mut identity = [0u8; 10];
+    identity[0..8].copy_from_slice(&clock_identity.as_bytes());
+    identity[8..10].copy_from_slice(&1u16.to_be_bytes());
+    identity
 }
 
 fn discover_clock_identity(interface_ip: Ipv4Addr) -> Result<ClockIdentity> {
@@ -560,6 +661,57 @@ mod tests {
         bytes[1] = 0x02;
         bytes[4] = domain;
         bytes[53..61].copy_from_slice(&grandmaster_identity.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn matched_delay_response_updates_path_delay_and_clock_offset() {
+        let clock = Arc::new(Mutex::new(SimpleClock::new()));
+        let stats = Arc::new(Mutex::new(PtpStats {
+            local_identity: ClockIdentity::from_bytes([
+                0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+            ]),
+            ..Default::default()
+        }));
+        let requesting_port_identity = [0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01, 0x00, 0x01];
+        let mut pending_delay_request = Some(PendingDelayRequest {
+            sequence_id: 42,
+            sent_ns: 20_000,
+            sync_origin_ns: 10_000,
+            sync_arrival_ns: 11_200,
+            requesting_port_identity,
+        });
+
+        PtpClient::apply_delay_resp_bytes(
+            &clock,
+            &stats,
+            &mut pending_delay_request,
+            &delay_resp_packet(7, 42, 20_800, requesting_port_identity),
+            7,
+        )
+        .expect("matching delay response should apply");
+
+        let stats = stats.lock().unwrap();
+        assert_eq!(stats.mean_path_delay_ns, 1_000);
+        assert_eq!(stats.offset_ns, -200);
+        assert_eq!(stats.state, PtpState::Slave);
+        assert!(pending_delay_request.is_none());
+        assert_eq!(clock.lock().unwrap().offset_ns, -200);
+    }
+
+    fn delay_resp_packet(
+        domain: u8,
+        sequence_id: u16,
+        receive_timestamp_ns: u64,
+        requesting_port_identity: [u8; 10],
+    ) -> Vec<u8> {
+        let mut bytes = vec![0u8; 54];
+        bytes[0] = 0x09;
+        bytes[1] = 0x02;
+        bytes[4] = domain;
+        bytes[30..32].copy_from_slice(&sequence_id.to_be_bytes());
+        bytes[34..44].copy_from_slice(&Timestamp::from_nanos(receive_timestamp_ns).to_bytes());
+        bytes[44..54].copy_from_slice(&requesting_port_identity);
         bytes
     }
 }
