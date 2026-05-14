@@ -32,12 +32,18 @@ async fn test_e2e_loop_playback_streams_past_end_of_short_file() -> Result<()> {
     run_streaming_test(StreamerArgs::LoopPlayback).await
 }
 
+#[tokio::test]
+async fn test_e2e_stream_metadata_controls_rtp_header() -> Result<()> {
+    run_streaming_test(StreamerArgs::Metadata).await
+}
+
 enum StreamerArgs {
     Cli,
     ConfigFile,
     Sigterm,
     Sigint,
     LoopPlayback,
+    Metadata,
 }
 
 async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
@@ -63,6 +69,7 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
         StreamerArgs::Sigterm => ("239.1.2.5", 55007),
         StreamerArgs::Sigint => ("239.1.2.6", 55008),
         StreamerArgs::LoopPlayback => ("239.1.2.7", 55009),
+        StreamerArgs::Metadata => ("239.1.2.8", 55010),
     };
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -88,6 +95,9 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
         StreamerArgs::Cli => {}
         StreamerArgs::ConfigFile => {
             command.arg("--config").arg(resource_config_path());
+        }
+        StreamerArgs::Metadata => {
+            command.arg("--config").arg(resource_metadata_config_path());
         }
         StreamerArgs::Sigterm => {}
         StreamerArgs::Sigint => {}
@@ -143,7 +153,24 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
                     packets_received += 1;
                     assert!(len >= 12, "RTP packet should include a header");
                     assert_eq!(buf[0] >> 6, 2, "RTP version should be 2");
-                    assert_eq!(buf[1] & 0x7f, 97, "Payload type should be dynamic AES67 L24");
+                    let expected_payload_type = if matches!(args_source, StreamerArgs::Metadata) {
+                        101
+                    } else {
+                        97
+                    };
+                    assert_eq!(
+                        buf[1] & 0x7f,
+                        expected_payload_type,
+                        "Payload type should match stream metadata"
+                    );
+
+                    if matches!(args_source, StreamerArgs::Metadata) {
+                        assert_eq!(
+                            u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]),
+                            3735928559,
+                            "SSRC should match stream metadata"
+                        );
+                    }
                 }
             }
         }
@@ -194,6 +221,10 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
 
 fn resource_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/resources/e2e-streamer.toml")
+}
+
+fn resource_metadata_config_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/resources/e2e-metadata.toml")
 }
 
 fn create_short_loop_wav() -> Result<PathBuf> {
