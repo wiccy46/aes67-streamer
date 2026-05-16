@@ -1,6 +1,8 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+
+const RTP_DSCP: u8 = 34;
 
 /// Multicast socket configuration for AES67 streaming
 #[derive(Debug, Clone)]
@@ -72,6 +74,7 @@ impl MulticastSocket {
         // Configure multicast settings
         socket.set_multicast_ttl_v4(config.ttl as u32)?;
         socket.set_multicast_loop_v4(true)?;
+        socket.set_tos_v4(dscp_to_tos(RTP_DSCP)?)?;
 
         if !config.local_addr.is_unspecified() {
             socket.set_multicast_if_v4(&config.local_addr)?;
@@ -140,6 +143,14 @@ impl MulticastSocket {
     pub fn config(&self) -> &MulticastConfig {
         &self.config
     }
+}
+
+pub(crate) fn dscp_to_tos(dscp: u8) -> Result<u32> {
+    if dscp > 63 {
+        return Err(anyhow!("DSCP value {dscp} must be between 0 and 63"));
+    }
+
+    Ok((dscp as u32) << 2)
 }
 
 /// Socket statistics and information
@@ -246,6 +257,14 @@ mod tests {
         assert_eq!(config.port, 5004);
         assert_eq!(config.local_addr, Ipv4Addr::new(192, 168, 1, 100));
         assert_eq!(config.ttl, 32);
+    }
+
+    #[test]
+    fn dscp_value_converts_to_ipv4_tos_byte() {
+        assert_eq!(dscp_to_tos(0).unwrap(), 0);
+        assert_eq!(dscp_to_tos(34).unwrap(), 136);
+        assert_eq!(dscp_to_tos(46).unwrap(), 184);
+        assert!(dscp_to_tos(64).is_err());
     }
 
     #[test]

@@ -7,6 +7,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
 
+const SAP_DSCP: u8 = 24;
+
 pub struct SapAnnouncer {
     socket: Arc<UdpSocket>,
     sdp_payload: Arc<Mutex<String>>,
@@ -28,6 +30,7 @@ impl SapAnnouncer {
 
         // Set multicast loop so we can receive our own announcements (useful for testing)
         socket.set_multicast_loop_v4(true)?;
+        socket.set_tos_v4(crate::socket::dscp_to_tos(SAP_DSCP)?)?;
 
         // Set multicast interface
         socket.set_multicast_if_v4(&interface_ip)?;

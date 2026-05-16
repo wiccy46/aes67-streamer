@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -18,6 +18,7 @@ use crate::messages::{
 
 const ANNOUNCE_RECEIPT_TIMEOUT_MULTIPLIER: f64 = 3.0;
 const MASTER_SELECTION_REFRESH: Duration = Duration::from_secs(1);
+const PTP_DSCP: u8 = 46;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum PtpState {
@@ -573,6 +574,7 @@ impl PtpClient {
         // Bind to wildcard address
         let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
         socket.bind(&addr.into())?;
+        socket.set_tos_v4(dscp_to_tos(PTP_DSCP)?)?;
 
         // Join multicast group 224.0.1.129 (PTP primary)
         let multi_addr = Ipv4Addr::new(224, 0, 1, 129);
@@ -582,6 +584,14 @@ impl PtpClient {
 
         Ok(UdpSocket::from_std(socket.into())?)
     }
+}
+
+fn dscp_to_tos(dscp: u8) -> Result<u32> {
+    if dscp > 63 {
+        return Err(anyhow!("DSCP value {dscp} must be between 0 and 63"));
+    }
+
+    Ok((dscp as u32) << 2)
 }
 
 fn announce_timeout(log_message_interval: i8) -> Duration {
