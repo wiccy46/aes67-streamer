@@ -1,6 +1,6 @@
 use crate::configs::{load_config, Config};
 use anyhow::{anyhow, Result};
-use clap::{parser::ValueSource, Arg, ArgMatches, Command};
+use clap::{error::ErrorKind, parser::ValueSource, Arg, ArgMatches, Command};
 use std::ffi::OsString;
 
 #[derive(Debug, Clone)]
@@ -27,6 +27,15 @@ pub fn parse_args() -> Result<Args> {
     parse_args_from(std::env::args_os())
 }
 
+pub fn is_display_control_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<clap::Error>().is_some_and(|error| {
+        matches!(
+            error.kind(),
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+        )
+    })
+}
+
 pub fn parse_args_from<I, T>(args: I) -> Result<Args>
 where
     I: IntoIterator<Item = T>,
@@ -46,7 +55,7 @@ fn cli() -> Command {
                 .short('f')
                 .long("file")
                 .value_name("FILE")
-                .help("Audio file to stream (WAV, MP3, AIFF); required unless supplied by config")
+                .help("Audio file to stream (WAV, FLAC, MP3, AIFF); required unless supplied by config")
         )
         .arg(
             Arg::new("address")
@@ -69,13 +78,13 @@ fn cli() -> Command {
                 .short('i')
                 .long("interface")
                 .value_name("INTERFACE")
-                .help("Network interface name (e.g., eth0, wlan0)")
+                .help("Network interface name or IPv4 address [default: 127.0.0.1]")
         )
         .arg(
             Arg::new("ptp-domain")
                 .long("ptp-domain")
                 .value_name("DOMAIN")
-                .help("PTP domain number (0-255)")
+                .help("PTP domain number (0-255) [default: 0]")
                 .value_parser(clap::value_parser!(u8))
         )
         .arg(
@@ -83,26 +92,26 @@ fn cli() -> Command {
                 .short('c')
                 .long("config")
                 .value_name("FILE")
-                .help("Configuration file path (TOML format)")
+                .help("Configuration file path (TOML format) [default: none]")
         )
         .arg(
             Arg::new("duration-seconds")
                 .long("duration-seconds")
                 .value_name("SECONDS")
-                .help("Stop streaming after this many seconds")
+                .help("Stop streaming after this many seconds [default: unlimited]")
                 .value_parser(parse_positive_duration_seconds)
         )
         .arg(
             Arg::new("loop")
                 .long("loop")
-                .help("Loop the audio file instead of stopping at end-of-file")
+                .help("Loop the audio file instead of stopping at end-of-file [default: false]")
                 .action(clap::ArgAction::SetTrue)
         )
         .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
-                .help("Enable verbose logging")
+                .help("Enable verbose logging [default: false]")
                 .action(clap::ArgAction::SetTrue)
         )
 }
