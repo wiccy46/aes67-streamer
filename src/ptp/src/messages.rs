@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::convert::TryInto;
 use std::fmt;
 
@@ -47,7 +47,7 @@ pub struct PtpHeader {
     pub log_message_interval: i8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct ClockIdentity([u8; 8]);
 
 impl ClockIdentity {
@@ -125,7 +125,18 @@ pub struct Timestamp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnnounceMessage {
     pub domain_number: u8,
+    pub log_message_interval: i8,
+    pub priority1: u8,
+    pub clock_quality: ClockQuality,
+    pub priority2: u8,
     pub grandmaster_identity: ClockIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClockQuality {
+    pub clock_class: u8,
+    pub clock_accuracy: u8,
+    pub offset_scaled_log_variance: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +162,7 @@ impl AnnounceMessage {
             return Err(anyhow!("PTP message is not an Announce message"));
         }
 
-        if bytes.len() < 61 {
+        if bytes.len() < 64 {
             return Err(anyhow!("Packet too short for PTP Announce message"));
         }
 
@@ -160,6 +171,14 @@ impl AnnounceMessage {
 
         Ok(Self {
             domain_number: header.domain_number,
+            log_message_interval: header.log_message_interval,
+            priority1: bytes[47],
+            clock_quality: ClockQuality {
+                clock_class: bytes[48],
+                clock_accuracy: bytes[49],
+                offset_scaled_log_variance: u16::from_be_bytes(bytes[50..52].try_into()?),
+            },
+            priority2: bytes[52],
             grandmaster_identity: ClockIdentity::from_bytes(grandmaster_identity),
         })
     }
@@ -263,16 +282,28 @@ mod tests {
     }
 
     #[test]
-    fn announce_message_extracts_grandmaster_identity() {
+    fn announce_message_extracts_bmca_fields() {
         let mut bytes = vec![0u8; 64];
         bytes[0] = 0x0b;
         bytes[1] = 0x02;
         bytes[4] = 7;
+        bytes[33] = 1;
+        bytes[47] = 100;
+        bytes[48] = 248;
+        bytes[49] = 0x21;
+        bytes[50..52].copy_from_slice(&0x1234u16.to_be_bytes());
+        bytes[52] = 90;
         bytes[53..61].copy_from_slice(&[0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]);
 
         let announce = AnnounceMessage::from_bytes(&bytes).expect("announce should parse");
 
         assert_eq!(announce.domain_number, 7);
+        assert_eq!(announce.log_message_interval, 1);
+        assert_eq!(announce.priority1, 100);
+        assert_eq!(announce.clock_quality.clock_class, 248);
+        assert_eq!(announce.clock_quality.clock_accuracy, 0x21);
+        assert_eq!(announce.clock_quality.offset_scaled_log_variance, 0x1234);
+        assert_eq!(announce.priority2, 90);
         assert_eq!(
             announce.grandmaster_identity.to_string(),
             "00-1D-C1-FF-FE-12-34-56"

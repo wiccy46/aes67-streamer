@@ -1,18 +1,23 @@
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ptr;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::messages::{
-    AnnounceMessage, ClockIdentity, DelayReqMessage, DelayRespMessage, MessageType, PtpHeader,
-    Timestamp,
+    AnnounceMessage, ClockIdentity, ClockQuality, DelayReqMessage, DelayRespMessage, MessageType,
+    PtpHeader, Timestamp,
 };
+
+const ANNOUNCE_RECEIPT_TIMEOUT_MULTIPLIER: f64 = 3.0;
+const MASTER_SELECTION_REFRESH: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum PtpState {
@@ -100,6 +105,89 @@ struct PendingDelayRequest {
     requesting_port_identity: [u8; 10],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MasterCandidate {
+    priority1: u8,
+    clock_quality: ClockQuality,
+    priority2: u8,
+    grandmaster_identity: ClockIdentity,
+    last_seen: Instant,
+    timeout: Duration,
+}
+
+impl MasterCandidate {
+    fn from_announce(announce: &AnnounceMessage, now: Instant) -> Self {
+        Self {
+            priority1: announce.priority1,
+            clock_quality: announce.clock_quality,
+            priority2: announce.priority2,
+            grandmaster_identity: announce.grandmaster_identity,
+            last_seen: now,
+            timeout: announce_timeout(announce.log_message_interval),
+        }
+    }
+
+    fn is_better_than(&self, other: &Self) -> bool {
+        self.dataset_key() < other.dataset_key()
+    }
+
+    fn is_expired(&self, now: Instant) -> bool {
+        now.checked_duration_since(self.last_seen)
+            .is_some_and(|elapsed| elapsed > self.timeout)
+    }
+
+    fn dataset_key(&self) -> (u8, u8, u8, u16, u8, ClockIdentity) {
+        (
+            self.priority1,
+            self.clock_quality.clock_class,
+            self.clock_quality.clock_accuracy,
+            self.clock_quality.offset_scaled_log_variance,
+            self.priority2,
+            self.grandmaster_identity,
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct MasterSelection {
+    candidates: BTreeMap<ClockIdentity, MasterCandidate>,
+}
+
+impl MasterSelection {
+    fn observe(&mut self, announce: AnnounceMessage, now: Instant) -> Option<ClockIdentity> {
+        self.remove_expired(now);
+        let candidate = MasterCandidate::from_announce(&announce, now);
+        self.candidates
+            .insert(candidate.grandmaster_identity, candidate);
+        self.best_identity()
+    }
+
+    fn refresh(&mut self, now: Instant) -> Option<ClockIdentity> {
+        self.remove_expired(now);
+        self.best_identity()
+    }
+
+    fn remove_expired(&mut self, now: Instant) {
+        self.candidates
+            .retain(|_, candidate| !candidate.is_expired(now));
+    }
+
+    fn best_identity(&self) -> Option<ClockIdentity> {
+        self.candidates
+            .values()
+            .min_by(|left, right| {
+                if left.is_better_than(right) {
+                    Ordering::Less
+                } else if right.is_better_than(left) {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .map(|candidate| candidate.grandmaster_identity)
+    }
+}
+
 pub struct PtpClient {
     /// PTP configuration
     config: PtpConfig,
@@ -107,6 +195,8 @@ pub struct PtpClient {
     clock: Arc<Mutex<SimpleClock>>,
     /// Current PTP statistics
     stats: Arc<Mutex<PtpStats>>,
+    /// Best master selection state
+    master_selection: Arc<Mutex<MasterSelection>>,
     /// Stop signal
     shutdown: CancellationToken,
     /// Running task handle
@@ -131,6 +221,7 @@ impl PtpClient {
             config,
             clock: Arc::new(Mutex::new(SimpleClock::new())),
             stats: Arc::new(Mutex::new(stats)),
+            master_selection: Arc::new(Mutex::new(MasterSelection::default())),
             shutdown: CancellationToken::new(),
             task: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
@@ -141,13 +232,16 @@ impl PtpClient {
         let config = self.config.clone();
         let clock = self.clock.clone();
         let stats = self.stats.clone();
+        let master_selection = self.master_selection.clone();
         let shutdown = self.shutdown.child_token();
         let is_running = self.is_running.clone();
 
         *is_running.lock().unwrap() = true;
 
         let handle = tokio::spawn(async move {
-            if let Err(e) = Self::run_ptp_loop(config, clock, stats, shutdown).await {
+            if let Err(e) =
+                Self::run_ptp_loop(config, clock, stats, master_selection, shutdown).await
+            {
                 log::error!("PTP loop error: {}", e);
             }
             *is_running.lock().unwrap() = false;
@@ -195,23 +289,64 @@ impl PtpClient {
     }
 
     pub fn apply_announce_bytes(&self, bytes: &[u8]) -> Result<()> {
-        Self::apply_announce_bytes_to_stats(&self.config, &self.stats, bytes)
+        self.apply_announce_bytes_at(bytes, Instant::now())
+    }
+
+    fn apply_announce_bytes_at(&self, bytes: &[u8], now: Instant) -> Result<()> {
+        Self::apply_announce_bytes_to_stats(
+            &self.config,
+            &self.stats,
+            &self.master_selection,
+            bytes,
+            now,
+        )
+    }
+
+    #[cfg(test)]
+    fn expire_master_candidates_at(&self, now: Instant) {
+        Self::refresh_master_selection(&self.stats, &self.master_selection, now);
     }
 
     fn apply_announce_bytes_to_stats(
         config: &PtpConfig,
         stats: &Arc<Mutex<PtpStats>>,
+        master_selection: &Arc<Mutex<MasterSelection>>,
         bytes: &[u8],
+        now: Instant,
     ) -> Result<()> {
         let announce = AnnounceMessage::from_bytes(bytes)?;
         if announce.domain_number != config.domain {
             return Ok(());
         }
 
+        let master_identity = {
+            let mut master_selection = master_selection.lock().unwrap();
+            master_selection.observe(announce, now)
+        };
+
         let mut stats = stats.lock().unwrap();
         stats.announce_count += 1;
-        stats.master_identity = Some(announce.grandmaster_identity);
+        stats.master_identity = master_identity;
         Ok(())
+    }
+
+    fn refresh_master_selection(
+        stats: &Arc<Mutex<PtpStats>>,
+        master_selection: &Arc<Mutex<MasterSelection>>,
+        now: Instant,
+    ) {
+        let master_identity = {
+            let mut master_selection = master_selection.lock().unwrap();
+            master_selection.refresh(now)
+        };
+
+        let mut stats = stats.lock().unwrap();
+        stats.master_identity = master_identity;
+    }
+
+    fn timing_source_is_selected(stats: &Arc<Mutex<PtpStats>>, header: &PtpHeader) -> bool {
+        let selected_master = stats.lock().unwrap().master_identity;
+        selected_master.is_none_or(|identity| identity == source_clock_identity(header))
     }
 
     fn apply_delay_resp_bytes(
@@ -271,6 +406,7 @@ impl PtpClient {
         config: PtpConfig,
         clock: Arc<Mutex<SimpleClock>>,
         stats: Arc<Mutex<PtpStats>>,
+        master_selection: Arc<Mutex<MasterSelection>>,
         shutdown: CancellationToken,
     ) -> Result<()> {
         log::info!("Starting PTP client on domain {}", config.domain);
@@ -300,12 +436,16 @@ impl PtpClient {
         let mut last_sync_seq_id: Option<u16> = None;
         let mut delay_req_sequence_id: u16 = 0;
         let mut pending_delay_request: Option<PendingDelayRequest> = None;
+        let mut master_refresh = tokio::time::interval(MASTER_SELECTION_REFRESH);
 
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     log::info!("PTP loop stopping");
                     break;
+                }
+                _ = master_refresh.tick() => {
+                    Self::refresh_master_selection(&stats, &master_selection, Instant::now());
                 }
                 Ok((len, _)) = event_socket.recv_from(&mut event_buf) => {
                     if let Ok(header) = PtpHeader::from_bytes(&event_buf[..len]) {
@@ -314,6 +454,10 @@ impl PtpClient {
                         }
 
                         if header.message_type == MessageType::Sync {
+                            if !Self::timing_source_is_selected(&stats, &header) {
+                                continue;
+                            }
+
                             // Record arrival time
                             let arrival_ts = SimpleClock::system_now_ns()?;
                             last_sync_ts = Some(arrival_ts);
@@ -335,6 +479,10 @@ impl PtpClient {
 
                         match header.message_type {
                             MessageType::FollowUp => {
+                                if !Self::timing_source_is_selected(&stats, &header) {
+                                    continue;
+                                }
+
                                 let (Some(sync_seq), Some(arrival_ns)) =
                                     (last_sync_seq_id, last_sync_ts)
                                 else {
@@ -358,16 +506,6 @@ impl PtpClient {
                                     let mut stats = stats.lock().unwrap();
                                     stats.offset_ns = offset;
                                     stats.state = PtpState::Uncalibrated;
-                                    stats.master_identity = Some(ClockIdentity::from_bytes([
-                                        header.source_port_identity[0],
-                                        header.source_port_identity[1],
-                                        header.source_port_identity[2],
-                                        header.source_port_identity[3],
-                                        header.source_port_identity[4],
-                                        header.source_port_identity[5],
-                                        header.source_port_identity[6],
-                                        header.source_port_identity[7],
-                                    ]));
                                 }
 
                                 let delay_req_sent_ns = SimpleClock::system_now_ns()?;
@@ -409,7 +547,9 @@ impl PtpClient {
                                 let _ = Self::apply_announce_bytes_to_stats(
                                     &config,
                                     &stats,
+                                    &master_selection,
                                     &general_buf[..len],
+                                    Instant::now(),
                                 );
                             }
                             _ => {}
@@ -442,6 +582,24 @@ impl PtpClient {
 
         Ok(UdpSocket::from_std(socket.into())?)
     }
+}
+
+fn announce_timeout(log_message_interval: i8) -> Duration {
+    let seconds = 2f64.powi(log_message_interval as i32) * ANNOUNCE_RECEIPT_TIMEOUT_MULTIPLIER;
+    Duration::from_secs_f64(seconds.clamp(0.1, 60.0))
+}
+
+fn source_clock_identity(header: &PtpHeader) -> ClockIdentity {
+    ClockIdentity::from_bytes([
+        header.source_port_identity[0],
+        header.source_port_identity[1],
+        header.source_port_identity[2],
+        header.source_port_identity[3],
+        header.source_port_identity[4],
+        header.source_port_identity[5],
+        header.source_port_identity[6],
+        header.source_port_identity[7],
+    ])
 }
 
 fn source_port_identity(clock_identity: ClockIdentity) -> [u8; 10] {
@@ -617,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn announce_updates_reference_identity_and_ignores_wrong_domain() {
+    fn announce_selects_best_master_and_ignores_wrong_domain() {
         let client = PtpClient::new(PtpConfig {
             domain: 7,
             clock_identity: Some(ClockIdentity::from_bytes([
@@ -631,28 +789,216 @@ mod tests {
             ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0xaa, 0xbb, 0xcc]);
         let second_master =
             ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x65, 0x43, 0x21]);
+        let worse_master =
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x99, 0x88, 0x77]);
 
         client
-            .apply_announce_bytes(&announce_packet(7, first_master))
+            .apply_announce_bytes(&announce_packet(
+                7,
+                first_master,
+                128,
+                248,
+                0x22,
+                0xffff,
+                128,
+            ))
             .expect("valid announce should be accepted");
         assert_eq!(client.reference_clock_identity(), first_master);
 
         client
-            .apply_announce_bytes(&announce_packet(8, wrong_domain_master))
+            .apply_announce_bytes(&announce_packet(
+                8,
+                wrong_domain_master,
+                1,
+                6,
+                0x20,
+                0x0100,
+                1,
+            ))
             .expect("wrong-domain announce should be ignored");
         assert_eq!(client.reference_clock_identity(), first_master);
 
         client
-            .apply_announce_bytes(&announce_packet(7, second_master))
-            .expect("later grandmaster should be accepted");
+            .apply_announce_bytes(&announce_packet(
+                7,
+                second_master,
+                100,
+                248,
+                0x22,
+                0xffff,
+                128,
+            ))
+            .expect("better grandmaster should be accepted");
+        assert_eq!(client.reference_clock_identity(), second_master);
+
+        client
+            .apply_announce_bytes(&announce_packet(
+                7,
+                worse_master,
+                200,
+                248,
+                0x22,
+                0xffff,
+                128,
+            ))
+            .expect("worse grandmaster should be tracked but not selected");
         assert_eq!(client.reference_clock_identity(), second_master);
     }
 
-    fn announce_packet(domain: u8, grandmaster_identity: ClockIdentity) -> Vec<u8> {
+    #[test]
+    fn bmca_uses_clock_quality_priority2_and_identity_tie_breakers() {
+        let low_accuracy =
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x00, 0x00, 0x30]);
+        let better_accuracy =
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x00, 0x00, 0x20]);
+        let lower_identity =
+            ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x00, 0x00, 0x10]);
+
+        assert!(
+            MasterCandidate::from_announce(
+                &AnnounceMessage::from_bytes(&announce_packet(
+                    7,
+                    better_accuracy,
+                    128,
+                    248,
+                    0x20,
+                    0x1234,
+                    128,
+                ))
+                .unwrap(),
+                Instant::now(),
+            )
+            .is_better_than(&MasterCandidate::from_announce(
+                &AnnounceMessage::from_bytes(&announce_packet(
+                    7,
+                    low_accuracy,
+                    128,
+                    248,
+                    0x30,
+                    0x1234,
+                    128,
+                ))
+                .unwrap(),
+                Instant::now(),
+            ))
+        );
+
+        assert!(
+            MasterCandidate::from_announce(
+                &AnnounceMessage::from_bytes(&announce_packet(
+                    7,
+                    lower_identity,
+                    128,
+                    248,
+                    0x20,
+                    0x1234,
+                    128,
+                ))
+                .unwrap(),
+                Instant::now(),
+            )
+            .is_better_than(&MasterCandidate::from_announce(
+                &AnnounceMessage::from_bytes(&announce_packet(
+                    7,
+                    better_accuracy,
+                    128,
+                    248,
+                    0x20,
+                    0x1234,
+                    128,
+                ))
+                .unwrap(),
+                Instant::now(),
+            ))
+        );
+    }
+
+    #[test]
+    fn expired_master_candidates_are_removed() {
+        let client = PtpClient::new(PtpConfig {
+            domain: 7,
+            clock_identity: Some(ClockIdentity::from_bytes([
+                0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+            ])),
+            ..Default::default()
+        });
+        let start = Instant::now();
+        let local_identity = client.get_stats().local_identity;
+        let master = ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]);
+
+        client
+            .apply_announce_bytes_at(
+                &announce_packet(7, master, 128, 248, 0x22, 0xffff, 128),
+                start,
+            )
+            .expect("valid announce should be accepted");
+        assert_eq!(client.reference_clock_identity(), master);
+
+        client.expire_master_candidates_at(start + Duration::from_secs(7));
+        assert_eq!(client.reference_clock_identity(), local_identity);
+    }
+
+    #[test]
+    fn timing_messages_are_filtered_to_selected_master() {
+        let selected = ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]);
+        let other = ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0xaa, 0xbb, 0xcc]);
+        let stats = Arc::new(Mutex::new(PtpStats {
+            master_identity: Some(selected),
+            ..Default::default()
+        }));
+
+        assert!(PtpClient::timing_source_is_selected(
+            &stats,
+            &ptp_header_from_source(selected)
+        ));
+        assert!(!PtpClient::timing_source_is_selected(
+            &stats,
+            &ptp_header_from_source(other)
+        ));
+
+        stats.lock().unwrap().master_identity = None;
+        assert!(PtpClient::timing_source_is_selected(
+            &stats,
+            &ptp_header_from_source(other)
+        ));
+    }
+
+    fn ptp_header_from_source(source: ClockIdentity) -> PtpHeader {
+        let mut source_port_identity = [0u8; 10];
+        source_port_identity[0..8].copy_from_slice(&source.as_bytes());
+        source_port_identity[8..10].copy_from_slice(&1u16.to_be_bytes());
+
+        PtpHeader {
+            message_type: MessageType::Sync,
+            version: 2,
+            domain_number: 7,
+            correction_field: 0,
+            source_port_identity,
+            sequence_id: 1,
+            control_field: 0,
+            log_message_interval: 1,
+        }
+    }
+
+    fn announce_packet(
+        domain: u8,
+        grandmaster_identity: ClockIdentity,
+        priority1: u8,
+        clock_class: u8,
+        clock_accuracy: u8,
+        offset_scaled_log_variance: u16,
+        priority2: u8,
+    ) -> Vec<u8> {
         let mut bytes = vec![0u8; 64];
         bytes[0] = 0x0b;
         bytes[1] = 0x02;
         bytes[4] = domain;
+        bytes[33] = 1;
+        bytes[47] = priority1;
+        bytes[48] = clock_class;
+        bytes[49] = clock_accuracy;
+        bytes[50..52].copy_from_slice(&offset_scaled_log_variance.to_be_bytes());
+        bytes[52] = priority2;
         bytes[53..61].copy_from_slice(&grandmaster_identity.as_bytes());
         bytes
     }
