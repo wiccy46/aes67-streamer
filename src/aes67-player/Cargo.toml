@@ -15,3 +15,6 @@ network = { path = "../network" }
 ringbuf = "0.5"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
+
+[dev-dependencies]
+semver = "1.0"
