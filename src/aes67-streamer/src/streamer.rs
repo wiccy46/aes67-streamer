@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
+const MAX_RELEASE_CHANNELS: u32 = 8;
+const L24_BYTES_PER_SAMPLE: usize = 3;
+const MAX_IPV4_RTP_AUDIO_PAYLOAD_BYTES: usize = 1460;
+
 /// AES67 Audio Streamer
 pub struct Aes67Streamer {
     audio_reader: AudioReader,
@@ -97,6 +101,8 @@ impl Aes67Streamer {
             audio_info.channels,
             audio_info.duration
         );
+        validate_stream_audio_format(audio_info, samples_per_packet)
+            .context("Unsupported audio format for AES67 stream")?;
 
         // Create audio processing chain
         let gain_node = GainNode::new_db(config.gain_db);
@@ -373,6 +379,24 @@ fn samples_per_packet(sample_rate: u32, packet_time_ms: u32) -> usize {
     (sample_rate as usize * packet_time_ms as usize) / 1000
 }
 
+fn validate_stream_audio_format(info: &audio::AudioInfo, samples_per_packet: usize) -> Result<()> {
+    if !(1..=MAX_RELEASE_CHANNELS).contains(&info.channels) {
+        anyhow::bail!(
+            "first release supports 1 to 8 channels, but input has {} channels",
+            info.channels
+        );
+    }
+
+    let payload_bytes = samples_per_packet * info.channels as usize * L24_BYTES_PER_SAMPLE;
+    if payload_bytes > MAX_IPV4_RTP_AUDIO_PAYLOAD_BYTES {
+        anyhow::bail!(
+            "RTP audio payload would be {payload_bytes} bytes; reduce packet_time_ms or channel count to fit within {MAX_IPV4_RTP_AUDIO_PAYLOAD_BYTES} bytes"
+        );
+    }
+
+    Ok(())
+}
+
 fn resolve_ssrc(configured_ssrc: Option<u32>) -> u32 {
     configured_ssrc.unwrap_or_else(generate_random_ssrc)
 }
@@ -435,6 +459,7 @@ fn refresh_sdp_for_clock_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_stream_config_default() {
@@ -484,6 +509,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn streamer_creation_rejects_more_than_eight_channels() {
+        let test_file = create_test_wav_file(9, 48);
+
+        let result = Aes67Streamer::new(
+            test_file.to_str().expect("temp path should be utf-8"),
+            "239.192.1.1",
+            5004,
+            Some("127.0.0.1"),
+            StreamConfig::default(),
+        )
+        .await;
+
+        std::fs::remove_file(test_file).ok();
+
+        let Err(error) = result else {
+            panic!("9-channel file should be rejected");
+        };
+        assert!(
+            error.to_string().contains("Unsupported audio format"),
+            "unexpected error: {error:#}"
+        );
+    }
+
     #[test]
     fn test_sdp_uses_stream_metadata() {
         let config = StreamConfig {
@@ -521,6 +570,57 @@ mod tests {
     }
 
     #[test]
+    fn audio_format_validation_accepts_release_target_eight_channels() {
+        let info = audio::AudioInfo {
+            sample_rate: 48_000,
+            channels: 8,
+            duration: None,
+            bit_depth: Some(24),
+            format: "test".to_string(),
+        };
+
+        validate_stream_audio_format(&info, 48).expect("8-channel 1ms L24 should be supported");
+    }
+
+    #[test]
+    fn audio_format_validation_rejects_more_than_eight_channels() {
+        let info = audio::AudioInfo {
+            sample_rate: 48_000,
+            channels: 9,
+            duration: None,
+            bit_depth: Some(24),
+            format: "test".to_string(),
+        };
+
+        let error = validate_stream_audio_format(&info, 48)
+            .expect_err("first release supports up to 8 channels");
+
+        assert!(
+            error.to_string().contains("supports 1 to 8 channels"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn audio_format_validation_rejects_payloads_that_exceed_standard_mtu() {
+        let info = audio::AudioInfo {
+            sample_rate: 48_000,
+            channels: 8,
+            duration: None,
+            bit_depth: Some(24),
+            format: "test".to_string(),
+        };
+
+        let error = validate_stream_audio_format(&info, 96)
+            .expect_err("8-channel 2ms L24 should exceed one RTP packet payload");
+
+        assert!(
+            error.to_string().contains("RTP audio payload"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn refresh_sdp_when_clock_identity_changes_builds_updated_sdp_once() {
         let mut current_identity =
             ClockIdentity::from_bytes([0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01]);
@@ -547,5 +647,34 @@ mod tests {
             &config,
         )
         .is_none());
+    }
+
+    fn create_test_wav_file(channels: u16, frames: usize) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "aes67-streamer-format-validation-{}-{}ch.wav",
+            std::process::id(),
+            channels
+        ));
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).expect("test WAV should open");
+
+        for frame in 0..frames {
+            for channel in 0..channels {
+                let frequency = 440.0 + channel as f32 * 10.0;
+                let sample =
+                    (2.0 * std::f32::consts::PI * frequency * frame as f32 / 48_000.0).sin();
+                writer
+                    .write_sample(sample * 0.5)
+                    .expect("sample should write");
+            }
+        }
+
+        writer.finalize().expect("test WAV should finalize");
+        path
     }
 }
