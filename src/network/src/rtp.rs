@@ -118,6 +118,22 @@ impl RtpPacketizer {
         self.create_packet_at_timestamp(sample, timestamp)
     }
 
+    /// Write a serialized RTP packet into an existing buffer.
+    pub fn write_packet_into(&mut self, sample: &AudioSample, output: &mut Vec<u8>) -> Result<()> {
+        let timestamp = self.base_timestamp + (self.samples_processed as u32);
+        self.write_packet_at_timestamp_into(sample, timestamp, output)
+    }
+
+    /// Write a serialized RTP packet with an explicit timestamp into an existing buffer.
+    pub fn write_packet_with_timestamp_into(
+        &mut self,
+        sample: &AudioSample,
+        timestamp: u32,
+        output: &mut Vec<u8>,
+    ) -> Result<()> {
+        self.write_packet_at_timestamp_into(sample, timestamp, output)
+    }
+
     fn create_packet_at_timestamp(
         &mut self,
         sample: &AudioSample,
@@ -134,11 +150,37 @@ impl RtpPacketizer {
         Ok(RtpPacket { header, payload })
     }
 
+    fn write_packet_at_timestamp_into(
+        &mut self,
+        sample: &AudioSample,
+        timestamp: u32,
+        output: &mut Vec<u8>,
+    ) -> Result<()> {
+        let mut header = self.header_template.clone();
+        header.sequence_number = self.sequence_number;
+        header.timestamp = timestamp;
+
+        output.clear();
+        output.reserve(12 + sample.data.len() * 3);
+        output.extend_from_slice(&header.to_bytes());
+        self.write_audio_payload_into(sample, output)?;
+
+        self.sequence_number = self.sequence_number.wrapping_add(1);
+        self.samples_processed += sample.frames as u64;
+
+        Ok(())
+    }
+
     fn audio_to_payload(&self, sample: &AudioSample) -> Result<Vec<u8>> {
         // Convert f32 samples to 24-bit PCM (AES67 standard)
         // Also convert from non-interleaved to interleaved format [L, R, L, R...]
         let mut payload = Vec::with_capacity(sample.data.len() * 3); // 3 bytes per 24-bit sample
+        self.write_audio_payload_into(sample, &mut payload)?;
 
+        Ok(payload)
+    }
+
+    fn write_audio_payload_into(&self, sample: &AudioSample, payload: &mut Vec<u8>) -> Result<()> {
         let channels = sample.channels as usize;
         let frames = sample.frames;
 
@@ -154,7 +196,7 @@ impl RtpPacketizer {
             }
         }
 
-        Ok(payload)
+        Ok(())
     }
 
     /// Get current sequence number
@@ -260,6 +302,58 @@ mod tests {
         assert_eq!(packet.header.sequence_number, 0);
         assert_eq!(packetizer.sequence_number(), 1);
         assert_eq!(packetizer.samples_processed(), 2);
+    }
+
+    #[test]
+    fn packet_bytes_writer_matches_existing_packet_serialization() {
+        let sample = AudioSample {
+            data: vec![0.5, -0.5, 0.25, -0.25],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 2,
+        };
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        let packet = packetizer
+            .create_packet_with_timestamp(&sample, 0xABCDEF01)
+            .unwrap();
+        let mut expected = packet.header.to_bytes().to_vec();
+        expected.extend(packet.payload);
+
+        let mut writer = RtpPacketizer::new(97, 0x12345678);
+        let mut actual = Vec::new();
+        writer
+            .write_packet_with_timestamp_into(&sample, 0xABCDEF01, &mut actual)
+            .unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(writer.sequence_number(), 1);
+        assert_eq!(writer.samples_processed(), 2);
+    }
+
+    #[test]
+    fn packet_bytes_writer_reuses_existing_buffer_capacity() {
+        let sample = AudioSample {
+            data: vec![0.5, -0.5, 0.25, -0.25],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 2,
+        };
+        let expected_packet_len = 12 + sample.data.len() * 3;
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        let mut output = Vec::with_capacity(expected_packet_len);
+
+        packetizer.write_packet_into(&sample, &mut output).unwrap();
+        let first_ptr = output.as_ptr();
+        let first_capacity = output.capacity();
+        assert_eq!(output.len(), expected_packet_len);
+
+        packetizer.write_packet_into(&sample, &mut output).unwrap();
+
+        assert_eq!(output.as_ptr(), first_ptr);
+        assert_eq!(output.capacity(), first_capacity);
+        assert_eq!(output.len(), expected_packet_len);
+        assert_eq!(packetizer.sequence_number(), 2);
+        assert_eq!(packetizer.samples_processed(), 4);
     }
 
     #[test]
