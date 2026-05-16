@@ -203,6 +203,7 @@ impl Aes67Streamer {
         let debug_packet_logging = log::log_enabled!(log::Level::Debug);
         let mut next_debug_packet_log = 100;
         let mut next_verbose_stats_log = 1000;
+        let mut timing_drift = TimingDriftStats::default();
         let stop_reason: &'static str;
 
         loop {
@@ -292,6 +293,7 @@ impl Aes67Streamer {
                     // Calculate when this packet should be sent based on audio timeline
                     let target_time = start_time + packet_duration * packets_sent as u32;
                     let now = packet_sent_at;
+                    timing_drift.observe(now, target_time);
 
                     if now < target_time {
                         tokio::select! {
@@ -343,6 +345,19 @@ impl Aes67Streamer {
             "  Rate: {:.1} packets/sec",
             packets_sent as f64 / total_time.as_secs_f64()
         );
+        log::info!(
+            "  Timing late packets: {}/{}",
+            timing_drift.late_packets(),
+            timing_drift.packets_observed()
+        );
+        log::info!(
+            "  Timing max lateness: {:.3} ms",
+            duration_ms(timing_drift.max_lateness())
+        );
+        log::info!(
+            "  Timing avg late-packet lateness: {:.3} ms",
+            timing_drift.average_late_lateness_ms()
+        );
 
         // Stop background services
         log::info!("Stopping background services...");
@@ -377,6 +392,56 @@ impl Aes67Streamer {
 
 fn samples_per_packet(sample_rate: u32, packet_time_ms: u32) -> usize {
     (sample_rate as usize * packet_time_ms as usize) / 1000
+}
+
+#[derive(Debug, Default)]
+struct TimingDriftStats {
+    packets_observed: u64,
+    late_packets: u64,
+    total_lateness: Duration,
+    max_lateness: Duration,
+}
+
+impl TimingDriftStats {
+    fn observe(&mut self, packet_sent_at: Instant, target_time: Instant) {
+        self.packets_observed += 1;
+
+        let Some(lateness) = packet_sent_at.checked_duration_since(target_time) else {
+            return;
+        };
+
+        if lateness.is_zero() {
+            return;
+        }
+
+        self.late_packets += 1;
+        self.total_lateness += lateness;
+        self.max_lateness = self.max_lateness.max(lateness);
+    }
+
+    fn packets_observed(&self) -> u64 {
+        self.packets_observed
+    }
+
+    fn late_packets(&self) -> u64 {
+        self.late_packets
+    }
+
+    fn max_lateness(&self) -> Duration {
+        self.max_lateness
+    }
+
+    fn average_late_lateness_ms(&self) -> f64 {
+        if self.late_packets == 0 {
+            return 0.0;
+        }
+
+        duration_ms(self.total_lateness) / self.late_packets as f64
+    }
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn validate_stream_audio_format(info: &audio::AudioInfo, samples_per_packet: usize) -> Result<()> {
@@ -567,6 +632,44 @@ mod tests {
     fn test_samples_per_packet_uses_packet_time() {
         assert_eq!(samples_per_packet(48_000, 1), 48);
         assert_eq!(samples_per_packet(48_000, 2), 96);
+    }
+
+    #[test]
+    fn timing_drift_stats_tracks_late_packets() {
+        let base = Instant::now();
+        let mut stats = TimingDriftStats::default();
+
+        stats.observe(base, base + Duration::from_millis(1));
+        stats.observe(
+            base + Duration::from_millis(3),
+            base + Duration::from_millis(1),
+        );
+        stats.observe(
+            base + Duration::from_millis(8),
+            base + Duration::from_millis(5),
+        );
+
+        assert_eq!(stats.packets_observed(), 3);
+        assert_eq!(stats.late_packets(), 2);
+        assert_eq!(stats.max_lateness(), Duration::from_millis(3));
+        assert_eq!(stats.average_late_lateness_ms(), 2.5);
+    }
+
+    #[test]
+    fn timing_drift_stats_reports_zero_when_no_packets_are_late() {
+        let base = Instant::now();
+        let mut stats = TimingDriftStats::default();
+
+        stats.observe(base, base);
+        stats.observe(
+            base + Duration::from_millis(1),
+            base + Duration::from_millis(2),
+        );
+
+        assert_eq!(stats.packets_observed(), 2);
+        assert_eq!(stats.late_packets(), 0);
+        assert_eq!(stats.max_lateness(), Duration::ZERO);
+        assert_eq!(stats.average_late_lateness_ms(), 0.0);
     }
 
     #[test]
