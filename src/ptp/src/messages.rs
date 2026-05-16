@@ -148,6 +148,34 @@ pub struct DelayReqMessage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncMessage {
+    pub domain_number: u8,
+    pub source_port_identity: [u8; 10],
+    pub sequence_id: u16,
+    pub origin_timestamp: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FollowUpMessage {
+    pub domain_number: u8,
+    pub source_port_identity: [u8; 10],
+    pub sequence_id: u16,
+    pub precise_origin_timestamp: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalAnnounceMessage {
+    pub domain_number: u8,
+    pub source_port_identity: [u8; 10],
+    pub sequence_id: u16,
+    pub log_message_interval: i8,
+    pub priority1: u8,
+    pub clock_quality: ClockQuality,
+    pub priority2: u8,
+    pub grandmaster_identity: ClockIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DelayRespMessage {
     pub domain_number: u8,
     pub sequence_id: u16,
@@ -200,6 +228,60 @@ impl DelayReqMessage {
     }
 }
 
+impl SyncMessage {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = build_header(
+            MessageType::Sync,
+            self.domain_number,
+            44,
+            self.source_port_identity,
+            self.sequence_id,
+            0,
+            0,
+        );
+        bytes[34..44].copy_from_slice(&self.origin_timestamp.to_bytes());
+        bytes
+    }
+}
+
+impl FollowUpMessage {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = build_header(
+            MessageType::FollowUp,
+            self.domain_number,
+            44,
+            self.source_port_identity,
+            self.sequence_id,
+            2,
+            0,
+        );
+        bytes[34..44].copy_from_slice(&self.precise_origin_timestamp.to_bytes());
+        bytes
+    }
+}
+
+impl LocalAnnounceMessage {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = build_header(
+            MessageType::Announce,
+            self.domain_number,
+            64,
+            self.source_port_identity,
+            self.sequence_id,
+            5,
+            self.log_message_interval,
+        );
+        bytes[34..44].copy_from_slice(&Timestamp::from_nanos(0).to_bytes());
+        bytes[47] = self.priority1;
+        bytes[48] = self.clock_quality.clock_class;
+        bytes[49] = self.clock_quality.clock_accuracy;
+        bytes[50..52].copy_from_slice(&self.clock_quality.offset_scaled_log_variance.to_be_bytes());
+        bytes[52] = self.priority2;
+        bytes[53..61].copy_from_slice(&self.grandmaster_identity.as_bytes());
+        bytes
+    }
+}
+
 impl DelayRespMessage {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let header = PtpHeader::from_bytes(bytes)?;
@@ -221,6 +303,42 @@ impl DelayRespMessage {
             requesting_port_identity,
         })
     }
+
+    pub fn to_bytes(&self, source_port_identity: [u8; 10]) -> Vec<u8> {
+        let mut bytes = build_header(
+            MessageType::DelayResp,
+            self.domain_number,
+            54,
+            source_port_identity,
+            self.sequence_id,
+            3,
+            0x7f,
+        );
+        bytes[34..44].copy_from_slice(&self.receive_timestamp.to_bytes());
+        bytes[44..54].copy_from_slice(&self.requesting_port_identity);
+        bytes
+    }
+}
+
+fn build_header(
+    message_type: MessageType,
+    domain_number: u8,
+    message_length: u16,
+    source_port_identity: [u8; 10],
+    sequence_id: u16,
+    control_field: u8,
+    log_message_interval: i8,
+) -> Vec<u8> {
+    let mut bytes = vec![0u8; message_length as usize];
+    bytes[0] = message_type as u8;
+    bytes[1] = 0x02;
+    bytes[2..4].copy_from_slice(&message_length.to_be_bytes());
+    bytes[4] = domain_number;
+    bytes[20..30].copy_from_slice(&source_port_identity);
+    bytes[30..32].copy_from_slice(&sequence_id.to_be_bytes());
+    bytes[32] = control_field;
+    bytes[33] = log_message_interval as u8;
+    bytes
 }
 
 impl Timestamp {
@@ -366,5 +484,101 @@ mod tests {
             delay_resp.requesting_port_identity,
             requesting_port_identity
         );
+    }
+
+    #[test]
+    fn local_announce_message_serializes_bmca_fields() {
+        let source_port_identity = [0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01, 0x00, 0x01];
+        let grandmaster_identity =
+            ClockIdentity::from_bytes([0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01]);
+        let announce = LocalAnnounceMessage {
+            domain_number: 7,
+            source_port_identity,
+            sequence_id: 12,
+            log_message_interval: 1,
+            priority1: 128,
+            clock_quality: ClockQuality {
+                clock_class: 248,
+                clock_accuracy: 0xfe,
+                offset_scaled_log_variance: 0xffff,
+            },
+            priority2: 128,
+            grandmaster_identity,
+        };
+
+        let bytes = announce.to_bytes();
+        let header = PtpHeader::from_bytes(&bytes).expect("announce header should parse");
+        let parsed = AnnounceMessage::from_bytes(&bytes).expect("announce should parse");
+
+        assert_eq!(bytes.len(), 64);
+        assert_eq!(header.message_type, MessageType::Announce);
+        assert_eq!(header.domain_number, 7);
+        assert_eq!(header.source_port_identity, source_port_identity);
+        assert_eq!(header.sequence_id, 12);
+        assert_eq!(parsed.grandmaster_identity, grandmaster_identity);
+        assert_eq!(parsed.clock_quality.clock_class, 248);
+    }
+
+    #[test]
+    fn sync_and_follow_up_serialize_matching_timestamps() {
+        let source_port_identity = [0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01, 0x00, 0x01];
+        let timestamp = Timestamp {
+            seconds: 12,
+            nanoseconds: 345,
+        };
+
+        let sync = SyncMessage {
+            domain_number: 7,
+            source_port_identity,
+            sequence_id: 42,
+            origin_timestamp: timestamp,
+        }
+        .to_bytes();
+        let follow_up = FollowUpMessage {
+            domain_number: 7,
+            source_port_identity,
+            sequence_id: 42,
+            precise_origin_timestamp: timestamp,
+        }
+        .to_bytes();
+
+        let sync_header = PtpHeader::from_bytes(&sync).expect("sync header should parse");
+        let follow_up_header =
+            PtpHeader::from_bytes(&follow_up).expect("follow-up header should parse");
+
+        assert_eq!(sync_header.message_type, MessageType::Sync);
+        assert_eq!(sync_header.control_field, 0);
+        assert_eq!(follow_up_header.message_type, MessageType::FollowUp);
+        assert_eq!(follow_up_header.control_field, 2);
+        assert_eq!(follow_up_header.sequence_id, sync_header.sequence_id);
+        assert_eq!(Timestamp::from_bytes(&sync[34..44]).unwrap(), timestamp);
+        assert_eq!(
+            Timestamp::from_bytes(&follow_up[34..44]).unwrap(),
+            timestamp
+        );
+    }
+
+    #[test]
+    fn delay_resp_message_serializes_roundtrip() {
+        let source_port_identity = [0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01, 0x00, 0x01];
+        let requesting_port_identity = [0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56, 0x00, 0x01];
+        let delay_resp = DelayRespMessage {
+            domain_number: 7,
+            sequence_id: 9,
+            receive_timestamp: Timestamp {
+                seconds: 20,
+                nanoseconds: 800,
+            },
+            requesting_port_identity,
+        };
+
+        let bytes = delay_resp.to_bytes(source_port_identity);
+        let header = PtpHeader::from_bytes(&bytes).expect("delay response header should parse");
+        let parsed = DelayRespMessage::from_bytes(&bytes).expect("delay response should parse");
+
+        assert_eq!(bytes.len(), 54);
+        assert_eq!(header.message_type, MessageType::DelayResp);
+        assert_eq!(header.source_port_identity, source_port_identity);
+        assert_eq!(parsed, delay_resp);
     }
 }

@@ -12,12 +12,14 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::messages::{
-    AnnounceMessage, ClockIdentity, ClockQuality, DelayReqMessage, DelayRespMessage, MessageType,
-    PtpHeader, Timestamp,
+    AnnounceMessage, ClockIdentity, ClockQuality, DelayReqMessage, DelayRespMessage,
+    FollowUpMessage, LocalAnnounceMessage, MessageType, PtpHeader, SyncMessage, Timestamp,
 };
 
 const ANNOUNCE_RECEIPT_TIMEOUT_MULTIPLIER: f64 = 3.0;
 const MASTER_SELECTION_REFRESH: Duration = Duration::from_secs(1);
+const LOCAL_MASTER_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
+const LOCAL_MASTER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 const PTP_DSCP: u8 = 46;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -320,6 +322,10 @@ impl PtpClient {
             return Ok(());
         }
 
+        if announce.grandmaster_identity == stats.lock().unwrap().local_identity {
+            return Ok(());
+        }
+
         let master_identity = {
             let mut master_selection = master_selection.lock().unwrap();
             master_selection.observe(announce, now)
@@ -328,6 +334,9 @@ impl PtpClient {
         let mut stats = stats.lock().unwrap();
         stats.announce_count += 1;
         stats.master_identity = master_identity;
+        if master_identity.is_some() && stats.state == PtpState::Master {
+            stats.state = PtpState::Listening;
+        }
         Ok(())
     }
 
@@ -343,6 +352,16 @@ impl PtpClient {
 
         let mut stats = stats.lock().unwrap();
         stats.master_identity = master_identity;
+        if master_identity.is_none() {
+            stats.state = PtpState::Master;
+        } else if stats.state == PtpState::Master {
+            stats.state = PtpState::Listening;
+        }
+    }
+
+    fn local_master_is_active(stats: &Arc<Mutex<PtpStats>>) -> bool {
+        let stats = stats.lock().unwrap();
+        stats.master_identity.is_none() && stats.state == PtpState::Master
     }
 
     fn timing_source_is_selected(stats: &Arc<Mutex<PtpStats>>, header: &PtpHeader) -> bool {
@@ -416,6 +435,7 @@ impl PtpClient {
             let mut stats = stats.lock().unwrap();
             stats.state = PtpState::Listening;
         }
+        Self::refresh_master_selection(&stats, &master_selection, Instant::now());
 
         // Setup sockets
         // PTP Event port: 319
@@ -432,12 +452,17 @@ impl PtpClient {
             source_port_identity(stats.local_identity)
         };
         let ptp_event_addr = SocketAddrV4::new(Ipv4Addr::new(224, 0, 1, 129), 319);
+        let ptp_general_addr = SocketAddrV4::new(Ipv4Addr::new(224, 0, 1, 129), 320);
 
         let mut last_sync_ts: Option<u64> = None;
         let mut last_sync_seq_id: Option<u16> = None;
         let mut delay_req_sequence_id: u16 = 0;
         let mut pending_delay_request: Option<PendingDelayRequest> = None;
         let mut master_refresh = tokio::time::interval(MASTER_SELECTION_REFRESH);
+        let mut local_announce = tokio::time::interval(LOCAL_MASTER_ANNOUNCE_INTERVAL);
+        let mut local_sync = tokio::time::interval(LOCAL_MASTER_SYNC_INTERVAL);
+        let mut local_announce_sequence_id: u16 = 0;
+        let mut local_sync_sequence_id: u16 = 0;
 
         loop {
             tokio::select! {
@@ -448,33 +473,113 @@ impl PtpClient {
                 _ = master_refresh.tick() => {
                     Self::refresh_master_selection(&stats, &master_selection, Instant::now());
                 }
+                _ = local_announce.tick() => {
+                    if Self::local_master_is_active(&stats) {
+                        let local_identity = stats.lock().unwrap().local_identity;
+                        let announce = LocalAnnounceMessage {
+                            domain_number: config.domain,
+                            source_port_identity: local_port_identity,
+                            sequence_id: local_announce_sequence_id,
+                            log_message_interval: 1,
+                            priority1: config.priority1,
+                            clock_quality: local_clock_quality(),
+                            priority2: config.priority2,
+                            grandmaster_identity: local_identity,
+                        };
+                        local_announce_sequence_id = local_announce_sequence_id.wrapping_add(1);
+
+                        if let Err(error) = general_socket
+                            .send_to(&announce.to_bytes(), ptp_general_addr)
+                            .await
+                        {
+                            log::warn!("Failed to send local PTP Announce: {error}");
+                        }
+                    }
+                }
+                _ = local_sync.tick() => {
+                    if Self::local_master_is_active(&stats) {
+                        let timestamp = Timestamp::from_nanos(clock.lock().unwrap().now_ns());
+                        let sync = SyncMessage {
+                            domain_number: config.domain,
+                            source_port_identity: local_port_identity,
+                            sequence_id: local_sync_sequence_id,
+                            origin_timestamp: timestamp,
+                        };
+                        let follow_up = FollowUpMessage {
+                            domain_number: config.domain,
+                            source_port_identity: local_port_identity,
+                            sequence_id: local_sync_sequence_id,
+                            precise_origin_timestamp: timestamp,
+                        };
+                        local_sync_sequence_id = local_sync_sequence_id.wrapping_add(1);
+
+                        if let Err(error) = event_socket.send_to(&sync.to_bytes(), ptp_event_addr).await {
+                            log::warn!("Failed to send local PTP Sync: {error}");
+                        }
+                        if let Err(error) = general_socket
+                            .send_to(&follow_up.to_bytes(), ptp_general_addr)
+                            .await
+                        {
+                            log::warn!("Failed to send local PTP FollowUp: {error}");
+                        }
+                    }
+                }
                 Ok((len, _)) = event_socket.recv_from(&mut event_buf) => {
                     if let Ok(header) = PtpHeader::from_bytes(&event_buf[..len]) {
                         if header.domain_number != config.domain {
                             continue;
                         }
+                        if header.source_port_identity == local_port_identity {
+                            continue;
+                        }
 
-                        if header.message_type == MessageType::Sync {
-                            if !Self::timing_source_is_selected(&stats, &header) {
-                                continue;
+                        match header.message_type {
+                            MessageType::Sync => {
+                                if !Self::timing_source_is_selected(&stats, &header) {
+                                    continue;
+                                }
+
+                                // Record arrival time
+                                let arrival_ts = SimpleClock::system_now_ns()?;
+                                last_sync_ts = Some(arrival_ts);
+                                last_sync_seq_id = Some(header.sequence_id);
+
+                                let mut stats = stats.lock().unwrap();
+                                stats.sync_count += 1;
+                                if stats.state == PtpState::Listening {
+                                    stats.state = PtpState::Uncalibrated;
+                                }
                             }
+                            MessageType::DelayReq => {
+                                if !Self::local_master_is_active(&stats) {
+                                    continue;
+                                }
 
-                            // Record arrival time
-                            let arrival_ts = SimpleClock::system_now_ns()?;
-                            last_sync_ts = Some(arrival_ts);
-                            last_sync_seq_id = Some(header.sequence_id);
+                                let receive_timestamp = Timestamp::from_nanos(clock.lock().unwrap().now_ns());
+                                let delay_resp = DelayRespMessage {
+                                    domain_number: config.domain,
+                                    sequence_id: header.sequence_id,
+                                    receive_timestamp,
+                                    requesting_port_identity: header.source_port_identity,
+                                };
 
-                            let mut stats = stats.lock().unwrap();
-                            stats.sync_count += 1;
-                            if stats.state == PtpState::Listening {
-                                stats.state = PtpState::Uncalibrated;
+                                if let Err(error) = general_socket
+                                    .send_to(&delay_resp.to_bytes(local_port_identity), ptp_general_addr)
+                                    .await
+                                {
+                                    log::warn!("Failed to send local PTP DelayResp: {error}");
+                                }
                             }
+                            _ => {}
                         }
                     }
                 }
                 Ok((len, _)) = general_socket.recv_from(&mut general_buf) => {
                     if let Ok(header) = PtpHeader::from_bytes(&general_buf[..len]) {
                         if header.domain_number != config.domain {
+                            continue;
+                        }
+                        if header.source_port_identity == local_port_identity {
                             continue;
                         }
 
@@ -579,6 +684,9 @@ impl PtpClient {
         // Join multicast group 224.0.1.129 (PTP primary)
         let multi_addr = Ipv4Addr::new(224, 0, 1, 129);
         socket.join_multicast_v4(&multi_addr, &interface_ip)?;
+        if !interface_ip.is_unspecified() {
+            socket.set_multicast_if_v4(&interface_ip)?;
+        }
 
         socket.set_nonblocking(true)?;
 
@@ -597,6 +705,14 @@ fn dscp_to_tos(dscp: u8) -> Result<u32> {
 fn announce_timeout(log_message_interval: i8) -> Duration {
     let seconds = 2f64.powi(log_message_interval as i32) * ANNOUNCE_RECEIPT_TIMEOUT_MULTIPLIER;
     Duration::from_secs_f64(seconds.clamp(0.1, 60.0))
+}
+
+fn local_clock_quality() -> ClockQuality {
+    ClockQuality {
+        clock_class: 248,
+        clock_accuracy: 0xfe,
+        offset_scaled_log_variance: 0xffff,
+    }
 }
 
 fn source_clock_identity(header: &PtpHeader) -> ClockIdentity {
@@ -784,6 +900,27 @@ mod tests {
         assert_eq!(client.reference_clock_identity(), stats.local_identity);
     }
 
+    #[tokio::test]
+    async fn start_without_grandmaster_enters_local_master_state() {
+        let client = PtpClient::new(PtpConfig {
+            domain: 99,
+            interface_ip: Ipv4Addr::new(127, 0, 0, 1),
+            clock_identity: Some(ClockIdentity::from_bytes([
+                0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+            ])),
+            ..Default::default()
+        });
+
+        client.start().await.expect("PTP client should start");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stats = client.get_stats();
+        client.shutdown().await;
+
+        assert_eq!(stats.state, PtpState::Master);
+        assert_eq!(stats.master_identity, None);
+        assert_eq!(client.reference_clock_identity(), stats.local_identity);
+    }
+
     #[test]
     fn announce_selects_best_master_and_ignores_wrong_domain() {
         let client = PtpClient::new(PtpConfig {
@@ -946,6 +1083,32 @@ mod tests {
 
         client.expire_master_candidates_at(start + Duration::from_secs(7));
         assert_eq!(client.reference_clock_identity(), local_identity);
+        assert_eq!(client.get_stats().state, PtpState::Master);
+        assert!(PtpClient::local_master_is_active(&client.stats));
+    }
+
+    #[test]
+    fn external_announce_disables_local_master_fallback() {
+        let client = PtpClient::new(PtpConfig {
+            domain: 7,
+            clock_identity: Some(ClockIdentity::from_bytes([
+                0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+            ])),
+            ..Default::default()
+        });
+        let local_identity = client.get_stats().local_identity;
+        let master = ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]);
+
+        client.expire_master_candidates_at(Instant::now());
+        assert_eq!(client.reference_clock_identity(), local_identity);
+        assert!(PtpClient::local_master_is_active(&client.stats));
+
+        client
+            .apply_announce_bytes(&announce_packet(7, master, 128, 248, 0x22, 0xffff, 128))
+            .expect("external announce should be accepted");
+
+        assert_eq!(client.reference_clock_identity(), master);
+        assert!(!PtpClient::local_master_is_active(&client.stats));
     }
 
     #[test]
