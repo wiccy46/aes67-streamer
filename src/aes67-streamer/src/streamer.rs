@@ -204,6 +204,11 @@ impl Aes67Streamer {
         let mut next_debug_packet_log = 100;
         let mut next_verbose_stats_log = 1000;
         let mut timing_drift = TimingDriftStats::default();
+        let rtp_packet_capacity = 12
+            + samples_per_packet(self.config.target_sample_rate, self.config.packet_time_ms)
+                * self.audio_reader.info().channels as usize
+                * L24_BYTES_PER_SAMPLE;
+        let mut rtp_packet_buffer = Vec::with_capacity(rtp_packet_capacity);
         let stop_reason: &'static str;
 
         loop {
@@ -238,29 +243,29 @@ impl Aes67Streamer {
 
                     // PTP is handled in background task now
 
-                    // Create RTP packet with PTP timestamp
-                    let rtp_packet = if let Ok(ptp_timestamp) = self
+                    // Write RTP packet with PTP timestamp into the reusable send buffer.
+                    if let Ok(ptp_timestamp) = self
                         .ptp_client
                         .rtp_timestamp(self.config.target_sample_rate)
                     {
                         self.rtp_packetizer
-                            .create_packet_with_timestamp(&sample, ptp_timestamp)
-                            .context("Failed to create RTP packet with PTP timestamp")?
+                            .write_packet_with_timestamp_into(
+                                &sample,
+                                ptp_timestamp,
+                                &mut rtp_packet_buffer,
+                            )
+                            .context("Failed to create RTP packet with PTP timestamp")?;
                     } else {
                         // Fallback to regular timestamp if PTP fails
                         self.rtp_packetizer
-                            .create_packet(&sample)
-                            .context("Failed to create RTP packet")?
-                    };
-
-                    // Serialize packet for transmission
-                    let mut packet_data = rtp_packet.header.to_bytes().to_vec();
-                    packet_data.extend(rtp_packet.payload);
+                            .write_packet_into(&sample, &mut rtp_packet_buffer)
+                            .context("Failed to create RTP packet")?;
+                    }
 
                     // Send packet
                     let sent = self
                         .multicast_socket
-                        .send_packet(&packet_data)
+                        .send_packet(&rtp_packet_buffer)
                         .context("Failed to send RTP packet")?;
 
                     packets_sent += 1;
