@@ -21,6 +21,47 @@ const MASTER_SELECTION_REFRESH: Duration = Duration::from_secs(1);
 const LOCAL_MASTER_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
 const LOCAL_MASTER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 const PTP_DSCP: u8 = 46;
+const PTP_SOCKET_BUFFER_SIZE: usize = 262_144;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UdpSocketDefaults {
+    reuse_address: bool,
+    reuse_port: bool,
+    multicast_loop_v4: bool,
+    send_buffer_size: Option<usize>,
+    recv_buffer_size: Option<usize>,
+}
+
+fn ptp_socket_defaults() -> UdpSocketDefaults {
+    UdpSocketDefaults {
+        reuse_address: true,
+        reuse_port: true,
+        multicast_loop_v4: true,
+        send_buffer_size: Some(PTP_SOCKET_BUFFER_SIZE),
+        recv_buffer_size: Some(PTP_SOCKET_BUFFER_SIZE),
+    }
+}
+
+fn apply_udp_socket_defaults(socket: &Socket, defaults: UdpSocketDefaults) -> Result<()> {
+    if defaults.reuse_address {
+        socket.set_reuse_address(true)?;
+    }
+    #[cfg(unix)]
+    if defaults.reuse_port {
+        socket.set_reuse_port(true)?;
+    }
+    if defaults.multicast_loop_v4 {
+        socket.set_multicast_loop_v4(true)?;
+    }
+    if let Some(size) = defaults.send_buffer_size {
+        socket.set_send_buffer_size(size)?;
+    }
+    if let Some(size) = defaults.recv_buffer_size {
+        socket.set_recv_buffer_size(size)?;
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum PtpState {
@@ -671,10 +712,7 @@ impl PtpClient {
     fn setup_multicast_socket(port: u16, interface_ip: Ipv4Addr) -> Result<UdpSocket> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
-        // Allow reuse address and port
-        socket.set_reuse_address(true)?;
-        #[cfg(unix)]
-        socket.set_reuse_port(true)?;
+        apply_udp_socket_defaults(&socket, ptp_socket_defaults())?;
 
         // Bind to wildcard address
         let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
@@ -883,6 +921,17 @@ mod tests {
         assert_eq!(config.domain, 0);
         assert_eq!(config.priority1, 128);
         assert_eq!(config.clock_identity, None);
+    }
+
+    #[test]
+    fn ptp_socket_defaults_use_fixed_timing_values() {
+        let defaults = ptp_socket_defaults();
+
+        assert!(defaults.reuse_address);
+        assert!(defaults.reuse_port);
+        assert!(defaults.multicast_loop_v4);
+        assert_eq!(defaults.send_buffer_size, Some(262_144));
+        assert_eq!(defaults.recv_buffer_size, Some(262_144));
     }
 
     #[tokio::test]

@@ -3,6 +3,61 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 const RTP_DSCP: u8 = 34;
+const RTP_SEND_BUFFER_SIZE: usize = 1_048_576;
+const SAP_SEND_BUFFER_SIZE: usize = 65_536;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UdpSocketDefaults {
+    pub reuse_address: bool,
+    pub reuse_port: bool,
+    pub multicast_loop_v4: bool,
+    pub send_buffer_size: Option<usize>,
+    pub recv_buffer_size: Option<usize>,
+}
+
+pub(crate) fn rtp_socket_defaults(send_buffer_size: usize) -> UdpSocketDefaults {
+    UdpSocketDefaults {
+        reuse_address: true,
+        reuse_port: true,
+        multicast_loop_v4: true,
+        send_buffer_size: Some(send_buffer_size),
+        recv_buffer_size: None,
+    }
+}
+
+pub(crate) fn sap_socket_defaults() -> UdpSocketDefaults {
+    UdpSocketDefaults {
+        reuse_address: true,
+        reuse_port: true,
+        multicast_loop_v4: true,
+        send_buffer_size: Some(SAP_SEND_BUFFER_SIZE),
+        recv_buffer_size: None,
+    }
+}
+
+pub(crate) fn apply_udp_socket_defaults(
+    socket: &Socket,
+    defaults: UdpSocketDefaults,
+) -> Result<()> {
+    if defaults.reuse_address {
+        socket.set_reuse_address(true)?;
+    }
+    #[cfg(unix)]
+    if defaults.reuse_port {
+        socket.set_reuse_port(true)?;
+    }
+    if defaults.multicast_loop_v4 {
+        socket.set_multicast_loop_v4(true)?;
+    }
+    if let Some(size) = defaults.send_buffer_size {
+        socket.set_send_buffer_size(size)?;
+    }
+    if let Some(size) = defaults.recv_buffer_size {
+        socket.set_recv_buffer_size(size)?;
+    }
+
+    Ok(())
+}
 
 /// Multicast socket configuration for AES67 streaming
 #[derive(Debug, Clone)]
@@ -25,8 +80,8 @@ impl MulticastConfig {
             multicast_addr,
             port,
             local_addr,
-            ttl: 32,                 // Default TTL for AES67
-            send_buffer_size: 65536, // 64KB send buffer
+            ttl: 32, // Default TTL for AES67
+            send_buffer_size: RTP_SEND_BUFFER_SIZE,
         }
     }
 
@@ -60,10 +115,7 @@ impl MulticastSocket {
         // Create socket using socket2
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
-        // Allow reuse address and port (important for multicast)
-        socket.set_reuse_address(true)?;
-        #[cfg(unix)]
-        socket.set_reuse_port(true)?;
+        apply_udp_socket_defaults(&socket, rtp_socket_defaults(config.send_buffer_size))?;
 
         // Bind to local interface
         // Note: For sending multicast, we usually bind to 0.0.0.0 or the interface IP.
@@ -73,7 +125,6 @@ impl MulticastSocket {
 
         // Configure multicast settings
         socket.set_multicast_ttl_v4(config.ttl as u32)?;
-        socket.set_multicast_loop_v4(true)?;
         socket.set_tos_v4(dscp_to_tos(RTP_DSCP)?)?;
 
         if !config.local_addr.is_unspecified() {
@@ -265,6 +316,34 @@ mod tests {
         assert_eq!(dscp_to_tos(34).unwrap(), 136);
         assert_eq!(dscp_to_tos(46).unwrap(), 184);
         assert!(dscp_to_tos(64).is_err());
+    }
+
+    #[test]
+    fn rtp_socket_defaults_use_fixed_professional_values() {
+        let config = MulticastConfig::new(
+            Ipv4Addr::new(239, 192, 1, 1),
+            5004,
+            Ipv4Addr::new(192, 168, 1, 100),
+        );
+        let defaults = rtp_socket_defaults(config.send_buffer_size);
+
+        assert_eq!(config.send_buffer_size, 1_048_576);
+        assert!(defaults.reuse_address);
+        assert!(defaults.reuse_port);
+        assert!(defaults.multicast_loop_v4);
+        assert_eq!(defaults.send_buffer_size, Some(1_048_576));
+        assert_eq!(defaults.recv_buffer_size, None);
+    }
+
+    #[test]
+    fn sap_socket_defaults_use_fixed_control_values() {
+        let defaults = sap_socket_defaults();
+
+        assert!(defaults.reuse_address);
+        assert!(defaults.reuse_port);
+        assert!(defaults.multicast_loop_v4);
+        assert_eq!(defaults.send_buffer_size, Some(65_536));
+        assert_eq!(defaults.recv_buffer_size, None);
     }
 
     #[test]

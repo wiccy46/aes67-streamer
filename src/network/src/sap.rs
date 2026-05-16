@@ -20,16 +20,12 @@ impl SapAnnouncer {
     pub fn new(sdp_payload: String, interface_ip: Ipv4Addr) -> Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
-        socket.set_reuse_address(true)?;
-        #[cfg(unix)]
-        socket.set_reuse_port(true)?;
+        crate::socket::apply_udp_socket_defaults(&socket, crate::socket::sap_socket_defaults())?;
 
         // Bind to wildcard
         let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0);
         socket.bind(&addr.into())?;
 
-        // Set multicast loop so we can receive our own announcements (useful for testing)
-        socket.set_multicast_loop_v4(true)?;
         socket.set_tos_v4(crate::socket::dscp_to_tos(SAP_DSCP)?)?;
 
         // Set multicast interface
