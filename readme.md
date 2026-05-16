@@ -4,28 +4,28 @@
 [![AES67 Compliant](https://img.shields.io/badge/AES67-compliant-blue)](https://www.aes.org/publications/standards/search.cfm?docID=96)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-A cross-platform CLI tool for streaming audio files over IP networks with AES67 compliance.
+A cross-platform CLI tool for sending AES67-oriented RTP audio streams over IP networks.
 
-## 🎵 Features
+## Features
 
 ### Audio Processing
-- **Multi-format Support**: WAV, MP3, AIFF via [Symphonia](https://github.com/pdeljanov/Symphonia)
+- **Multi-format Support**: WAV, FLAC, MP3, and AIFF via [Symphonia](https://github.com/pdeljanov/Symphonia)
 - **Sample Rate Conversion**: High-quality resampling with [Rubato](https://github.com/HEnquist/rubato)
-- **Multi-channel Audio**: 1-64 channels with efficient non-interleaved processing
+- **Release Target**: Single stream with 1-8 channels
 - **Real-time Processing**: Node-based audio pipeline with gain control
 
 ### Network Streaming
-- **AES67 Compliant**: Fully compliant with AES67-2018 standard
+- **AES67-Oriented RTP**: 48 kHz, 24-bit L24 RTP streaming with generated SDP
 - **RTP over UDP**: RFC 3550 compliant with proper sequence numbering
-- **Multicast**: Standard AES67 addressing (239.69.x.x range)
-- **Low Latency**: 1ms packet timing with microsecond precision
+- **Multicast**: Standard administratively scoped multicast addresses
+- **Packet Timing Metrics**: Reports packet rate, late packets, max lateness, and average late-packet lateness
 
 ### PTP Synchronization
-- **IEEE 1588**: PTPv2 clock synchronization with [statime](https://github.com/pendulum-project/statime)
-- **Timing Discipline**: Microsecond-accurate timestamps
-- **Real-time Monitoring**: Live PTP state and offset tracking
+- **IEEE 1588-2008 PTP Messages**: Announce, Sync, FollowUp, DelayReq, and DelayResp handling
+- **Best Master Clock Selection**: Tracks candidate masters and selects a reference identity
+- **Local Master Fallback**: Emits local PTP messages when no external grandmaster is present
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -156,6 +156,12 @@ cargo test --workspace
 # Run full media loopback E2E test with ffmpeg/ffprobe
 bash scripts/e2e_loopback.sh
 
+# Run optional multicast validation on a real local interface
+AES67_E2E_INTERFACE=192.168.1.100 bash scripts/e2e_multicast.sh
+
+# Run a longer local release-candidate soak test
+bash scripts/soak_loopback.sh
+
 # Local testing with loopback
 ./aes67-streamer --file test.wav --address 127.0.0.1 --port 5004 --interface 127.0.0.1
 
@@ -200,8 +206,31 @@ tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 - **Sample Rate**: 48kHz (AES67 standard)
 - **Packet Time**: 1ms (48 samples per packet)
 - **Bit Depth**: 24-bit PCM
-- **Multicast Range**: 239.69.0.0/16
+- **Recommended Multicast Range**: 239.69.0.0/16
 - **PTP Domain**: 0 (default AES67 domain)
+- **RTP QoS**: DSCP 34 / AF41
+- **PTP QoS**: DSCP 46 / EF
+- **SAP QoS**: DSCP 24 / CS3
+
+### Release Validation
+
+Before tagging a release candidate, run:
+
+```bash
+cargo test --workspace
+bash scripts/e2e_loopback.sh
+bash scripts/soak_loopback.sh
+```
+
+On a multicast-capable interface, also run:
+
+```bash
+AES67_E2E_INTERFACE=<local-ip> bash scripts/e2e_multicast.sh
+```
+
+Use `tests/receiver-compatibility.md` to record receiver checks with ffmpeg,
+VLC, RAVENNA Stream Monitor, Dante AES67 mode, and Wireshark. Use
+`tests/timing-scheduling.md` for the current timing/scheduling release stance.
 
 ### Project Structure
 ```
@@ -219,7 +248,7 @@ src/
 3. Make changes with tests
 4. Submit a pull request
 
-## 🔍 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -227,6 +256,12 @@ src/
 ```bash
 # Check multicast routing
 netstat -rn | grep 224
+```
+
+```bash
+# Validate the selected interface before a multicast test
+AES67_E2E_INTERFACE=<local-ip> bash scripts/e2e_multicast.sh --dry-run
+```
 
 **PTP synchronization**
 ```bash
@@ -237,14 +272,21 @@ tcpdump -i eth0 port 319
 --verbose
 ```
 
-## 📄 License
+## License
 
 This project is licensed under the GNU General Public License v3.0
 
-## 🏆 Compliance
+## Compliance Target
 
-This implementation is fully compliant with:
-- **AES67-2018**: High-performance streaming audio-over-IP interoperability standard
-- **RFC 3550**: RTP: A Transport Protocol for Real-Time Applications
-- **IEEE 1588-2008**: Precision Time Protocol (PTPv2)
-- **SMPTE ST 2110**: Professional Media Over Managed IP Networks
+This project targets the core pieces required for a first single-stream AES67
+sender release:
+
+- **AES67-style RTP media**: 48 kHz, 24-bit L24 payloads over RTP.
+- **RFC 3550**: RTP sequence numbers, timestamps, payload type, and SSRC.
+- **IEEE 1588-2008 PTPv2**: Basic message handling, BMCA selection, delay
+  request/response, and local master fallback.
+- **SAP/SDP discovery**: Generated SDP and SAP announcements.
+
+The first release does not claim hard real-time scheduling, hardware clock
+discipline, kernel-bypass networking, multiple simultaneous streams, or full
+ST 2110 system compliance.
