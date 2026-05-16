@@ -142,26 +142,15 @@ impl RtpPacketizer {
         let channels = sample.channels as usize;
         let frames = sample.frames;
 
-        if channels == 2 {
-            // Convert non-interleaved [L1,L2,L3...R1,R2,R3] to interleaved [L1,R1,L2,R2,L3,R3]
-            for frame_idx in 0..frames {
-                for ch_idx in 0..channels {
-                    let sample_idx = ch_idx * frames + frame_idx;
-                    if sample_idx < sample.data.len() {
-                        let sample_f32 = sample.data[sample_idx].clamp(-1.0, 1.0);
-                        let sample_i32 = (sample_f32 * 8388607.0) as i32;
-                        let bytes = sample_i32.to_be_bytes();
-                        payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte for 24-bit
-                    }
+        for frame_idx in 0..frames {
+            for ch_idx in 0..channels {
+                let sample_idx = ch_idx * frames + frame_idx;
+                if sample_idx < sample.data.len() {
+                    let sample_f32 = sample.data[sample_idx].clamp(-1.0, 1.0);
+                    let sample_i32 = (sample_f32 * 8388607.0) as i32;
+                    let bytes = sample_i32.to_be_bytes();
+                    payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte for 24-bit
                 }
-            }
-        } else {
-            // For non-stereo, just convert directly
-            for &sample_f32 in &sample.data {
-                let clamped = sample_f32.clamp(-1.0, 1.0);
-                let sample_i32 = (clamped * 8388607.0) as i32;
-                let bytes = sample_i32.to_be_bytes();
-                payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte for 24-bit
             }
         }
 
@@ -317,5 +306,35 @@ mod tests {
 
         // 0.0 -> 0x000000
         assert_eq!(&payload[6..9], &[0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn eight_channel_payload_is_frame_interleaved() {
+        let packetizer = RtpPacketizer::new(97, 0);
+        let sample_values = (1..=16)
+            .map(|value| value as f32 / 8_388_607.0)
+            .collect::<Vec<_>>();
+        let sample = AudioSample {
+            // Planar input: ch1 frame1, ch1 frame2, ch2 frame1, ch2 frame2, ...
+            data: sample_values.clone(),
+            channels: 8,
+            sample_rate: 48000,
+            frames: 2,
+        };
+
+        let payload = packetizer.audio_to_payload(&sample).unwrap();
+        let expected_indices = [0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15];
+        let expected = expected_indices
+            .iter()
+            .flat_map(|&index| pcm24_bytes(sample_values[index]))
+            .collect::<Vec<_>>();
+
+        assert_eq!(payload, expected);
+    }
+
+    fn pcm24_bytes(sample: f32) -> [u8; 3] {
+        let sample_i32 = (sample.clamp(-1.0, 1.0) * 8_388_607.0) as i32;
+        let bytes = sample_i32.to_be_bytes();
+        [bytes[1], bytes[2], bytes[3]]
     }
 }
