@@ -104,7 +104,7 @@ impl SapAnnouncer {
 }
 
 fn build_sap_packet(sdp_payload: &str, origin_source: Ipv4Addr) -> Vec<u8> {
-    let message_hash = sap_message_hash(sdp_payload);
+    let message_hash = sap_message_hash(sdp_payload, origin_source);
     let mut packet = Vec::with_capacity(24 + sdp_payload.len());
     packet.push(0x20);
     packet.push(0x00);
@@ -115,15 +115,19 @@ fn build_sap_packet(sdp_payload: &str, origin_source: Ipv4Addr) -> Vec<u8> {
     packet
 }
 
-fn sap_message_hash(sdp_payload: &str) -> u16 {
+fn sap_message_hash(sdp_payload: &str, origin_source: Ipv4Addr) -> u16 {
     let mut hash = 0x811c9dc5u32;
 
-    for byte in sdp_payload.bytes() {
+    for byte in origin_source
+        .octets()
+        .into_iter()
+        .chain(sdp_payload.bytes())
+    {
         hash ^= byte as u32;
         hash = hash.wrapping_mul(0x01000193);
     }
 
-    let folded = ((hash >> 16) ^ hash) as u16;
+    let folded = ((hash >> 16) as u16) ^ (hash as u16);
     if folded == 0 { 1 } else { folded }
 }
 
@@ -157,14 +161,17 @@ mod tests {
     }
 
     #[test]
-    fn sap_message_hash_is_stable_and_changes_with_sdp_payload() {
+    fn sap_message_hash_is_stable_and_changes_with_sdp_payload_or_origin_source() {
         let origin_source = Ipv4Addr::new(192, 168, 1, 50);
         let first = build_sap_packet("v=0\r\ns=first\r\n", origin_source);
         let first_again = build_sap_packet("v=0\r\ns=first\r\n", origin_source);
         let second = build_sap_packet("v=0\r\ns=second\r\n", origin_source);
+        let different_origin =
+            build_sap_packet("v=0\r\ns=first\r\n", Ipv4Addr::new(192, 168, 1, 51));
 
         assert_eq!(&first[2..4], &first_again[2..4]);
         assert_ne!(&first[2..4], &second[2..4]);
+        assert_ne!(&first[2..4], &different_origin[2..4]);
         assert_ne!(&first[2..4], &[0x12, 0x34]);
     }
 }
