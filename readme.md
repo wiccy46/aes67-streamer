@@ -135,6 +135,19 @@ The streamer generates SDP from the loaded file and stream settings and logs it
 at startup. SDP file export can be added later without making users hand-write
 SDP in the config.
 
+The streamer applies fixed DSCP values as professional defaults for networks
+that honor QoS marking:
+
+```text
+PTP  DSCP 46  EF    highest priority timing
+RTP  DSCP 34  AF41  high priority media
+SAP  DSCP 24  CS3   moderate control/discovery
+```
+
+PTP is marked highest because clock timing affects the whole stream. RTP audio
+is elevated as latency-sensitive media. SAP is discovery metadata, so it should
+not compete with timing or audio packets.
+
 ### Testing & Development
 ```bash
 # Run unit and integration tests
