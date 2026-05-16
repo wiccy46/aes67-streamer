@@ -11,6 +11,10 @@ async fn main() {
     let args = match config::parse_args() {
         Ok(args) => args,
         Err(e) => {
+            if config::is_display_control_error(&e) {
+                print!("{e}");
+                process::exit(0);
+            }
             eprintln!("Error parsing arguments: {e}");
             process::exit(1);
         }
