@@ -1,4 +1,5 @@
 use audio::{AudioReader, GainNode, AudioNode};
+use std::path::PathBuf;
 
 #[test]
 fn test_audio_file_loading_integration() {
@@ -18,6 +19,29 @@ fn test_audio_file_loading_integration() {
     } else {
         panic!("Test audio file not found: {test_file}");
     }
+}
+
+#[test]
+fn test_common_audio_file_formats_load() {
+    for filename in ["tone.wav", "tone.flac", "tone.mp3", "tone.aiff"] {
+        let path = audio_format_resource(filename);
+        let reader = AudioReader::with_resampling(&path, 48000, 48)
+            .unwrap_or_else(|error| panic!("failed to load {filename}: {error:#}"));
+        let info = reader.info();
+
+        assert_eq!(info.sample_rate, 48000, "{filename} should target AES67 sample rate");
+        assert_eq!(info.channels, 2, "{filename} should preserve stereo layout");
+        assert!(
+            info.duration.is_some_and(|duration| duration.as_millis() > 0),
+            "{filename} should expose a non-empty duration"
+        );
+    }
+}
+
+fn audio_format_resource(filename: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/resources/audio-formats")
+        .join(filename)
 }
 
 #[test]

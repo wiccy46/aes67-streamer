@@ -38,6 +38,18 @@ async fn test_e2e_stream_metadata_controls_rtp_header() -> Result<()> {
     run_streaming_test(StreamerArgs::Metadata).await
 }
 
+#[tokio::test]
+async fn test_e2e_common_audio_file_formats_stream() -> Result<()> {
+    for (index, filename) in ["tone.wav", "tone.flac", "tone.mp3", "tone.aiff"]
+        .into_iter()
+        .enumerate()
+    {
+        run_audio_format_streaming_test(filename, index).await?;
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum StreamerArgs {
     Cli,
@@ -219,6 +231,69 @@ fn resource_config_path() -> PathBuf {
 
 fn resource_metadata_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/resources/e2e-metadata.toml")
+}
+
+fn audio_format_resource(filename: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/resources/audio-formats")
+        .join(filename)
+}
+
+async fn run_audio_format_streaming_test(filename: &str, index: usize) -> Result<()> {
+    let binary_path = option_env!("CARGO_BIN_EXE_aes67-streamer")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/aes67-streamer")
+        });
+    let multicast_addr = format!("239.1.3.{}", index + 1);
+    let (listener, port) = bind_rtp_listener(&multicast_addr, 55100 + index as u16)?;
+
+    let mut child = tokio::process::Command::new(binary_path)
+        .kill_on_drop(true)
+        .arg("--file")
+        .arg(audio_format_resource(filename))
+        .arg("--address")
+        .arg(&multicast_addr)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--interface")
+        .arg("127.0.0.1")
+        .arg("--duration-seconds")
+        .arg("0.1")
+        .spawn()?;
+
+    let mut buf = [0u8; 2048];
+    let mut packets_received = 0;
+    let timeout = time::sleep(Duration::from_secs(5));
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            _ = &mut timeout => {
+                break;
+            }
+            Ok((len, _)) = listener.recv_from(&mut buf) => {
+                if len > 0 {
+                    packets_received += 1;
+                    assert!(len >= 12, "{filename} RTP packet should include a header");
+                    assert_eq!(buf[0] >> 6, 2, "{filename} RTP version should be 2");
+                }
+            }
+        }
+
+        if packets_received > 5 {
+            break;
+        }
+    }
+
+    let status = time::timeout(Duration::from_secs(5), child.wait()).await??;
+    assert!(status.success(), "{filename} streamer exited with {status}");
+    assert!(
+        packets_received > 0,
+        "{filename} should produce RTP packets"
+    );
+
+    Ok(())
 }
 
 fn bind_rtp_listener(
