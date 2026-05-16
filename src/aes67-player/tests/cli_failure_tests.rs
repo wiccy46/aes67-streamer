@@ -3,8 +3,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use semver::Version;
+
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_aes67-player")
+}
+
+fn version_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION")
 }
 
 #[test]
@@ -40,7 +46,19 @@ fn version_exits_successfully() {
         output.status.success(),
         "version should exit successfully\n{logs}"
     );
-    assert!(logs.trim().starts_with("aes67-player "));
+    assert_eq!(
+        logs.trim(),
+        format!("aes67-player {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn version_file_matches_player_package_version_and_is_valid_semver() {
+    let version = fs::read_to_string(version_file()).expect("VERSION file should exist");
+    let version = version.trim();
+
+    Version::parse(version).expect("VERSION should be valid SemVer");
+    assert_eq!(version, env!("CARGO_PKG_VERSION"));
 }
 
 #[test]

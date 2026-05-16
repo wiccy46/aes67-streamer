@@ -53,6 +53,13 @@ cargo build --release
 # and target/release/aes67-player.
 ```
 
+### Versioning
+
+The public binary version follows SemVer and is recorded in the root `VERSION`
+file. Release changes must keep `VERSION` and
+`src/aes67-streamer/Cargo.toml` in sync; tests validate both the SemVer format
+and the version match.
+
 ### Basic Usage
 
 ```bash
