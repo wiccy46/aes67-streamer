@@ -327,7 +327,7 @@ impl PtpClient {
         }
     }
 
-    pub fn reference_clock_identity(&self) -> ClockIdentity {
+    pub fn get_reference_clock_identity(&self) -> ClockIdentity {
         let stats = self.stats.lock().unwrap();
         stats.master_identity.unwrap_or(stats.local_identity)
     }
@@ -946,7 +946,7 @@ mod tests {
         let stats = client.get_stats();
         assert_eq!(stats.state, PtpState::Initializing);
         assert_ne!(stats.local_identity, ClockIdentity::default());
-        assert_eq!(client.reference_clock_identity(), stats.local_identity);
+        assert_eq!(client.get_reference_clock_identity(), stats.local_identity);
     }
 
     #[tokio::test]
@@ -967,7 +967,7 @@ mod tests {
 
         assert_eq!(stats.state, PtpState::Master);
         assert_eq!(stats.master_identity, None);
-        assert_eq!(client.reference_clock_identity(), stats.local_identity);
+        assert_eq!(client.get_reference_clock_identity(), stats.local_identity);
     }
 
     #[test]
@@ -999,7 +999,7 @@ mod tests {
                 128,
             ))
             .expect("valid announce should be accepted");
-        assert_eq!(client.reference_clock_identity(), first_master);
+        assert_eq!(client.get_reference_clock_identity(), first_master);
 
         client
             .apply_announce_bytes(&announce_packet(
@@ -1012,7 +1012,7 @@ mod tests {
                 1,
             ))
             .expect("wrong-domain announce should be ignored");
-        assert_eq!(client.reference_clock_identity(), first_master);
+        assert_eq!(client.get_reference_clock_identity(), first_master);
 
         client
             .apply_announce_bytes(&announce_packet(
@@ -1025,7 +1025,7 @@ mod tests {
                 128,
             ))
             .expect("better grandmaster should be accepted");
-        assert_eq!(client.reference_clock_identity(), second_master);
+        assert_eq!(client.get_reference_clock_identity(), second_master);
 
         client
             .apply_announce_bytes(&announce_packet(
@@ -1038,7 +1038,7 @@ mod tests {
                 128,
             ))
             .expect("worse grandmaster should be tracked but not selected");
-        assert_eq!(client.reference_clock_identity(), second_master);
+        assert_eq!(client.get_reference_clock_identity(), second_master);
     }
 
     #[test]
@@ -1128,10 +1128,10 @@ mod tests {
                 start,
             )
             .expect("valid announce should be accepted");
-        assert_eq!(client.reference_clock_identity(), master);
+        assert_eq!(client.get_reference_clock_identity(), master);
 
         client.expire_master_candidates_at(start + Duration::from_secs(7));
-        assert_eq!(client.reference_clock_identity(), local_identity);
+        assert_eq!(client.get_reference_clock_identity(), local_identity);
         assert_eq!(client.get_stats().state, PtpState::Master);
         assert!(PtpClient::local_master_is_active(&client.stats));
     }
@@ -1149,14 +1149,14 @@ mod tests {
         let master = ClockIdentity::from_bytes([0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x12, 0x34, 0x56]);
 
         client.expire_master_candidates_at(Instant::now());
-        assert_eq!(client.reference_clock_identity(), local_identity);
+        assert_eq!(client.get_reference_clock_identity(), local_identity);
         assert!(PtpClient::local_master_is_active(&client.stats));
 
         client
             .apply_announce_bytes(&announce_packet(7, master, 128, 248, 0x22, 0xffff, 128))
             .expect("external announce should be accepted");
 
-        assert_eq!(client.reference_clock_identity(), master);
+        assert_eq!(client.get_reference_clock_identity(), master);
         assert!(!PtpClient::local_master_is_active(&client.stats));
     }
 

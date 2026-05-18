@@ -24,7 +24,7 @@ pub struct Aes67SessionDescription {
 }
 
 impl Aes67SessionDescription {
-    pub fn frames_per_packet(&self) -> u32 {
+    pub fn get_frames_per_packet(&self) -> u32 {
         self.sample_rate * self.packet_time_ms / 1000
     }
 }
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(session.sample_rate, 48_000);
         assert_eq!(session.channels, 2);
         assert_eq!(session.packet_time_ms, 1);
-        assert_eq!(session.frames_per_packet(), 48);
+        assert_eq!(session.get_frames_per_packet(), 48);
     }
 
     #[test]
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(session.payload_type, 101);
         assert_eq!(session.channels, 8);
         assert_eq!(session.packet_time_ms, 2);
-        assert_eq!(session.frames_per_packet(), 96);
+        assert_eq!(session.get_frames_per_packet(), 96);
         assert_eq!(
             session.ts_refclk.as_deref(),
             Some("ptp=IEEE1588-2008:00-11-22-ff-fe-33-44-55:0")

@@ -26,6 +26,7 @@ impl SapAnnouncer {
         let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0);
         socket.bind(&addr.into())?;
 
+        // SAP DSCP 24 discovery/control
         socket.set_tos_v4(crate::socket::dscp_to_tos(SAP_DSCP)?)?;
 
         // Set multicast interface
@@ -46,7 +47,7 @@ impl SapAnnouncer {
         *self.sdp_payload.lock().unwrap() = sdp_payload;
     }
 
-    pub fn sdp_payload(&self) -> String {
+    pub fn get_sdp_payload(&self) -> String {
         self.sdp_payload.lock().unwrap().clone()
     }
 
@@ -135,6 +136,6 @@ mod tests {
 
         announcer.update_sdp_payload("v=0\r\ns=new\r\n".to_string());
 
-        assert_eq!(announcer.sdp_payload(), "v=0\r\ns=new\r\n");
+        assert_eq!(announcer.get_sdp_payload(), "v=0\r\ns=new\r\n");
     }
 }

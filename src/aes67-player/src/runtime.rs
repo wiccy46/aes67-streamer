@@ -14,7 +14,7 @@ impl RuntimeSupervisor {
         }
     }
 
-    pub fn shutdown_token(&self) -> CancellationToken {
+    pub fn get_shutdown_token(&self) -> CancellationToken {
         self.shutdown_token.clone()
     }
 
@@ -24,8 +24,8 @@ impl RuntimeSupervisor {
     }
 
     pub async fn run_player(&self, player: &mut Aes67Player) -> Result<()> {
-        let signal_token = self.shutdown_token();
-        let play_token = self.shutdown_token();
+        let signal_token = self.get_shutdown_token();
+        let play_token = self.get_shutdown_token();
         let signal_task = tokio::spawn(async move {
             wait_for_os_shutdown().await;
             signal_token.cancel();
@@ -96,7 +96,7 @@ mod tests {
     #[tokio::test]
     async fn supervisor_manual_shutdown_cancels_child_token() {
         let supervisor = RuntimeSupervisor::new();
-        let token = supervisor.shutdown_token();
+        let token = supervisor.get_shutdown_token();
 
         assert!(!token.is_cancelled());
         supervisor.request_shutdown();

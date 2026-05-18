@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use audio::AudioSample;
 
 const RTP_FIXED_HEADER_LEN: usize = 12;
@@ -145,7 +145,7 @@ pub fn decode_l24_payload_interleaved(
     }
 
     let bytes_per_frame = channels as usize * L24_BYTES_PER_SAMPLE;
-    if payload.len() % bytes_per_frame != 0 {
+    if !payload.len().is_multiple_of(bytes_per_frame) {
         return Err(anyhow!(
             "L24 payload length {} is not divisible by frame size {bytes_per_frame}",
             payload.len()
@@ -298,12 +298,12 @@ impl RtpPacketizer {
     }
 
     /// Get current sequence number
-    pub fn sequence_number(&self) -> u16 {
+    pub fn get_sequence_number(&self) -> u16 {
         self.sequence_number
     }
 
     /// Get samples processed count
-    pub fn samples_processed(&self) -> u64 {
+    pub fn get_samples_processed(&self) -> u64 {
         self.samples_processed
     }
 
@@ -479,8 +479,8 @@ mod tests {
 
         assert_eq!(packet.header.timestamp, 0xABCDEF01);
         assert_eq!(packet.header.sequence_number, 0);
-        assert_eq!(packetizer.sequence_number(), 1);
-        assert_eq!(packetizer.samples_processed(), 2);
+        assert_eq!(packetizer.get_sequence_number(), 1);
+        assert_eq!(packetizer.get_samples_processed(), 2);
     }
 
     #[test]
@@ -505,8 +505,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(actual, expected);
-        assert_eq!(writer.sequence_number(), 1);
-        assert_eq!(writer.samples_processed(), 2);
+        assert_eq!(writer.get_sequence_number(), 1);
+        assert_eq!(writer.get_samples_processed(), 2);
     }
 
     #[test]
@@ -554,8 +554,8 @@ mod tests {
         assert_eq!(output.as_ptr(), first_ptr);
         assert_eq!(output.capacity(), first_capacity);
         assert_eq!(output.len(), expected_packet_len);
-        assert_eq!(packetizer.sequence_number(), 2);
-        assert_eq!(packetizer.samples_processed(), 4);
+        assert_eq!(packetizer.get_sequence_number(), 2);
+        assert_eq!(packetizer.get_samples_processed(), 4);
     }
 
     #[test]
@@ -571,8 +571,8 @@ mod tests {
 
         packetizer.reset();
 
-        assert_eq!(packetizer.sequence_number(), 0);
-        assert_eq!(packetizer.samples_processed(), 0);
+        assert_eq!(packetizer.get_sequence_number(), 0);
+        assert_eq!(packetizer.get_samples_processed(), 0);
     }
 
     #[test]

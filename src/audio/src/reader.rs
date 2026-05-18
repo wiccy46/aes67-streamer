@@ -105,7 +105,7 @@ impl AudioReader {
         Ok(reader)
     }
 
-    pub fn info(&self) -> &AudioInfo {
+    pub fn get_info(&self) -> &AudioInfo {
         &self.info
     }
 
@@ -770,7 +770,7 @@ mod tests {
         let reader2 = AudioReader::with_resampling(temp_output.path(), 48000, 48)
             .expect("Failed to read exported file");
 
-        let info = reader2.info();
+        let info = reader2.get_info();
         assert_eq!(info.sample_rate, 48000);
         assert_eq!(info.channels, 2);
     }
@@ -831,7 +831,7 @@ mod tests {
         let reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
             .expect("Failed to create reader");
 
-        let info = reader.info();
+        let info = reader.get_info();
         assert_eq!(info.sample_rate, 48000);
         assert_eq!(info.channels, 2);
         assert_eq!(info.bit_depth, Some(24)); // AES67 standard
@@ -871,7 +871,7 @@ mod tests {
         if std::path::Path::new(test_file).exists() {
             let mut reader = AudioReader::new(test_file).expect("Failed to open test file");
 
-            let info = reader.info();
+            let info = reader.get_info();
             let expected_channels = info.channels;
             let expected_sample_rate = info.sample_rate;
 
