@@ -65,12 +65,12 @@ impl GainNode {
     }
 
     /// Get current gain in decibels
-    pub fn gain_db(&self) -> f32 {
+    pub fn get_gain_db(&self) -> f32 {
         self.gain_db
     }
 
     /// Get current gain in linear scale
-    pub fn gain_linear(&self) -> f32 {
+    pub fn get_gain_linear(&self) -> f32 {
         self.gain_linear
     }
 
@@ -80,12 +80,12 @@ impl GainNode {
     }
 
     /// Get peak level since last reset (0.0 to 1.0+)
-    pub fn peak_level(&self) -> f32 {
+    pub fn get_peak_level(&self) -> f32 {
         self.peak_level
     }
 
     /// Get RMS level since last reset (0.0 to 1.0+)
-    pub fn rms_level(&self) -> f32 {
+    pub fn get_rms_level(&self) -> f32 {
         self.rms_level
     }
 
@@ -223,8 +223,8 @@ pub fn apply_gain_example(sample: &mut AudioSample, gain_db: f32) -> Result<()> 
     log::info!(
         "Applied {}dB gain, Peak: {:.3}, RMS: {:.3}",
         gain_db,
-        gain_node.peak_level(),
-        gain_node.rms_level()
+        gain_node.get_peak_level(),
+        gain_node.get_rms_level()
     );
 
     Ok(())
@@ -311,11 +311,11 @@ mod tests {
         node.process(&mut sample).unwrap();
 
         // Peak should be 0.5 (highest absolute value)
-        assert!((node.peak_level() - 0.5).abs() < 0.001);
+        assert!((node.get_peak_level() - 0.5).abs() < 0.001);
 
         // RMS should be calculated and non-zero
-        assert!(node.rms_level() > 0.0);
-        assert!(node.rms_level() <= 1.0);
+        assert!(node.get_rms_level() > 0.0);
+        assert!(node.get_rms_level() <= 1.0);
     }
 
     #[test]

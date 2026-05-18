@@ -109,12 +109,12 @@ impl MulticastConfig {
     }
 
     /// Get multicast socket address
-    pub fn multicast_socket_addr(&self) -> SocketAddr {
+    pub fn get_multicast_socket_addr(&self) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(self.multicast_addr), self.port)
     }
 
     /// Get local bind address
-    pub fn local_socket_addr(&self) -> SocketAddr {
+    pub fn get_local_socket_addr(&self) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(self.local_addr), 0) // Let OS choose port
     }
 }
@@ -274,7 +274,7 @@ impl MulticastSocket {
         // Note: For sending multicast, we usually bind to 0.0.0.0 or the interface IP.
         // If we bind to 127.0.0.1, we might have issues sending to multicast group if routing isn't set.
         // Let's try binding to the specific local address as before.
-        socket.bind(&config.local_socket_addr().into())?;
+        socket.bind(&config.get_local_socket_addr().into())?;
 
         // Configure multicast settings
         socket.set_multicast_ttl_v4(config.ttl as u32)?;
@@ -285,7 +285,7 @@ impl MulticastSocket {
         }
 
         let socket = UdpSocket::from(socket);
-        let target_addr = config.multicast_socket_addr();
+        let target_addr = config.get_multicast_socket_addr();
 
         log::info!("Multicast socket created successfully");
         log::info!("Local address: {}", socket.local_addr()?);
@@ -344,7 +344,7 @@ impl MulticastSocket {
     }
 
     /// Get multicast configuration
-    pub fn config(&self) -> &MulticastConfig {
+    pub fn get_config(&self) -> &MulticastConfig {
         &self.config
     }
 }
@@ -521,14 +521,14 @@ mod tests {
             Ipv4Addr::new(192, 168, 1, 100),
         );
 
-        let multicast_addr = config.multicast_socket_addr();
+        let multicast_addr = config.get_multicast_socket_addr();
         assert_eq!(
             multicast_addr.ip(),
             IpAddr::V4(Ipv4Addr::new(239, 192, 1, 1))
         );
         assert_eq!(multicast_addr.port(), 5004);
 
-        let local_addr = config.local_socket_addr();
+        let local_addr = config.get_local_socket_addr();
         assert_eq!(local_addr.ip(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
         assert_eq!(local_addr.port(), 0); // OS-assigned port
     }

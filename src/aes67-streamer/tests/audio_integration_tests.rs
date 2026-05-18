@@ -8,7 +8,7 @@ fn test_audio_file_loading_integration() {
     
     if std::path::Path::new(test_file).exists() {
         let reader = AudioReader::new(test_file).expect("Failed to load test audio file");
-        let info = reader.info();
+        let info = reader.get_info();
         
         // Verify expected properties
         assert_eq!(info.sample_rate, 48000);
@@ -27,7 +27,7 @@ fn test_common_audio_file_formats_load() {
         let path = audio_format_resource(filename);
         let reader = AudioReader::with_resampling(&path, 48000, 48)
             .unwrap_or_else(|error| panic!("failed to load {filename}: {error:#}"));
-        let info = reader.info();
+        let info = reader.get_info();
 
         assert_eq!(info.sample_rate, 48000, "{filename} should target AES67 sample rate");
         assert_eq!(info.channels, 2, "{filename} should preserve stereo layout");

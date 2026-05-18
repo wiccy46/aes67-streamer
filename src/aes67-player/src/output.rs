@@ -20,7 +20,7 @@ pub trait AudioOutput {
 
     fn write_interleaved(&mut self, samples: &[f32], channels: u16) -> Result<usize>;
     fn write_silence(&mut self, frames: u32, channels: u16) -> Result<()>;
-    fn stats(&self) -> OutputStats;
+    fn get_stats(&self) -> OutputStats;
 }
 
 pub fn build_cpal_output(
@@ -90,7 +90,7 @@ impl AudioOutput for NullOutput {
         if channels == 0 {
             return Err(anyhow!("channel count must be greater than zero"));
         }
-        if samples.len() % channels as usize != 0 {
+        if !samples.len().is_multiple_of(channels as usize) {
             return Err(anyhow!(
                 "interleaved sample count {} is not divisible by channel count {channels}",
                 samples.len()
@@ -114,7 +114,7 @@ impl AudioOutput for NullOutput {
         Ok(())
     }
 
-    fn stats(&self) -> OutputStats {
+    fn get_stats(&self) -> OutputStats {
         self.stats
     }
 }
@@ -261,7 +261,7 @@ impl AudioOutput for CpalOutput {
                 self.channels
             ));
         }
-        if samples.len() % channels as usize != 0 {
+        if !samples.len().is_multiple_of(channels as usize) {
             return Err(anyhow!(
                 "interleaved sample count {} is not divisible by channel count {channels}",
                 samples.len()
@@ -309,8 +309,8 @@ impl AudioOutput for CpalOutput {
         Ok(())
     }
 
-    fn stats(&self) -> OutputStats {
-        self.stats.snapshot()
+    fn get_stats(&self) -> OutputStats {
+        self.stats.get_snapshot()
     }
 }
 
@@ -323,7 +323,7 @@ struct CpalStats {
 }
 
 impl CpalStats {
-    fn snapshot(&self) -> OutputStats {
+    fn get_snapshot(&self) -> OutputStats {
         OutputStats {
             frames_written: self.frames_written.load(Ordering::Relaxed),
             samples_written: self.samples_written.load(Ordering::Relaxed),
@@ -486,7 +486,7 @@ mod tests {
         );
         output.write_silence(48, 2).unwrap();
 
-        let stats = output.stats();
+        let stats = output.get_stats();
         assert_eq!(stats.frames_written, 50);
         assert_eq!(stats.samples_written, 100);
         assert_eq!(stats.silence_frames, 48);

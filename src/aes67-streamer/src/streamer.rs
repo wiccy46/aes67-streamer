@@ -94,7 +94,7 @@ impl Aes67Streamer {
             AudioReader::with_resampling(audio_file, config.target_sample_rate, samples_per_packet)
                 .context("Failed to load audio file")?;
 
-        let audio_info = audio_reader.info();
+        let audio_info = audio_reader.get_info();
         log::info!(
             "Loaded audio: {} Hz, {} channels, duration: {:?}",
             audio_info.sample_rate,
@@ -135,7 +135,7 @@ impl Aes67Streamer {
             .context("Failed to start PTP client")?;
 
         let ptp_stats = ptp_client.get_stats();
-        let clock_identity = ptp_client.reference_clock_identity();
+        let clock_identity = ptp_client.get_reference_clock_identity();
         if ptp_stats.master_identity.is_none() {
             log::warn!(
                 "No PTP grandmaster observed yet; SDP will use local clock identity {clock_identity}"
@@ -206,7 +206,7 @@ impl Aes67Streamer {
         let mut timing_drift = TimingDriftStats::default();
         let rtp_packet_capacity = 12
             + samples_per_packet(self.config.target_sample_rate, self.config.packet_time_ms)
-                * self.audio_reader.info().channels as usize
+                * self.audio_reader.get_info().channels as usize
                 * L24_BYTES_PER_SAMPLE;
         let mut rtp_packet_buffer = Vec::with_capacity(rtp_packet_capacity);
         let stop_reason: &'static str;
@@ -335,16 +335,16 @@ impl Aes67Streamer {
         );
         log::info!(
             "  Timing late packets: {}/{}",
-            timing_drift.late_packets(),
-            timing_drift.packets_observed()
+            timing_drift.get_late_packets(),
+            timing_drift.get_packets_observed()
         );
         log::info!(
             "  Timing max lateness: {:.3} ms",
-            duration_ms(timing_drift.max_lateness())
+            duration_ms(timing_drift.get_max_lateness())
         );
         log::info!(
             "  Timing avg late-packet lateness: {:.3} ms",
-            timing_drift.average_late_lateness_ms()
+            timing_drift.get_average_late_lateness_ms()
         );
 
         // Stop background services
@@ -359,7 +359,7 @@ impl Aes67Streamer {
     }
 
     fn refresh_sdp_if_ptp_reference_changed(&mut self) {
-        let next_identity = self.ptp_client.reference_clock_identity();
+        let next_identity = self.ptp_client.get_reference_clock_identity();
         if let Some(sdp) = refresh_sdp_for_clock_identity(
             &mut self.clock_identity,
             next_identity,
@@ -407,19 +407,19 @@ impl TimingDriftStats {
         self.max_lateness = self.max_lateness.max(lateness);
     }
 
-    fn packets_observed(&self) -> u64 {
+    fn get_packets_observed(&self) -> u64 {
         self.packets_observed
     }
 
-    fn late_packets(&self) -> u64 {
+    fn get_late_packets(&self) -> u64 {
         self.late_packets
     }
 
-    fn max_lateness(&self) -> Duration {
+    fn get_max_lateness(&self) -> Duration {
         self.max_lateness
     }
 
-    fn average_late_lateness_ms(&self) -> f64 {
+    fn get_average_late_lateness_ms(&self) -> f64 {
         if self.late_packets == 0 {
             return 0.0;
         }
@@ -637,10 +637,10 @@ mod tests {
             base + Duration::from_millis(5),
         );
 
-        assert_eq!(stats.packets_observed(), 3);
-        assert_eq!(stats.late_packets(), 2);
-        assert_eq!(stats.max_lateness(), Duration::from_millis(3));
-        assert_eq!(stats.average_late_lateness_ms(), 2.5);
+        assert_eq!(stats.get_packets_observed(), 3);
+        assert_eq!(stats.get_late_packets(), 2);
+        assert_eq!(stats.get_max_lateness(), Duration::from_millis(3));
+        assert_eq!(stats.get_average_late_lateness_ms(), 2.5);
     }
 
     #[test]
@@ -654,10 +654,10 @@ mod tests {
             base + Duration::from_millis(2),
         );
 
-        assert_eq!(stats.packets_observed(), 2);
-        assert_eq!(stats.late_packets(), 0);
-        assert_eq!(stats.max_lateness(), Duration::ZERO);
-        assert_eq!(stats.average_late_lateness_ms(), 0.0);
+        assert_eq!(stats.get_packets_observed(), 2);
+        assert_eq!(stats.get_late_packets(), 0);
+        assert_eq!(stats.get_max_lateness(), Duration::ZERO);
+        assert_eq!(stats.get_average_late_lateness_ms(), 0.0);
     }
 
     #[test]

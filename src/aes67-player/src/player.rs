@@ -66,7 +66,7 @@ impl Aes67Player {
         let jitter = RtpJitterBuffer::new(JitterBufferConfig {
             payload_type: session.payload_type,
             ssrc: None,
-            frames_per_packet: session.frames_per_packet(),
+            frames_per_packet: session.get_frames_per_packet(),
             capacity_packets: jitter_capacity_packets(&session),
         })?;
 
@@ -180,10 +180,10 @@ impl Aes67Player {
                         self.session.channels,
                         decode_buffer,
                     )?;
-                    if frames as u32 != self.session.frames_per_packet() {
+                    if frames as u32 != self.session.get_frames_per_packet() {
                         return Err(anyhow!(
                             "RTP packet decoded to {frames} frames; expected {}",
-                            self.session.frames_per_packet()
+                            self.session.get_frames_per_packet()
                         ));
                     }
                     self.output
@@ -217,8 +217,8 @@ impl Aes67Player {
     }
 
     fn log_summary(&self, stop_reason: &str, elapsed: Duration) {
-        let jitter_stats = self.jitter.stats();
-        let output_stats: OutputStats = self.output.stats();
+        let jitter_stats = self.jitter.get_stats();
+        let output_stats: OutputStats = self.output.get_stats();
 
         log::info!("AES67 player completed:");
         log::info!("  Stop reason: {stop_reason}");
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(session.sample_rate, 48_000);
         assert_eq!(session.channels, 2);
         assert_eq!(session.packet_time_ms, 1);
-        assert_eq!(session.frames_per_packet(), 48);
+        assert_eq!(session.get_frames_per_packet(), 48);
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
         );
         assert!(player.started_playout);
         assert_eq!(player.stats.packets_decoded, 2);
-        assert_eq!(player.output.stats().frames_written, 96);
+        assert_eq!(player.output.get_stats().frames_written, 96);
     }
 
     #[test]
@@ -517,7 +517,7 @@ mod tests {
         let jitter = RtpJitterBuffer::new(JitterBufferConfig {
             payload_type: session.payload_type,
             ssrc: None,
-            frames_per_packet: session.frames_per_packet(),
+            frames_per_packet: session.get_frames_per_packet(),
             capacity_packets: 8,
         })
         .unwrap();
@@ -577,7 +577,7 @@ mod tests {
             Ok(())
         }
 
-        fn stats(&self) -> OutputStats {
+        fn get_stats(&self) -> OutputStats {
             let frames_written = self
                 .events
                 .lock()

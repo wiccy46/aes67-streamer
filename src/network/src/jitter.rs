@@ -147,7 +147,7 @@ impl RtpJitterBuffer {
         self.packets.is_empty()
     }
 
-    pub fn stats(&self) -> JitterBufferStats {
+    pub fn get_stats(&self) -> JitterBufferStats {
         self.stats
     }
 
@@ -215,7 +215,7 @@ mod tests {
 
         assert_packet(buffer.pop_next(), 10, 1000);
         assert_packet(buffer.pop_next(), 11, 1048);
-        assert_eq!(buffer.stats().lost_packets, 0);
+        assert_eq!(buffer.get_stats().lost_packets, 0);
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod tests {
         assert_packet(buffer.pop_next(), 10, 1000);
         assert_packet(buffer.pop_next(), 11, 1048);
         assert_packet(buffer.pop_next(), 12, 1096);
-        assert_eq!(buffer.stats().lost_packets, 0);
+        assert_eq!(buffer.get_stats().lost_packets, 0);
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
         );
 
         assert_packet(buffer.pop_next(), 10, 1000);
-        assert_eq!(buffer.stats().duplicate_packets, 1);
+        assert_eq!(buffer.get_stats().duplicate_packets, 1);
     }
 
     #[test]
@@ -259,8 +259,8 @@ mod tests {
         assert_packet(buffer.pop_next(), 10, 1000);
         assert_silence(buffer.pop_next(), 11, 1048);
         assert_packet(buffer.pop_next(), 12, 1096);
-        assert_eq!(buffer.stats().lost_packets, 1);
-        assert_eq!(buffer.stats().silence_packets, 1);
+        assert_eq!(buffer.get_stats().lost_packets, 1);
+        assert_eq!(buffer.get_stats().silence_packets, 1);
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
         assert_packet(buffer.pop_next(), 10, 1000);
 
         assert_eq!(buffer.insert(packet(10, 1000)).unwrap(), InsertResult::Late);
-        assert_eq!(buffer.stats().late_packets, 1);
+        assert_eq!(buffer.get_stats().late_packets, 1);
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
 
         assert_packet(buffer.pop_next(), 10, 1000);
         assert_packet(buffer.pop_next(), 11, 2000);
-        assert_eq!(buffer.stats().timestamp_discontinuities, 1);
+        assert_eq!(buffer.get_stats().timestamp_discontinuities, 1);
     }
 
     #[test]
