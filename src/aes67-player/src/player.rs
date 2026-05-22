@@ -229,7 +229,9 @@ impl Aes67Player {
             jitter_stats.duplicate_packets
         );
         log::info!("  Output frames: {}", output_stats.frames_written);
+        log::info!("  Output samples: {}", output_stats.samples_written);
         log::info!("  Output silence frames: {}", output_stats.silence_frames);
+        log::info!("  Output dropped samples: {}", output_stats.dropped_samples);
 
         if self.config.verbose {
             log::debug!("  Jitter stats: {jitter_stats:?}");
