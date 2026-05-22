@@ -1,6 +1,7 @@
 pub mod jitter;
 pub mod rtp;
 pub mod sap;
+pub mod sdp;
 pub mod socket;
 
 pub use jitter::{
@@ -8,6 +9,7 @@ pub use jitter::{
 };
 pub use rtp::{RtpHeader, RtpPacket, RtpPacketizer};
 pub use sap::SapAnnouncer;
+pub use sdp::{Aes67SessionDescription, AudioEncoding, parse_sdp, parse_sdp_file};
 pub use socket::{
     MulticastConfig, MulticastSocket, ReceivedRtpPacket, RtpReceiveSocket, RtpReceiveSocketConfig,
     SocketStats, parse_stream_address, resolve_interface_ip,
