@@ -4,7 +4,7 @@ use clap::{error::ErrorKind, parser::ValueSource, Arg, ArgMatches, Command};
 use std::ffi::OsString;
 
 #[derive(Debug, Clone)]
-pub struct Args {
+pub struct StreamerArgs {
     pub file: String,
     pub address: String,
     pub port: u16,
@@ -23,8 +23,47 @@ pub struct Args {
     pub packet_time_ms: u32,
 }
 
-pub fn parse_args() -> Result<Args> {
-    parse_args_from(std::env::args_os())
+pub type Args = StreamerArgs;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerOutput {
+    Cpal,
+    Null,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlayerArgs {
+    pub sdp: Option<String>,
+    pub address: Option<String>,
+    pub port: Option<u16>,
+    pub interface: Option<String>,
+    pub sender: Option<String>,
+    pub channels: Option<u16>,
+    pub payload_type: Option<u8>,
+    pub latency_ms: u32,
+    pub output: PlayerOutput,
+    pub duration_seconds: Option<f64>,
+    pub verbose: bool,
+}
+
+pub fn parse_args() -> Result<StreamerArgs> {
+    parse_streamer_args()
+}
+
+pub fn parse_args_from<I, T>(args: I) -> Result<StreamerArgs>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    parse_streamer_args_from(args)
+}
+
+pub fn parse_streamer_args() -> Result<StreamerArgs> {
+    parse_streamer_args_from(std::env::args_os())
+}
+
+pub fn parse_player_args() -> Result<PlayerArgs> {
+    parse_player_args_from(std::env::args_os())
 }
 
 pub fn is_display_control_error(error: &anyhow::Error) -> bool {
@@ -36,16 +75,25 @@ pub fn is_display_control_error(error: &anyhow::Error) -> bool {
     })
 }
 
-pub fn parse_args_from<I, T>(args: I) -> Result<Args>
+pub fn parse_streamer_args_from<I, T>(args: I) -> Result<StreamerArgs>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let matches = cli().try_get_matches_from(args)?;
-    args_from_matches(&matches)
+    let matches = streamer_cli().try_get_matches_from(args)?;
+    streamer_args_from_matches(&matches)
 }
 
-fn cli() -> Command {
+pub fn parse_player_args_from<I, T>(args: I) -> Result<PlayerArgs>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let matches = player_cli().try_get_matches_from(args)?;
+    player_args_from_matches(&matches)
+}
+
+fn streamer_cli() -> Command {
     Command::new("aes67-streamer")
         .version("0.1.0")
         .author("Jiajun Yang")
@@ -116,7 +164,92 @@ fn cli() -> Command {
         )
 }
 
-fn args_from_matches(matches: &ArgMatches) -> Result<Args> {
+fn player_cli() -> Command {
+    Command::new("aes67-player")
+        .version("0.1.0")
+        .author("Jiajun Yang")
+        .about("CLI tool for receiving and playing AES67 RTP audio streams")
+        .arg(
+            Arg::new("sdp")
+                .long("sdp")
+                .value_name("FILE")
+                .help("SDP file describing the AES67 stream"),
+        )
+        .arg(
+            Arg::new("address")
+                .short('a')
+                .long("address")
+                .value_name("IP")
+                .help("RTP destination address to receive in basic CLI mode"),
+        )
+        .arg(
+            Arg::new("port")
+                .short('p')
+                .long("port")
+                .value_name("PORT")
+                .help("RTP UDP port to receive in basic CLI mode")
+                .value_parser(clap::value_parser!(u16)),
+        )
+        .arg(
+            Arg::new("interface")
+                .short('i')
+                .long("interface")
+                .value_name("INTERFACE")
+                .help("Network interface name or IPv4 address"),
+        )
+        .arg(
+            Arg::new("sender")
+                .long("sender")
+                .value_name("IP")
+                .help("Optional sender IPv4 address filter"),
+        )
+        .arg(
+            Arg::new("channels")
+                .long("channels")
+                .value_name("COUNT")
+                .help("Audio channel count for basic CLI mode [default: 2]")
+                .value_parser(clap::value_parser!(u16)),
+        )
+        .arg(
+            Arg::new("payload-type")
+                .long("payload-type")
+                .value_name("PT")
+                .help("RTP payload type for basic CLI mode [default: 97]")
+                .value_parser(clap::value_parser!(u8)),
+        )
+        .arg(
+            Arg::new("latency-ms")
+                .long("latency-ms")
+                .value_name("MS")
+                .help("Initial playout latency in milliseconds [default: 50]")
+                .default_value("50")
+                .value_parser(parse_positive_u32),
+        )
+        .arg(
+            Arg::new("output")
+                .long("output")
+                .value_name("MODE")
+                .help("Audio output mode")
+                .default_value("cpal")
+                .value_parser(["cpal", "null"]),
+        )
+        .arg(
+            Arg::new("duration-seconds")
+                .long("duration-seconds")
+                .value_name("SECONDS")
+                .help("Stop receiving after this many seconds [default: unlimited]")
+                .value_parser(parse_positive_duration_seconds),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Enable verbose logging [default: false]")
+                .action(clap::ArgAction::SetTrue),
+        )
+}
+
+fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
     let config_file = matches.get_one::<String>("config").cloned();
     let config = match config_file.as_deref() {
         Some(path) => Some(load_config(path)?),
@@ -137,7 +270,7 @@ fn args_from_matches(matches: &ArgMatches) -> Result<Args> {
             missing_required_value("multicast address", "--address", "stream.address")
         })?;
 
-    Ok(Args {
+    Ok(StreamerArgs {
         file,
         address,
         port: merged_port(matches, config.as_ref()),
@@ -169,6 +302,86 @@ fn args_from_matches(matches: &ArgMatches) -> Result<Args> {
     })
 }
 
+fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
+    let sdp = cli_string(matches, "sdp");
+    let address = cli_string(matches, "address");
+    let port = cli_u16(matches, "port");
+    let channels = cli_u16(matches, "channels");
+    let payload_type = cli_u8(matches, "payload-type");
+
+    if sdp.is_some() {
+        let conflicting_args = [
+            ("address", address.is_some()),
+            ("port", port.is_some()),
+            ("channels", channels.is_some()),
+            ("payload-type", payload_type.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect::<Vec<_>>();
+
+        if !conflicting_args.is_empty() {
+            return Err(anyhow!(
+                "--sdp cannot be combined with stream-format arguments: {}",
+                conflicting_args.join(", ")
+            ));
+        }
+    } else {
+        if address.is_none() {
+            return Err(missing_required_value(
+                "receive address",
+                "--address",
+                "player.receive.address",
+            ));
+        }
+        if port.is_none() {
+            return Err(missing_required_value(
+                "receive port",
+                "--port",
+                "player.receive.port",
+            ));
+        }
+    }
+
+    let channels = match channels {
+        Some(channels) if !(1..=8).contains(&channels) => {
+            return Err(anyhow!("--channels must be between 1 and 8"));
+        }
+        Some(channels) => Some(channels),
+        None if sdp.is_none() => Some(2),
+        None => None,
+    };
+
+    let payload_type = match payload_type {
+        Some(payload_type) if payload_type > 127 => {
+            return Err(anyhow!("--payload-type must be between 0 and 127"));
+        }
+        Some(payload_type) => Some(payload_type),
+        None if sdp.is_none() => Some(97),
+        None => None,
+    };
+
+    Ok(PlayerArgs {
+        sdp,
+        address,
+        port,
+        interface: cli_string(matches, "interface"),
+        sender: cli_string(matches, "sender"),
+        channels,
+        payload_type,
+        latency_ms: *matches
+            .get_one::<u32>("latency-ms")
+            .expect("clap should supply latency default"),
+        output: parse_player_output(
+            matches
+                .get_one::<String>("output")
+                .expect("clap should supply output default"),
+        ),
+        duration_seconds: matches.get_one::<f64>("duration-seconds").copied(),
+        verbose: matches.get_flag("verbose"),
+    })
+}
+
 fn cli_string(matches: &ArgMatches, id: &str) -> Option<String> {
     if matches.value_source(id) == Some(ValueSource::CommandLine) {
         matches.get_one::<String>(id).cloned()
@@ -182,6 +395,21 @@ fn cli_u8(matches: &ArgMatches, id: &str) -> Option<u8> {
         matches.get_one::<u8>(id).copied()
     } else {
         None
+    }
+}
+
+fn cli_u16(matches: &ArgMatches, id: &str) -> Option<u16> {
+    if matches.value_source(id) == Some(ValueSource::CommandLine) {
+        matches.get_one::<u16>(id).copied()
+    } else {
+        None
+    }
+}
+
+fn parse_player_output(value: &str) -> PlayerOutput {
+    match value {
+        "null" => PlayerOutput::Null,
+        _ => PlayerOutput::Cpal,
     }
 }
 
@@ -281,6 +509,18 @@ fn parse_positive_duration_seconds(value: &str) -> Result<f64, String> {
         Ok(duration)
     } else {
         Err("duration must be greater than zero".to_string())
+    }
+}
+
+fn parse_positive_u32(value: &str) -> Result<u32, String> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| "value must be a positive integer".to_string())?;
+
+    if parsed > 0 {
+        Ok(parsed)
+    } else {
+        Err("value must be greater than zero".to_string())
     }
 }
 
@@ -606,5 +846,192 @@ mod tests {
         assert!(result.is_err());
 
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn parse_streamer_args_from_keeps_existing_streamer_cli_behavior() {
+        let args = parse_streamer_args_from([
+            "aes67-streamer",
+            "--file",
+            "test.wav",
+            "--address",
+            "239.192.1.1",
+        ])
+        .expect("streamer args should parse");
+
+        assert_eq!(args.file, "test.wav");
+        assert_eq!(args.address, "239.192.1.1");
+        assert_eq!(args.port, 5004);
+    }
+
+    #[test]
+    fn player_basic_cli_supplies_receive_format_defaults() {
+        let args = parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--interface",
+            "127.0.0.1",
+            "--sender",
+            "127.0.0.1",
+            "--output",
+            "null",
+            "--duration-seconds",
+            "1.5",
+            "--verbose",
+        ])
+        .expect("player basic cli should parse");
+
+        assert_eq!(args.sdp, None);
+        assert_eq!(args.address.as_deref(), Some("239.192.1.1"));
+        assert_eq!(args.port, Some(5004));
+        assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
+        assert_eq!(args.sender.as_deref(), Some("127.0.0.1"));
+        assert_eq!(args.channels, Some(2));
+        assert_eq!(args.payload_type, Some(97));
+        assert_eq!(args.latency_ms, 50);
+        assert_eq!(args.output, PlayerOutput::Null);
+        assert_eq!(args.duration_seconds, Some(1.5));
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn player_basic_cli_accepts_explicit_receive_format() {
+        let args = parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--channels",
+            "8",
+            "--payload-type",
+            "101",
+            "--latency-ms",
+            "75",
+            "--output",
+            "cpal",
+        ])
+        .expect("explicit player format should parse");
+
+        assert_eq!(args.channels, Some(8));
+        assert_eq!(args.payload_type, Some(101));
+        assert_eq!(args.latency_ms, 75);
+        assert_eq!(args.output, PlayerOutput::Cpal);
+    }
+
+    #[test]
+    fn player_cli_requires_sdp_or_basic_address_and_port() {
+        assert!(parse_player_args_from(["aes67-player"]).is_err());
+        assert!(parse_player_args_from(["aes67-player", "--address", "239.192.1.1"]).is_err());
+        assert!(parse_player_args_from(["aes67-player", "--port", "5004"]).is_err());
+    }
+
+    #[test]
+    fn player_sdp_mode_keeps_runtime_args() {
+        let args = parse_player_args_from([
+            "aes67-player",
+            "--sdp",
+            "tests/example.sdp",
+            "--interface",
+            "127.0.0.1",
+            "--sender",
+            "127.0.0.1",
+            "--latency-ms",
+            "100",
+            "--output",
+            "null",
+        ])
+        .expect("sdp mode should parse with runtime args");
+
+        assert_eq!(args.sdp.as_deref(), Some("tests/example.sdp"));
+        assert_eq!(args.address, None);
+        assert_eq!(args.port, None);
+        assert_eq!(args.channels, None);
+        assert_eq!(args.payload_type, None);
+        assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
+        assert_eq!(args.sender.as_deref(), Some("127.0.0.1"));
+        assert_eq!(args.latency_ms, 100);
+        assert_eq!(args.output, PlayerOutput::Null);
+    }
+
+    #[test]
+    fn player_sdp_mode_rejects_stream_format_overrides() {
+        for args in [
+            [
+                "aes67-player",
+                "--sdp",
+                "stream.sdp",
+                "--address",
+                "239.1.1.1",
+            ],
+            ["aes67-player", "--sdp", "stream.sdp", "--port", "5004"],
+            ["aes67-player", "--sdp", "stream.sdp", "--channels", "2"],
+            [
+                "aes67-player",
+                "--sdp",
+                "stream.sdp",
+                "--payload-type",
+                "97",
+            ],
+        ] {
+            assert!(parse_player_args_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn player_cli_validates_receive_format() {
+        assert!(parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--channels",
+            "0"
+        ])
+        .is_err());
+        assert!(parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--channels",
+            "9"
+        ])
+        .is_err());
+        assert!(parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--payload-type",
+            "128"
+        ])
+        .is_err());
+        assert!(parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--latency-ms",
+            "0"
+        ])
+        .is_err());
+        assert!(parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--output",
+            "alsa"
+        ])
+        .is_err());
     }
 }
