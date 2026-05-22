@@ -8,7 +8,7 @@ use streamer::{Aes67Streamer, StreamConfig};
 
 #[tokio::main]
 async fn main() {
-    let args = match config::parse_args() {
+    let args = match config::parse_streamer_args() {
         Ok(args) => args,
         Err(e) => {
             if config::is_display_control_error(&e) {
