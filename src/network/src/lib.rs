@@ -9,7 +9,8 @@ pub use jitter::{
 pub use rtp::{RtpHeader, RtpPacket, RtpPacketizer};
 pub use sap::SapAnnouncer;
 pub use socket::{
-    MulticastConfig, MulticastSocket, SocketStats, parse_stream_address, resolve_interface_ip,
+    MulticastConfig, MulticastSocket, ReceivedRtpPacket, RtpReceiveSocket, RtpReceiveSocketConfig,
+    SocketStats, parse_stream_address, resolve_interface_ip,
 };
 
 pub type Result<T> = anyhow::Result<T>;
