@@ -44,8 +44,13 @@ pub struct Aes67Player {
 
 impl Aes67Player {
     pub async fn new(args: &PlayerArgs, config: PlayerConfig) -> Result<Self> {
-        let output = build_output(config.output_mode)?;
         let session = session_from_args(args)?;
+        let output = build_output(
+            config.output_mode,
+            session.sample_rate,
+            session.channels,
+            config.latency_ms,
+        )?;
         let interface = resolve_interface_ip(args.interface.as_deref().unwrap_or("127.0.0.1"))
             .context("Failed to resolve receive interface")?;
         let sender_filter = args
@@ -153,8 +158,9 @@ impl Aes67Player {
 
             if !self.started_playout && self.jitter.len() >= self.preroll_packets {
                 self.started_playout = true;
+                self.output.start()?;
                 log::info!(
-                    "Starting null playout after preroll of {} packets",
+                    "Starting playout after preroll of {} packets",
                     self.preroll_packets
                 );
             }
