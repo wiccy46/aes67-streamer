@@ -166,6 +166,11 @@ impl Aes67Player {
 
         self.decode_available_packets(&mut decode_buffer)?;
         self.log_summary(stop_reason, start_time.elapsed());
+        if self.stats.packets_decoded == 0 {
+            return Err(anyhow!(
+                "no RTP audio packets were decoded before {stop_reason}"
+            ));
+        }
         Ok(())
     }
 
