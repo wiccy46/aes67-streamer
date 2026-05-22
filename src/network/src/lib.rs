@@ -7,7 +7,7 @@ pub mod socket;
 pub use jitter::{
     InsertResult, JitterBufferConfig, JitterBufferStats, PlayoutPacket, RtpJitterBuffer,
 };
-pub use rtp::{RtpHeader, RtpPacket, RtpPacketizer};
+pub use rtp::{RtpHeader, RtpPacket, RtpPacketizer, decode_l24_payload_interleaved};
 pub use sap::SapAnnouncer;
 pub use sdp::{Aes67SessionDescription, AudioEncoding, parse_sdp, parse_sdp_file};
 pub use socket::{
