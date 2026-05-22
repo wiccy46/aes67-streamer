@@ -2,8 +2,11 @@ use anyhow::{Context, Result, anyhow};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
+use crate::rtp::RtpPacket;
+
 const RTP_DSCP: u8 = 34;
 const RTP_SEND_BUFFER_SIZE: usize = 1_048_576;
+const RTP_RECEIVE_BUFFER_SIZE: usize = 1_048_576;
 const SAP_SEND_BUFFER_SIZE: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,16 @@ pub(crate) fn rtp_socket_defaults(send_buffer_size: usize) -> UdpSocketDefaults 
     }
 }
 
+pub(crate) fn rtp_receive_socket_defaults(recv_buffer_size: usize) -> UdpSocketDefaults {
+    UdpSocketDefaults {
+        reuse_address: true,
+        reuse_port: true,
+        multicast_loop_v4: false,
+        send_buffer_size: None,
+        recv_buffer_size: Some(recv_buffer_size),
+    }
+}
+
 pub(crate) fn sap_socket_defaults() -> UdpSocketDefaults {
     UdpSocketDefaults {
         reuse_address: true,
@@ -40,20 +53,30 @@ pub(crate) fn apply_udp_socket_defaults(
     defaults: UdpSocketDefaults,
 ) -> Result<()> {
     if defaults.reuse_address {
-        socket.set_reuse_address(true)?;
+        socket
+            .set_reuse_address(true)
+            .context("Failed to enable SO_REUSEADDR")?;
     }
     #[cfg(unix)]
     if defaults.reuse_port {
-        socket.set_reuse_port(true)?;
+        socket
+            .set_reuse_port(true)
+            .context("Failed to enable SO_REUSEPORT")?;
     }
     if defaults.multicast_loop_v4 {
-        socket.set_multicast_loop_v4(true)?;
+        socket
+            .set_multicast_loop_v4(true)
+            .context("Failed to enable IPv4 multicast loopback")?;
     }
     if let Some(size) = defaults.send_buffer_size {
-        socket.set_send_buffer_size(size)?;
+        socket
+            .set_send_buffer_size(size)
+            .with_context(|| format!("Failed to set UDP send buffer size to {size}"))?;
     }
     if let Some(size) = defaults.recv_buffer_size {
-        socket.set_recv_buffer_size(size)?;
+        socket
+            .set_recv_buffer_size(size)
+            .with_context(|| format!("Failed to set UDP receive buffer size to {size}"))?;
     }
 
     Ok(())
@@ -101,6 +124,136 @@ pub struct MulticastSocket {
     socket: UdpSocket,
     config: MulticastConfig,
     target_addr: SocketAddr,
+}
+
+#[derive(Debug, Clone)]
+pub struct RtpReceiveSocketConfig {
+    /// Multicast group or local unicast/loopback address to listen on.
+    pub address: Ipv4Addr,
+    /// UDP port number.
+    pub port: u16,
+    /// Local interface IPv4 address used for multicast joins.
+    pub interface: Ipv4Addr,
+    /// Optional source IPv4 filter.
+    pub sender_filter: Option<Ipv4Addr>,
+    /// Socket receive buffer size.
+    pub recv_buffer_size: usize,
+}
+
+impl RtpReceiveSocketConfig {
+    pub fn new(address: Ipv4Addr, port: u16, interface: Ipv4Addr) -> Self {
+        Self {
+            address,
+            port,
+            interface,
+            sender_filter: None,
+            recv_buffer_size: RTP_RECEIVE_BUFFER_SIZE,
+        }
+    }
+
+    pub fn bind_addr(&self) -> SocketAddr {
+        let bind_ip = if self.address.is_multicast() {
+            Ipv4Addr::UNSPECIFIED
+        } else {
+            self.address
+        };
+
+        SocketAddr::new(IpAddr::V4(bind_ip), self.port)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReceivedRtpPacket {
+    pub packet: RtpPacket,
+    pub source: SocketAddr,
+}
+
+pub struct RtpReceiveSocket {
+    socket: tokio::net::UdpSocket,
+    config: RtpReceiveSocketConfig,
+}
+
+impl RtpReceiveSocket {
+    pub fn new(config: RtpReceiveSocketConfig) -> Result<Self> {
+        log::info!(
+            "Creating RTP receive socket for {}:{} via interface {}",
+            config.address,
+            config.port,
+            config.interface
+        );
+
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        apply_udp_socket_defaults(
+            &socket,
+            rtp_receive_socket_defaults(config.recv_buffer_size),
+        )?;
+
+        socket.bind(&config.bind_addr().into()).with_context(|| {
+            format!(
+                "Failed to bind RTP receive socket to {}",
+                config.bind_addr()
+            )
+        })?;
+
+        if config.address.is_multicast() {
+            socket
+                .join_multicast_v4(&config.address, &config.interface)
+                .with_context(|| {
+                    format!(
+                        "Failed to join multicast group {} on interface {}",
+                        config.address, config.interface
+                    )
+                })?;
+        }
+
+        socket.set_nonblocking(true)?;
+        let socket = tokio::net::UdpSocket::from_std(socket.into())?;
+
+        log::info!("RTP receive socket created at {}", socket.local_addr()?);
+
+        Ok(Self { socket, config })
+    }
+
+    pub async fn recv_packet(&self, buffer: &mut [u8]) -> Result<ReceivedRtpPacket> {
+        loop {
+            let (len, source) = self
+                .socket
+                .recv_from(buffer)
+                .await
+                .context("Failed to receive RTP packet")?;
+
+            if !self.source_matches_filter(source) {
+                log::debug!(
+                    "Dropping RTP packet from {} because it does not match sender filter",
+                    source
+                );
+                continue;
+            }
+
+            let packet = RtpPacket::parse(&buffer[..len])
+                .with_context(|| format!("Failed to parse RTP packet from {source}"))?;
+
+            return Ok(ReceivedRtpPacket { packet, source });
+        }
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.socket
+            .local_addr()
+            .context("Failed to get RTP receive socket local address")
+    }
+
+    pub fn config(&self) -> &RtpReceiveSocketConfig {
+        &self.config
+    }
+
+    fn source_matches_filter(&self, source: SocketAddr) -> bool {
+        match (self.config.sender_filter, source.ip()) {
+            (Some(expected), IpAddr::V4(actual)) => actual == expected,
+            (Some(_), IpAddr::V6(_)) => false,
+            (None, _) => true,
+        }
+    }
 }
 
 impl MulticastSocket {
@@ -295,6 +448,9 @@ fn lookup_interface_ipv4(_interface_name: &str) -> Result<Option<Ipv4Addr>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtp::RtpPacketizer;
+    use audio::AudioSample;
+    use tokio::time::{self, Duration};
 
     #[test]
     fn test_multicast_config() {
@@ -336,6 +492,17 @@ mod tests {
     }
 
     #[test]
+    fn rtp_receive_socket_defaults_use_fixed_professional_values() {
+        let defaults = rtp_receive_socket_defaults(RTP_RECEIVE_BUFFER_SIZE);
+
+        assert!(defaults.reuse_address);
+        assert!(defaults.reuse_port);
+        assert!(!defaults.multicast_loop_v4);
+        assert_eq!(defaults.send_buffer_size, None);
+        assert_eq!(defaults.recv_buffer_size, Some(RTP_RECEIVE_BUFFER_SIZE));
+    }
+
+    #[test]
     fn sap_socket_defaults_use_fixed_control_values() {
         let defaults = sap_socket_defaults();
 
@@ -364,6 +531,34 @@ mod tests {
         let local_addr = config.local_socket_addr();
         assert_eq!(local_addr.ip(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
         assert_eq!(local_addr.port(), 0); // OS-assigned port
+    }
+
+    #[test]
+    fn rtp_receive_socket_config_binds_multicast_to_wildcard() {
+        let config = RtpReceiveSocketConfig::new(
+            Ipv4Addr::new(239, 192, 1, 1),
+            5004,
+            Ipv4Addr::new(127, 0, 0, 1),
+        );
+
+        assert_eq!(
+            config.bind_addr(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5004)
+        );
+    }
+
+    #[test]
+    fn rtp_receive_socket_config_binds_unicast_to_address() {
+        let config = RtpReceiveSocketConfig::new(
+            Ipv4Addr::new(127, 0, 0, 1),
+            5004,
+            Ipv4Addr::new(127, 0, 0, 1),
+        );
+
+        assert_eq!(
+            config.bind_addr(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5004)
+        );
     }
 
     #[test]
@@ -401,6 +596,81 @@ mod tests {
         assert!(parse_stream_address("192.168.1.100").is_err());
     }
 
+    #[tokio::test]
+    async fn rtp_receive_socket_receives_loopback_packet() -> Result<()> {
+        let receiver = RtpReceiveSocket::new(RtpReceiveSocketConfig::new(
+            Ipv4Addr::new(127, 0, 0, 1),
+            0,
+            Ipv4Addr::new(127, 0, 0, 1),
+        ))?;
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let packet = serialized_test_packet(77);
+
+        sender.send_to(&packet, receiver.local_addr()?).await?;
+
+        let mut buffer = [0u8; 2048];
+        let received = time::timeout(Duration::from_secs(2), receiver.recv_packet(&mut buffer))
+            .await
+            .expect("receiver should get loopback packet")?;
+
+        assert_eq!(received.packet.header.payload_type, 97);
+        assert_eq!(received.packet.header.sequence_number, 0);
+        assert_eq!(received.packet.header.timestamp, 77);
+        assert_eq!(received.source.ip(), sender.local_addr()?.ip());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rtp_receive_socket_accepts_matching_sender_filter() -> Result<()> {
+        let mut config = RtpReceiveSocketConfig::new(
+            Ipv4Addr::new(127, 0, 0, 1),
+            0,
+            Ipv4Addr::new(127, 0, 0, 1),
+        );
+        config.sender_filter = Some(Ipv4Addr::new(127, 0, 0, 1));
+        let receiver = RtpReceiveSocket::new(config)?;
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let packet = serialized_test_packet(77);
+
+        sender.send_to(&packet, receiver.local_addr()?).await?;
+
+        let mut buffer = [0u8; 2048];
+        let received = time::timeout(Duration::from_secs(2), receiver.recv_packet(&mut buffer))
+            .await
+            .expect("receiver should get packet from matching sender")?;
+
+        assert_eq!(received.packet.header.timestamp, 77);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rtp_receive_socket_drops_non_matching_sender_filter() -> Result<()> {
+        let mut config = RtpReceiveSocketConfig::new(
+            Ipv4Addr::new(127, 0, 0, 1),
+            0,
+            Ipv4Addr::new(127, 0, 0, 1),
+        );
+        config.sender_filter = Some(Ipv4Addr::new(127, 0, 0, 2));
+        let receiver = RtpReceiveSocket::new(config)?;
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let packet = serialized_test_packet(77);
+
+        sender.send_to(&packet, receiver.local_addr()?).await?;
+
+        let mut buffer = [0u8; 2048];
+        let result = time::timeout(
+            Duration::from_millis(100),
+            receiver.recv_packet(&mut buffer),
+        )
+        .await;
+
+        assert!(result.is_err(), "filtered packet should not be returned");
+
+        Ok(())
+    }
+
     #[test]
     fn test_multicast_socket_creation() {
         // Test with loopback interface
@@ -422,5 +692,20 @@ mod tests {
             let stats = socket.get_stats().unwrap();
             println!("Socket stats: {:?}", stats);
         }
+    }
+
+    fn serialized_test_packet(timestamp: u32) -> Vec<u8> {
+        let sample = AudioSample {
+            data: vec![0.5, -0.5, 0.25, -0.25],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 2,
+        };
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        let mut packet = Vec::new();
+        packetizer
+            .write_packet_with_timestamp_into(&sample, timestamp, &mut packet)
+            .expect("test RTP packet should serialize");
+        packet
     }
 }
