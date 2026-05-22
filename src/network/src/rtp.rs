@@ -1,5 +1,10 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use audio::AudioSample;
+
+const RTP_FIXED_HEADER_LEN: usize = 12;
+const L24_BYTES_PER_SAMPLE: usize = 3;
+const L24_POSITIVE_SCALE: f32 = 8_388_607.0;
+const L24_NEGATIVE_SCALE: f32 = 8_388_608.0;
 
 /// RTP packet structure for AES67 audio streaming
 #[derive(Debug, Clone)]
@@ -72,6 +77,99 @@ impl RtpHeader {
         bytes[8..12].copy_from_slice(&self.ssrc.to_be_bytes());
 
         bytes
+    }
+
+    /// Parse and validate the fixed 12-byte RTP header used by AES67 L24 streams.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < RTP_FIXED_HEADER_LEN {
+            return Err(anyhow!(
+                "RTP packet is too short: {} bytes, expected at least {RTP_FIXED_HEADER_LEN}",
+                bytes.len()
+            ));
+        }
+
+        let version = bytes[0] >> 6;
+        if version != 2 {
+            return Err(anyhow!("unsupported RTP version {version}; expected 2"));
+        }
+
+        let padding = bytes[0] & 0x20 != 0;
+        if padding {
+            return Err(anyhow!("RTP padding is not supported"));
+        }
+
+        let extension = bytes[0] & 0x10 != 0;
+        if extension {
+            return Err(anyhow!("RTP header extensions are not supported"));
+        }
+
+        let csrc_count = bytes[0] & 0x0f;
+        if csrc_count != 0 {
+            return Err(anyhow!("RTP CSRC lists are not supported"));
+        }
+
+        Ok(Self {
+            version,
+            padding,
+            extension,
+            csrc_count,
+            marker: bytes[1] & 0x80 != 0,
+            payload_type: bytes[1] & 0x7f,
+            sequence_number: u16::from_be_bytes([bytes[2], bytes[3]]),
+            timestamp: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            ssrc: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+        })
+    }
+}
+
+impl RtpPacket {
+    /// Parse an RTP packet into the fixed AES67 header and owned payload bytes.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        let header = RtpHeader::from_bytes(bytes)?;
+
+        Ok(Self {
+            header,
+            payload: bytes[RTP_FIXED_HEADER_LEN..].to_vec(),
+        })
+    }
+}
+
+/// Decode an AES67 L24 RTP payload into interleaved f32 samples.
+pub fn decode_l24_payload_interleaved(
+    payload: &[u8],
+    channels: u16,
+    output: &mut Vec<f32>,
+) -> Result<usize> {
+    if channels == 0 {
+        return Err(anyhow!("channel count must be greater than zero"));
+    }
+
+    let bytes_per_frame = channels as usize * L24_BYTES_PER_SAMPLE;
+    if payload.len() % bytes_per_frame != 0 {
+        return Err(anyhow!(
+            "L24 payload length {} is not divisible by frame size {bytes_per_frame}",
+            payload.len()
+        ));
+    }
+
+    output.clear();
+    output.reserve(payload.len() / L24_BYTES_PER_SAMPLE);
+
+    for sample_bytes in payload.chunks_exact(L24_BYTES_PER_SAMPLE) {
+        output.push(decode_l24_sample(sample_bytes));
+    }
+
+    Ok(payload.len() / bytes_per_frame)
+}
+
+fn decode_l24_sample(bytes: &[u8]) -> f32 {
+    let sign = if bytes[0] & 0x80 != 0 { 0xff } else { 0x00 };
+    let sample = i32::from_be_bytes([sign, bytes[0], bytes[1], bytes[2]]);
+
+    if sample >= 0 {
+        sample as f32 / L24_POSITIVE_SCALE
+    } else {
+        sample as f32 / L24_NEGATIVE_SCALE
     }
 }
 
@@ -161,7 +259,7 @@ impl RtpPacketizer {
         header.timestamp = timestamp;
 
         output.clear();
-        output.reserve(12 + sample.data.len() * 3);
+        output.reserve(RTP_FIXED_HEADER_LEN + sample.data.len() * L24_BYTES_PER_SAMPLE);
         output.extend_from_slice(&header.to_bytes());
         self.write_audio_payload_into(sample, output)?;
 
@@ -174,7 +272,7 @@ impl RtpPacketizer {
     fn audio_to_payload(&self, sample: &AudioSample) -> Result<Vec<u8>> {
         // Convert f32 samples to 24-bit PCM (AES67 standard)
         // Also convert from non-interleaved to interleaved format [L, R, L, R...]
-        let mut payload = Vec::with_capacity(sample.data.len() * 3); // 3 bytes per 24-bit sample
+        let mut payload = Vec::with_capacity(sample.data.len() * L24_BYTES_PER_SAMPLE);
         self.write_audio_payload_into(sample, &mut payload)?;
 
         Ok(payload)
@@ -189,7 +287,7 @@ impl RtpPacketizer {
                 let sample_idx = ch_idx * frames + frame_idx;
                 if sample_idx < sample.data.len() {
                     let sample_f32 = sample.data[sample_idx].clamp(-1.0, 1.0);
-                    let sample_i32 = (sample_f32 * 8388607.0) as i32;
+                    let sample_i32 = (sample_f32 * L24_POSITIVE_SCALE) as i32;
                     let bytes = sample_i32.to_be_bytes();
                     payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte for 24-bit
                 }
@@ -255,6 +353,87 @@ mod tests {
             u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
             0xDEADBEEF
         );
+    }
+
+    #[test]
+    fn rtp_header_parses_serialized_header() {
+        let header = RtpHeader {
+            version: 2,
+            padding: false,
+            extension: false,
+            csrc_count: 0,
+            marker: true,
+            payload_type: 97,
+            sequence_number: 0x1234,
+            timestamp: 0x56789ABC,
+            ssrc: 0xDEADBEEF,
+        };
+
+        let parsed = RtpHeader::from_bytes(&header.to_bytes()).unwrap();
+
+        assert_eq!(parsed.version, 2);
+        assert!(parsed.marker);
+        assert_eq!(parsed.payload_type, 97);
+        assert_eq!(parsed.sequence_number, 0x1234);
+        assert_eq!(parsed.timestamp, 0x56789ABC);
+        assert_eq!(parsed.ssrc, 0xDEADBEEF);
+    }
+
+    #[test]
+    fn rtp_packet_parser_accepts_packetizer_bytes() {
+        let sample = AudioSample {
+            data: vec![0.5, -0.5, 0.25, -0.25],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 2,
+        };
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        let mut bytes = Vec::new();
+
+        packetizer
+            .write_packet_with_timestamp_into(&sample, 0xABCDEF01, &mut bytes)
+            .unwrap();
+
+        let parsed = RtpPacket::parse(&bytes).unwrap();
+
+        assert_eq!(parsed.header.version, 2);
+        assert_eq!(parsed.header.payload_type, 97);
+        assert_eq!(parsed.header.sequence_number, 0);
+        assert_eq!(parsed.header.timestamp, 0xABCDEF01);
+        assert_eq!(parsed.header.ssrc, 0x12345678);
+        assert_eq!(parsed.payload, bytes[RTP_FIXED_HEADER_LEN..]);
+    }
+
+    #[test]
+    fn rtp_packet_parser_rejects_short_packets() {
+        let result = RtpPacket::parse(&[0x80, 97, 0, 1]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rtp_packet_parser_rejects_non_version_two_packets() {
+        let mut bytes = [0u8; RTP_FIXED_HEADER_LEN];
+        bytes[0] = 0x40;
+
+        let result = RtpPacket::parse(&bytes);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rtp_packet_parser_rejects_unsupported_header_features() {
+        let mut padding = RtpHeader::new(97, 0x12345678).to_bytes();
+        padding[0] |= 0x20;
+        assert!(RtpPacket::parse(&padding).is_err());
+
+        let mut extension = RtpHeader::new(97, 0x12345678).to_bytes();
+        extension[0] |= 0x10;
+        assert!(RtpPacket::parse(&extension).is_err());
+
+        let mut csrc = RtpHeader::new(97, 0x12345678).to_bytes();
+        csrc[0] |= 0x01;
+        assert!(RtpPacket::parse(&csrc).is_err());
     }
 
     #[test]
@@ -403,6 +582,126 @@ mod tests {
     }
 
     #[test]
+    fn l24_payload_decoder_handles_canonical_boundaries() {
+        let payload = [
+            0x7F, 0xFF, 0xFF, // max positive
+            0x80, 0x00, 0x00, // max negative
+            0x00, 0x00, 0x00, // zero
+        ];
+        let mut decoded = Vec::new();
+
+        let frames = decode_l24_payload_interleaved(&payload, 1, &mut decoded).unwrap();
+
+        assert_eq!(frames, 3);
+        assert_close(decoded[0], 1.0);
+        assert_close(decoded[1], -1.0);
+        assert_close(decoded[2], 0.0);
+    }
+
+    #[test]
+    fn l24_payload_decoder_preserves_interleaved_order_from_packetizer() {
+        let sample = AudioSample {
+            // Planar input: left frame 0, left frame 1, right frame 0, right frame 1.
+            data: vec![0.5, -0.5, 0.25, -0.25],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 2,
+        };
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        let packet = packetizer.create_packet(&sample).unwrap();
+        let mut decoded = Vec::new();
+
+        let frames =
+            decode_l24_payload_interleaved(&packet.payload, sample.channels as u16, &mut decoded)
+                .unwrap();
+
+        assert_eq!(frames, 2);
+        assert_eq!(decoded.len(), 4);
+        assert_close(decoded[0], 0.5);
+        assert_close(decoded[1], 0.25);
+        assert_close(decoded[2], -0.5);
+        assert_close(decoded[3], -0.25);
+    }
+
+    #[test]
+    fn packetize_parse_decode_preserves_sine_continuity_across_packet_boundaries() {
+        let sample_rate = 48_000;
+        let channels = 2;
+        let frames_per_packet = 48;
+        let packet_count = 10;
+        let frequency_hz = 997.0;
+        let amplitude = 0.5;
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        let mut decoded_stream = Vec::new();
+        let mut expected_interleaved = Vec::new();
+
+        for packet_index in 0..packet_count {
+            let frame_offset = packet_index * frames_per_packet;
+            let packet_frames = (0..frames_per_packet)
+                .map(|frame| {
+                    sine_sample(frame_offset + frame, sample_rate, frequency_hz, amplitude)
+                })
+                .collect::<Vec<_>>();
+            let mut planar = packet_frames.clone();
+            planar.extend_from_slice(&packet_frames);
+
+            for sample in &packet_frames {
+                expected_interleaved.push(*sample);
+                expected_interleaved.push(*sample);
+            }
+
+            let sample = AudioSample {
+                data: planar,
+                channels,
+                sample_rate,
+                frames: frames_per_packet,
+            };
+            let mut bytes = Vec::new();
+            packetizer
+                .write_packet_into(&sample, &mut bytes)
+                .expect("packetizer should serialize sine packet");
+
+            let packet = RtpPacket::parse(&bytes).expect("serialized packet should parse");
+            let mut decoded_packet = Vec::new();
+            let frames = decode_l24_payload_interleaved(
+                &packet.payload,
+                channels as u16,
+                &mut decoded_packet,
+            )
+            .expect("L24 packet should decode");
+
+            assert_eq!(frames, frames_per_packet);
+            decoded_stream.extend(decoded_packet);
+        }
+
+        assert_eq!(decoded_stream.len(), expected_interleaved.len());
+        for (actual, expected) in decoded_stream.iter().zip(expected_interleaved.iter()) {
+            assert_close(*actual, *expected);
+        }
+
+        let max_jump = decoded_stream
+            .chunks_exact(channels as usize)
+            .map(|frame| frame[0])
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|window| (window[1] - window[0]).abs())
+            .fold(0.0f32, f32::max);
+
+        assert!(
+            max_jump < 0.07,
+            "decoded sine has an unexpected adjacent-frame jump: {max_jump}"
+        );
+    }
+
+    #[test]
+    fn l24_payload_decoder_rejects_invalid_payload_shape() {
+        let mut decoded = Vec::new();
+
+        assert!(decode_l24_payload_interleaved(&[0x00, 0x00], 1, &mut decoded).is_err());
+        assert!(decode_l24_payload_interleaved(&[0x00, 0x00, 0x00], 0, &mut decoded).is_err());
+    }
+
+    #[test]
     fn eight_channel_payload_is_frame_interleaved() {
         let packetizer = RtpPacketizer::new(97, 0);
         let sample_values = (1..=16)
@@ -427,8 +726,21 @@ mod tests {
     }
 
     fn pcm24_bytes(sample: f32) -> [u8; 3] {
-        let sample_i32 = (sample.clamp(-1.0, 1.0) * 8_388_607.0) as i32;
+        let sample_i32 = (sample.clamp(-1.0, 1.0) * L24_POSITIVE_SCALE) as i32;
         let bytes = sample_i32.to_be_bytes();
         [bytes[1], bytes[2], bytes[3]]
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        let tolerance = 2.0 / L24_POSITIVE_SCALE;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual {actual} expected {expected}"
+        );
+    }
+
+    fn sine_sample(frame: usize, sample_rate: u32, frequency_hz: f32, amplitude: f32) -> f32 {
+        (2.0 * std::f32::consts::PI * frequency_hz * frame as f32 / sample_rate as f32).sin()
+            * amplitude
     }
 }
