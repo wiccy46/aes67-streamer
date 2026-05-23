@@ -44,6 +44,7 @@ pub struct PlayerArgs {
     pub output: PlayerOutput,
     pub duration_seconds: Option<f64>,
     pub verbose: bool,
+    pub list_devices: bool,
 }
 
 pub fn parse_args() -> Result<StreamerArgs> {
@@ -234,6 +235,13 @@ fn player_cli() -> Command {
                 .value_parser(["cpal", "null"]),
         )
         .arg(
+            Arg::new("list-devices")
+                .short('L')
+                .long("list-devices")
+                .help("List audio output devices and exit")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("duration-seconds")
                 .long("duration-seconds")
                 .value_name("SECONDS")
@@ -303,13 +311,16 @@ fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
 }
 
 fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
+    let list_devices = matches.get_flag("list-devices");
     let sdp = cli_string(matches, "sdp");
     let address = cli_string(matches, "address");
     let port = cli_u16(matches, "port");
     let channels = cli_u16(matches, "channels");
     let payload_type = cli_u8(matches, "payload-type");
 
-    if sdp.is_some() {
+    if list_devices {
+        // Device listing is a local audio query and does not need receive stream metadata.
+    } else if sdp.is_some() {
         let conflicting_args = [
             ("address", address.is_some()),
             ("port", port.is_some()),
@@ -379,6 +390,7 @@ fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
         ),
         duration_seconds: matches.get_one::<f64>("duration-seconds").copied(),
         verbose: matches.get_flag("verbose"),
+        list_devices,
     })
 }
 
@@ -927,6 +939,19 @@ mod tests {
         assert!(parse_player_args_from(["aes67-player"]).is_err());
         assert!(parse_player_args_from(["aes67-player", "--address", "239.192.1.1"]).is_err());
         assert!(parse_player_args_from(["aes67-player", "--port", "5004"]).is_err());
+    }
+
+    #[test]
+    fn player_cli_list_devices_does_not_require_stream_args() {
+        let long_args = parse_player_args_from(["aes67-player", "--list-devices"])
+            .expect("device listing should not require stream args");
+        assert!(long_args.list_devices);
+        assert_eq!(long_args.address, None);
+        assert_eq!(long_args.port, None);
+
+        let short_args = parse_player_args_from(["aes67-player", "-L"])
+            .expect("short device listing should not require stream args");
+        assert!(short_args.list_devices);
     }
 
     #[test]

@@ -61,6 +61,18 @@ pub fn build_output(
     }
 }
 
+#[cfg(feature = "cpal-output")]
+pub fn list_output_devices() -> Result<String> {
+    cpal_backend::list_output_devices()
+}
+
+#[cfg(not(feature = "cpal-output"))]
+pub fn list_output_devices() -> Result<String> {
+    Err(anyhow!(
+        "CPAL output is not enabled in this build; rebuild with --features cpal-output to list audio devices"
+    ))
+}
+
 #[derive(Debug, Default)]
 pub struct NullOutput {
     stats: OutputStats,
@@ -109,6 +121,49 @@ mod cpal_backend {
     use ringbuf::{traits::*, HeapCons, HeapProd, HeapRb};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+
+    pub(super) fn list_output_devices() -> Result<String> {
+        let host = cpal::default_host();
+        let mut output = String::from("Audio output devices:\n");
+        let mut found = false;
+
+        for (index, device) in host
+            .output_devices()
+            .context("failed to query output devices")?
+            .enumerate()
+        {
+            found = true;
+            let name = device
+                .name()
+                .unwrap_or_else(|_| "unknown output device".to_string());
+            output.push_str(&format!("  [{index}] {name}\n"));
+
+            match device.supported_output_configs() {
+                Ok(configs) => {
+                    for config in configs {
+                        output.push_str(&format!(
+                            "      {}ch {:?} {}-{} Hz\n",
+                            config.channels(),
+                            config.sample_format(),
+                            config.min_sample_rate().0,
+                            config.max_sample_rate().0
+                        ));
+                    }
+                }
+                Err(error) => {
+                    output.push_str(&format!(
+                        "      failed to query supported configs: {error}\n"
+                    ));
+                }
+            }
+        }
+
+        if !found {
+            output.push_str("  no output devices found\n");
+        }
+
+        Ok(output)
+    }
 
     pub(super) struct CpalOutput {
         producer: HeapProd<f32>,

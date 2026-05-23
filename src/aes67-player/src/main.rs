@@ -5,7 +5,7 @@ mod output;
 mod player;
 mod runtime;
 
-use output::OutputMode;
+use output::{list_output_devices, OutputMode};
 use player::{Aes67Player, PlayerConfig};
 use runtime::RuntimeSupervisor;
 
@@ -26,6 +26,19 @@ async fn main() {
     let default_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
         .init();
+
+    if args.list_devices {
+        match list_output_devices() {
+            Ok(devices) => {
+                print!("{devices}");
+                process::exit(0);
+            }
+            Err(e) => {
+                log::error!("Failed to list audio devices: {e:#}");
+                process::exit(1);
+            }
+        }
+    }
 
     let player_config = PlayerConfig {
         output_mode: OutputMode::from(args.output),
