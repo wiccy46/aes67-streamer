@@ -2,8 +2,8 @@ use anyhow::{anyhow, Context, Result};
 use config::PlayerArgs;
 use network::{
     decode_l24_payload_interleaved, parse_sdp_file, parse_stream_address, resolve_interface_ip,
-    Aes67SessionDescription, AudioEncoding, JitterBufferConfig, PlayoutPacket, RtpJitterBuffer,
-    RtpReceiveSocket, RtpReceiveSocketConfig,
+    Aes67SessionDescription, AudioEncoding, JitterBufferConfig, JitterBufferStats, PlayoutPacket,
+    RtpJitterBuffer, RtpReceiveSocket, RtpReceiveSocketConfig,
 };
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -222,16 +222,29 @@ impl Aes67Player {
         log::info!("  Packets accepted: {}", self.stats.packets_accepted);
         log::info!("  Packets decoded: {}", self.stats.packets_decoded);
         log::info!("  Frames decoded: {}", self.stats.frames_decoded);
+        log::info!("  RTP silence frames: {}", self.stats.silence_frames);
         log::info!("  Jitter lost packets: {}", jitter_stats.lost_packets);
         log::info!("  Jitter late packets: {}", jitter_stats.late_packets);
         log::info!(
             "  Jitter duplicate packets: {}",
             jitter_stats.duplicate_packets
         );
+        log::info!(
+            "  Jitter dropped-full packets: {}",
+            jitter_stats.dropped_full_packets
+        );
+        log::info!(
+            "  Jitter timestamp discontinuities: {}",
+            jitter_stats.timestamp_discontinuities
+        );
         log::info!("  Output frames: {}", output_stats.frames_written);
         log::info!("  Output samples: {}", output_stats.samples_written);
         log::info!("  Output silence frames: {}", output_stats.silence_frames);
         log::info!("  Output dropped samples: {}", output_stats.dropped_samples);
+
+        for warning in playback_warning_messages(self.stats, jitter_stats, output_stats) {
+            log::warn!("{warning}");
+        }
 
         if self.config.verbose {
             log::debug!("  Jitter stats: {jitter_stats:?}");
@@ -280,6 +293,54 @@ fn preroll_packets(latency_ms: u32, packet_time_ms: u32) -> usize {
 fn jitter_capacity_packets(session: &Aes67SessionDescription) -> usize {
     let packets_per_second = 1000usize.div_ceil(session.packet_time_ms as usize);
     packets_per_second.max(128)
+}
+
+fn playback_warning_messages(
+    player_stats: PlayerStats,
+    jitter_stats: JitterBufferStats,
+    output_stats: OutputStats,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if jitter_stats.late_packets > 0
+        || jitter_stats.lost_packets > 0
+        || player_stats.silence_frames > 0
+    {
+        warnings.push(format!(
+            "RTP packets fell behind playout: late_packets={}, lost_packets={}, inserted_silence_frames={}",
+            jitter_stats.late_packets, jitter_stats.lost_packets, player_stats.silence_frames
+        ));
+    }
+
+    if jitter_stats.dropped_full_packets > 0 {
+        warnings.push(format!(
+            "RTP jitter buffer dropped {} packets because the buffer was full",
+            jitter_stats.dropped_full_packets
+        ));
+    }
+
+    if jitter_stats.duplicate_packets > 0 {
+        warnings.push(format!(
+            "RTP stream contained {} duplicate packets",
+            jitter_stats.duplicate_packets
+        ));
+    }
+
+    if output_stats.silence_frames > 0 {
+        warnings.push(format!(
+            "Audio output inserted {} silence frames",
+            output_stats.silence_frames
+        ));
+    }
+
+    if output_stats.dropped_samples > 0 {
+        warnings.push(format!(
+            "Audio output dropped {} samples",
+            output_stats.dropped_samples
+        ));
+    }
+
+    warnings
 }
 
 #[cfg(test)]
@@ -334,5 +395,44 @@ mod tests {
         assert_eq!(preroll_packets(50, 1), 50);
         assert_eq!(preroll_packets(51, 2), 26);
         assert_eq!(preroll_packets(1, 2), 1);
+    }
+
+    #[test]
+    fn playback_warning_messages_report_smoothness_problems() {
+        let warnings = playback_warning_messages(
+            PlayerStats {
+                silence_frames: 96,
+                ..PlayerStats::default()
+            },
+            JitterBufferStats {
+                late_packets: 2,
+                lost_packets: 1,
+                dropped_full_packets: 3,
+                duplicate_packets: 4,
+                ..JitterBufferStats::default()
+            },
+            OutputStats {
+                silence_frames: 48,
+                dropped_samples: 6,
+                ..OutputStats::default()
+            },
+        );
+
+        assert_eq!(warnings.len(), 5);
+        assert!(warnings[0].contains("fell behind playout"));
+        assert!(warnings[1].contains("buffer was full"));
+        assert!(warnings[2].contains("duplicate packets"));
+        assert!(warnings[3].contains("inserted 48 silence frames"));
+        assert!(warnings[4].contains("dropped 6 samples"));
+    }
+
+    #[test]
+    fn playback_warning_messages_are_empty_for_clean_playout() {
+        assert!(playback_warning_messages(
+            PlayerStats::default(),
+            JitterBufferStats::default(),
+            OutputStats::default()
+        )
+        .is_empty());
     }
 }

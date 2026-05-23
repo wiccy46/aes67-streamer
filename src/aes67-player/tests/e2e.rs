@@ -73,9 +73,14 @@ async fn streamer_to_player_null_output_decodes_loopback_rtp() -> Result<()> {
     assert_eq!(summary_value(&player_logs, "Packets accepted")?, 100);
     assert_eq!(summary_value(&player_logs, "Packets decoded")?, 100);
     assert_eq!(summary_value(&player_logs, "Frames decoded")?, 4800);
+    assert_eq!(summary_value(&player_logs, "RTP silence frames")?, 0);
     assert_eq!(summary_value(&player_logs, "Jitter lost packets")?, 0);
     assert_eq!(summary_value(&player_logs, "Jitter late packets")?, 0);
     assert_eq!(summary_value(&player_logs, "Jitter duplicate packets")?, 0);
+    assert_eq!(
+        summary_value(&player_logs, "Jitter dropped-full packets")?,
+        0
+    );
     assert_eq!(summary_value(&player_logs, "Output frames")?, 4800);
     assert_eq!(summary_value(&player_logs, "Output samples")?, 9600);
     assert_eq!(summary_value(&player_logs, "Output silence frames")?, 0);
