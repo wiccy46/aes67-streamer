@@ -154,14 +154,7 @@ impl Aes67Player {
                 | network::InsertResult::DroppedFull => {}
             }
 
-            if !self.started_playout && self.jitter.len() >= self.preroll_packets {
-                self.started_playout = true;
-                self.output.start()?;
-                log::info!(
-                    "Starting playout after preroll of {} packets",
-                    self.preroll_packets
-                );
-            }
+            self.start_playout_if_prerolled(&mut decode_buffer)?;
 
             if self.started_playout {
                 self.decode_available_packets(&mut decode_buffer)?;
@@ -204,6 +197,20 @@ impl Aes67Player {
                 }
                 None => break,
             }
+        }
+
+        Ok(())
+    }
+
+    fn start_playout_if_prerolled(&mut self, decode_buffer: &mut Vec<f32>) -> Result<()> {
+        if !self.started_playout && self.jitter.len() >= self.preroll_packets {
+            self.decode_available_packets(decode_buffer)?;
+            self.started_playout = true;
+            self.output.start()?;
+            log::info!(
+                "Starting playout after preroll of {} packets",
+                self.preroll_packets
+            );
         }
 
         Ok(())
@@ -369,6 +376,8 @@ fn playback_warning_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use network::{RtpHeader, RtpPacket};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn basic_cli_args_build_default_l24_session() {
@@ -420,6 +429,32 @@ mod tests {
         assert_eq!(preroll_packets(1, 2), 1);
     }
 
+    #[tokio::test]
+    async fn preroll_packets_are_written_before_output_starts() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut player = test_player_with_output(Box::new(RecordingOutput {
+            events: events.clone(),
+        }));
+
+        player.jitter.insert(test_rtp_packet(0, 0)).unwrap();
+        player.jitter.insert(test_rtp_packet(1, 48)).unwrap();
+
+        let mut decode_buffer = Vec::new();
+        player
+            .start_playout_if_prerolled(&mut decode_buffer)
+            .unwrap();
+
+        let events = events.lock().unwrap().clone();
+        assert_eq!(
+            events.as_slice(),
+            ["write:96", "write:96", "start"],
+            "preroll audio should be queued before CPAL starts"
+        );
+        assert!(player.started_playout);
+        assert_eq!(player.stats.packets_decoded, 2);
+        assert_eq!(player.output.stats().frames_written, 96);
+    }
+
     #[test]
     fn playback_warning_messages_report_smoothness_problems() {
         let warnings = playback_warning_messages(
@@ -457,5 +492,107 @@ mod tests {
             OutputStats::default()
         )
         .is_empty());
+    }
+
+    fn test_player_with_output(output: Box<dyn AudioOutput + Send>) -> Aes67Player {
+        let session = Aes67SessionDescription {
+            session_name: None,
+            address: Ipv4Addr::LOCALHOST,
+            ttl: None,
+            port: 0,
+            payload_type: 97,
+            encoding: AudioEncoding::L24,
+            sample_rate: 48_000,
+            channels: 2,
+            packet_time_ms: 1,
+            ts_refclk: None,
+            mediaclk: None,
+        };
+        let receiver = RtpReceiveSocket::new(RtpReceiveSocketConfig::new(
+            Ipv4Addr::LOCALHOST,
+            0,
+            Ipv4Addr::LOCALHOST,
+        ))
+        .unwrap();
+        let jitter = RtpJitterBuffer::new(JitterBufferConfig {
+            payload_type: session.payload_type,
+            ssrc: None,
+            frames_per_packet: session.frames_per_packet(),
+            capacity_packets: 8,
+        })
+        .unwrap();
+
+        Aes67Player {
+            receiver,
+            jitter,
+            output,
+            session,
+            config: PlayerConfig {
+                output_device: None,
+                latency_ms: 2,
+                duration: None,
+                verbose: false,
+                test_null_output: true,
+            },
+            stats: PlayerStats::default(),
+            started_playout: false,
+            preroll_packets: 2,
+        }
+    }
+
+    fn test_rtp_packet(sequence_number: u16, timestamp: u32) -> RtpPacket {
+        let mut header = RtpHeader::new(97, 0x12345678);
+        header.sequence_number = sequence_number;
+        header.timestamp = timestamp;
+
+        RtpPacket {
+            header,
+            payload: vec![0; 48 * 2 * 3],
+        }
+    }
+
+    struct RecordingOutput {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl AudioOutput for RecordingOutput {
+        fn start(&mut self) -> Result<()> {
+            self.events.lock().unwrap().push("start".to_string());
+            Ok(())
+        }
+
+        fn write_interleaved(&mut self, samples: &[f32], _channels: u16) -> Result<usize> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("write:{}", samples.len()));
+            Ok(samples.len() / 2)
+        }
+
+        fn write_silence(&mut self, frames: u32, _channels: u16) -> Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("silence:{frames}"));
+            Ok(())
+        }
+
+        fn stats(&self) -> OutputStats {
+            let frames_written = self
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|event| event.strip_prefix("write:"))
+                .map(|samples| samples.parse::<u64>().unwrap() / 2)
+                .sum();
+
+            OutputStats {
+                frames_written,
+                samples_written: frames_written * 2,
+                silence_frames: 0,
+                dropped_samples: 0,
+            }
+        }
     }
 }
