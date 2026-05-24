@@ -1,10 +1,12 @@
-# AES67 Audio Streamer
+# AES67 Streamer and Player
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/your-org/aes67-streamer)
 [![AES67 Compliant](https://img.shields.io/badge/AES67-compliant-blue)](https://www.aes.org/publications/standards/search.cfm?docID=96)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-A cross-platform CLI tool for sending AES67-oriented RTP audio streams over IP networks.
+CLI tools for sending and receiving AES67-oriented RTP audio streams over IP
+networks. `aes67-streamer` sends 48 kHz L24 RTP audio, and `aes67-player`
+receives AES67 RTP into CPAL audio output.
 
 ## Features
 
@@ -19,6 +21,13 @@ A cross-platform CLI tool for sending AES67-oriented RTP audio streams over IP n
 - **RTP over UDP**: RFC 3550 compliant with proper sequence numbering
 - **Multicast**: Standard administratively scoped multicast addresses
 - **Packet Timing Metrics**: Reports packet rate, late packets, max lateness, and average late-packet lateness
+
+### AES67 Player
+- **CPAL Playback**: Native audio output through CPAL on Linux and macOS first
+- **Basic Receive Mode**: Receive with address, port, interface, payload type, and channel count
+- **SDP Receive Mode**: Parse stream address, port, payload type, L24 format, packet time, and clock metadata from SDP
+- **Device Selection**: List devices with `--list-devices` / `-L` and select one with `--output-device` / `-o`
+- **Dropout Visibility**: Final summary and warning logs for RTP silence, jitter loss, late packets, discontinuities, output silence, and output drops
 
 ### PTP Synchronization
 - **IEEE 1588-2008 PTP Messages**: Announce, Sync, FollowUp, DelayReq, and DelayResp handling
@@ -37,7 +46,8 @@ cd aes67-streamer
 # Build the project
 cargo build --release
 
-# The binary will be available at target/release/aes67-streamer
+# Binaries will be available at target/release/aes67-streamer
+# and target/release/aes67-player.
 ```
 
 ### Basic Usage
@@ -49,6 +59,57 @@ cargo build --release
   --address 239.69.83.1 \
   --port 5004 \
   --interface 192.168.1.100
+```
+
+### Player Usage
+
+List audio output devices:
+
+```bash
+./aes67-player --list-devices
+./aes67-player -L
+```
+
+Receive a stream with basic CLI arguments:
+
+```bash
+./aes67-player \
+  --address 239.69.83.1 \
+  --port 5004 \
+  --interface 192.168.1.100
+```
+
+Receive from an SDP file:
+
+```bash
+./aes67-player \
+  --sdp stream.sdp \
+  --interface 192.168.1.100
+```
+
+Select a CPAL output device by index or name from `-L`:
+
+```bash
+./aes67-player --sdp stream.sdp --output-device 0
+./aes67-player --sdp stream.sdp -o "Built-in Audio"
+```
+
+Set initial playout latency:
+
+```bash
+./aes67-player --sdp stream.sdp --latency-ms 75
+```
+
+The player logs a final summary when it exits. Clean playback should report zero
+for RTP silence frames, jitter lost/late/dropped-full packets, jitter timestamp
+discontinuities, output silence frames, and output dropped samples. Warning logs
+from the player should be treated as playback smoothness issues to investigate.
+
+On Linux, CPAL's ALSA backend requires the ALSA development package at build
+time. On Fedora:
+
+```bash
+sudo dnf install alsa-lib-devel
 ```
 
 ### Advanced Usage
@@ -159,6 +220,15 @@ bash scripts/e2e_loopback.sh
 # Run optional multicast validation on a real local interface
 AES67_E2E_INTERFACE=192.168.1.100 bash scripts/e2e_multicast.sh
 
+# Run player null-output E2E tests
+cargo test -p aes67-player --test e2e
+
+# Run a longer player receive soak without an audio device
+bash scripts/player_soak_loopback.sh
+
+# Run real CPAL playback validation on a clocked output device
+bash scripts/player_cpal_loopback.sh
+
 # Run a longer local release-candidate soak test
 bash scripts/soak_loopback.sh
 
@@ -202,6 +272,23 @@ tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 | `--loop` | Repeat the audio file instead of stopping at end-of-file | `false` | - |
 | `--verbose` | Enable verbose logging | `false` | - |
 
+### Player Command Line Options
+
+| Option | Description | Default | Example |
+|--------|-------------|---------|---------|
+| `--sdp` | SDP file describing the AES67 stream | None | `stream.sdp` |
+| `--address` / `-a` | RTP destination address to receive in basic CLI mode | Required unless `--sdp` is set | `239.69.83.1` |
+| `--port` / `-p` | RTP UDP port to receive in basic CLI mode | Required unless `--sdp` is set | `5004` |
+| `--interface` / `-i` | Network interface name or IPv4 address | `127.0.0.1` | `192.168.1.100` |
+| `--sender` | Optional sender IPv4 address filter | None | `192.168.1.20` |
+| `--channels` | Channel count for basic CLI mode | `2` | `8` |
+| `--payload-type` | RTP payload type for basic CLI mode | `97` | `101` |
+| `--latency-ms` | Initial playout latency | `50` | `75` |
+| `--output-device` / `-o` | CPAL output device index or name from `--list-devices` | Default output device | `0` |
+| `--list-devices` / `-L` | List audio output devices and exit | - | - |
+| `--duration-seconds` | Stop receiving after a bounded duration | Unlimited | `10` |
+| `--verbose` / `-v` | Enable verbose logging | `false` | - |
+
 ### AES67 Defaults
 - **Sample Rate**: 48kHz (AES67 standard)
 - **Packet Time**: 1ms (48 samples per packet)
@@ -218,8 +305,31 @@ Before tagging a release candidate, run:
 
 ```bash
 cargo test --workspace
+cargo test -p aes67-player
+cargo check --release -p aes67-player
+cargo build --release -p aes67-player
 bash scripts/e2e_loopback.sh
+bash scripts/player_soak_loopback.sh
 bash scripts/soak_loopback.sh
+```
+
+Check the player release CLI surface:
+
+```bash
+cargo run --release -p aes67-player -- --help
+cargo run --release -p aes67-player -- --version
+cargo run --release -p aes67-player -- -L
+target/release/aes67-player --address 127.0.0.1 --port 5004 --test-null-output
+```
+
+The final command should fail in release builds because the internal null output
+is test-only.
+
+For audible playback validation, choose a real clocked output device from `-L`
+and run:
+
+```bash
+AES67_PLAYER_OUTPUT_DEVICE=<index-or-name> bash scripts/player_cpal_loopback.sh
 ```
 
 On a multicast-capable interface, also run:
@@ -236,6 +346,7 @@ VLC, RAVENNA Stream Monitor, Dante AES67 mode, and Wireshark. Use
 ```
 src/
 ├── aes67-streamer/     # Main binary crate
+├── aes67-player/       # AES67 RTP receiver and CPAL player
 ├── audio/              # Audio processing and samples vector
 ├── network/            # RTP and UDP multicast
 ├── ptp/                # IEEE 1588 PTP synchronization
@@ -272,6 +383,42 @@ tcpdump -i eth0 port 319
 --verbose
 ```
 
+**PTP loop reports `Permission denied` on Linux**
+
+The streamer PTP client uses the standard PTP UDP ports `319` and `320`.
+Binding ports below `1024` normally requires elevated privileges on Linux. The
+RTP audio stream may still run, but PTP will log an error similar to:
+
+```text
+PTP loop error: Permission denied (os error 13)
+```
+
+Build the binary, grant the required network capabilities, and run the binary
+directly:
+
+```bash
+cargo build -p aes67-streamer
+sudo setcap cap_net_bind_service,cap_net_admin+ep target/debug/aes67-streamer
+
+target/debug/aes67-streamer \
+  --file src/aes67-streamer/tests/resources/audio-formats/tone.wav \
+  --address 127.0.0.1 \
+  --interface 127.0.0.1 \
+  --port 55210 \
+  --duration-seconds 10
+```
+
+For release builds:
+
+```bash
+cargo build --release -p aes67-streamer
+sudo setcap cap_net_bind_service,cap_net_admin+ep target/release/aes67-streamer
+```
+
+`cap_net_bind_service` allows binding the PTP ports. `cap_net_admin` may be
+needed for DSCP/TOS socket options. Reapply the capabilities after rebuilding
+the binary.
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0
@@ -279,9 +426,11 @@ This project is licensed under the GNU General Public License v3.0
 ## Compliance Target
 
 This project targets the core pieces required for a first single-stream AES67
-sender release:
+sender/player release:
 
 - **AES67-style RTP media**: 48 kHz, 24-bit L24 payloads over RTP.
+- **AES67-style RTP receive**: Single-stream L24 receive, jitter buffering,
+  SDP/basic-CLI configuration, and CPAL output.
 - **RFC 3550**: RTP sequence numbers, timestamps, payload type, and SSRC.
 - **IEEE 1588-2008 PTPv2**: Basic message handling, BMCA selection, delay
   request/response, and local master fallback.
@@ -289,4 +438,5 @@ sender release:
 
 The first release does not claim hard real-time scheduling, hardware clock
 discipline, kernel-bypass networking, multiple simultaneous streams, or full
-ST 2110 system compliance.
+ST 2110 system compliance. Player playout uses the local audio device clock in
+this release; PTP-locked playout is future work.
