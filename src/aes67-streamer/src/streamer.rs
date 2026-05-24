@@ -241,26 +241,9 @@ impl Aes67Streamer {
                         .process(&mut sample)
                         .context("Failed to process audio sample")?;
 
-                    // PTP is handled in background task now
-
-                    // Write RTP packet with PTP timestamp into the reusable send buffer.
-                    if let Ok(ptp_timestamp) = self
-                        .ptp_client
-                        .rtp_timestamp(self.config.target_sample_rate)
-                    {
-                        self.rtp_packetizer
-                            .write_packet_with_timestamp_into(
-                                &sample,
-                                ptp_timestamp,
-                                &mut rtp_packet_buffer,
-                            )
-                            .context("Failed to create RTP packet with PTP timestamp")?;
-                    } else {
-                        // Fallback to regular timestamp if PTP fails
-                        self.rtp_packetizer
-                            .write_packet_into(&sample, &mut rtp_packet_buffer)
-                            .context("Failed to create RTP packet")?;
-                    }
+                    self.rtp_packetizer
+                        .write_packet_into(&sample, &mut rtp_packet_buffer)
+                        .context("Failed to create RTP packet")?;
 
                     // Send packet
                     let sent = self

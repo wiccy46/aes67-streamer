@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use audio::AudioSample;
 
 const RTP_FIXED_HEADER_LEN: usize = 12;
@@ -507,6 +507,29 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(writer.sequence_number(), 1);
         assert_eq!(writer.samples_processed(), 2);
+    }
+
+    #[test]
+    fn packet_bytes_writer_advances_timestamps_by_sample_frames() {
+        let sample = AudioSample {
+            data: vec![0.5, -0.5, 0.25, -0.25],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 2,
+        };
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        packetizer.set_base_timestamp(0xABCDEF00);
+        let mut bytes = Vec::new();
+
+        packetizer.write_packet_into(&sample, &mut bytes).unwrap();
+        let first = RtpPacket::parse(&bytes).unwrap();
+
+        packetizer.write_packet_into(&sample, &mut bytes).unwrap();
+        let second = RtpPacket::parse(&bytes).unwrap();
+
+        assert_eq!(first.header.timestamp, 0xABCDEF00);
+        assert_eq!(second.header.timestamp, 0xABCDEF02);
+        assert_eq!(second.header.sequence_number, 1);
     }
 
     #[test]
