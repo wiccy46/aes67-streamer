@@ -42,6 +42,7 @@ pub struct PlayerArgs {
     pub payload_type: Option<u8>,
     pub latency_ms: u32,
     pub output: PlayerOutput,
+    pub output_device: Option<String>,
     pub duration_seconds: Option<f64>,
     pub verbose: bool,
     pub list_devices: bool,
@@ -235,6 +236,13 @@ fn player_cli() -> Command {
                 .value_parser(["cpal", "null"]),
         )
         .arg(
+            Arg::new("output-device")
+                .short('o')
+                .long("output-device")
+                .value_name("DEVICE")
+                .help("CPAL output device index from --list-devices or device name"),
+        )
+        .arg(
             Arg::new("list-devices")
                 .short('L')
                 .long("list-devices")
@@ -388,6 +396,7 @@ fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
                 .get_one::<String>("output")
                 .expect("clap should supply output default"),
         ),
+        output_device: cli_string(matches, "output-device"),
         duration_seconds: matches.get_one::<f64>("duration-seconds").copied(),
         verbose: matches.get_flag("verbose"),
         list_devices,
@@ -925,6 +934,8 @@ mod tests {
             "75",
             "--output",
             "cpal",
+            "-o",
+            "Studio Monitor",
         ])
         .expect("explicit player format should parse");
 
@@ -932,6 +943,7 @@ mod tests {
         assert_eq!(args.payload_type, Some(101));
         assert_eq!(args.latency_ms, 75);
         assert_eq!(args.output, PlayerOutput::Cpal);
+        assert_eq!(args.output_device.as_deref(), Some("Studio Monitor"));
     }
 
     #[test]

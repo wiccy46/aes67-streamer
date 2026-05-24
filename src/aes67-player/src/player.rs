@@ -17,6 +17,7 @@ const RTP_RECEIVE_BUFFER_BYTES: usize = 2048;
 #[derive(Debug, Clone)]
 pub struct PlayerConfig {
     pub output_mode: OutputMode,
+    pub output_device: Option<String>,
     pub latency_ms: u32,
     pub duration: Option<Duration>,
     pub verbose: bool,
@@ -50,6 +51,7 @@ impl Aes67Player {
             session.sample_rate,
             session.channels,
             config.latency_ms,
+            config.output_device.as_deref(),
         )?;
         let interface = resolve_interface_ip(args.interface.as_deref().unwrap_or("127.0.0.1"))
             .context("Failed to resolve receive interface")?;
