@@ -25,6 +25,18 @@ async fn sender_filter_accepts_matching_streamer_address() -> Result<()> {
     run_loopback_receive_test(ReceiveMode::SenderFilter).await
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn player_stops_gracefully_on_sigterm() -> Result<()> {
+    run_shutdown_signal_test("-TERM", "Received SIGTERM").await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn player_stops_gracefully_on_sigint() -> Result<()> {
+    run_shutdown_signal_test("-INT", "Received Ctrl-C").await
+}
+
 #[tokio::test]
 async fn sender_filter_rejects_non_matching_streamer_address() -> Result<()> {
     let player_binary = player_binary_path();
@@ -93,6 +105,97 @@ async fn sender_filter_rejects_non_matching_streamer_address() -> Result<()> {
         player_logs.contains("no RTP audio packets were decoded"),
         "player should report that no packets were decoded\n{player_logs}"
     );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn run_shutdown_signal_test(signal: &str, expected_signal_log: &str) -> Result<()> {
+    let player_binary = player_binary_path();
+    let streamer_binary = streamer_binary_path()?;
+    let audio_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../aes67-streamer/tests/resources/audio-formats/tone.wav")
+        .canonicalize()
+        .context("failed to locate loopback test audio file")?;
+    let (address, port) = loopback_multicast_endpoint();
+
+    let player = tokio::process::Command::new(player_binary)
+        .kill_on_drop(true)
+        .arg("--address")
+        .arg(&address)
+        .arg("--port")
+        .arg(&port)
+        .arg("--interface")
+        .arg("127.0.0.1")
+        .arg("--test-null-output")
+        .arg("--latency-ms")
+        .arg("10")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to start aes67-player")?;
+
+    time::sleep(Duration::from_millis(100)).await;
+
+    let mut streamer = tokio::process::Command::new(streamer_binary)
+        .kill_on_drop(true)
+        .arg("--file")
+        .arg(audio_file)
+        .arg("--address")
+        .arg(&address)
+        .arg("--port")
+        .arg(&port)
+        .arg("--interface")
+        .arg("127.0.0.1")
+        .spawn()
+        .context("failed to start aes67-streamer")?;
+
+    let streamer_status = time::timeout(Duration::from_secs(5), streamer.wait())
+        .await
+        .context("timed out waiting for streamer")??;
+    assert!(
+        streamer_status.success(),
+        "aes67-streamer exited with {streamer_status}"
+    );
+
+    let player_id = player.id().context("player process should have an id")?;
+    let signal_status = tokio::process::Command::new("kill")
+        .arg(signal)
+        .arg(player_id.to_string())
+        .status()
+        .await
+        .with_context(|| format!("failed to send {signal} to player"))?;
+    assert!(
+        signal_status.success(),
+        "kill {signal} failed with {signal_status}"
+    );
+
+    let player_output = time::timeout(Duration::from_secs(5), player.wait_with_output())
+        .await
+        .context("timed out waiting for player")??;
+    let player_logs = process_output_text(&player_output);
+
+    assert!(
+        player_output.status.success(),
+        "aes67-player exited with {}\n{}",
+        player_output.status,
+        player_logs
+    );
+    assert!(
+        player_logs.contains(expected_signal_log),
+        "player should log {expected_signal_log:?}\n{player_logs}"
+    );
+    assert!(
+        player_logs.contains("Stop reason: shutdown requested"),
+        "player should summarize shutdown reason\n{player_logs}"
+    );
+    assert!(
+        summary_value(&player_logs, "Packets decoded")? > 0,
+        "player should decode RTP before shutdown\n{player_logs}"
+    );
+    assert_eq!(summary_value(&player_logs, "RTP silence frames")?, 0);
+    assert_eq!(summary_value(&player_logs, "Jitter lost packets")?, 0);
+    assert_eq!(summary_value(&player_logs, "Output dropped samples")?, 0);
 
     Ok(())
 }
