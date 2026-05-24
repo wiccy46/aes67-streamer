@@ -15,6 +15,7 @@ bash scripts/e2e_loopback.sh
 | Media loopback | `bash scripts/e2e_loopback.sh` | Full streamer-to-ffmpeg RTP loopback with decoded WAV validation | Yes |
 | Multicast validation | `AES67_E2E_INTERFACE=<local-ip> bash scripts/e2e_multicast.sh` | Opt-in multicast group join and receive validation on a real interface | No |
 | Player null-output E2E | `cargo test -p aes67-player --test e2e` | Streamer-to-player RTP validation without requiring an audio device | Yes |
+| Player null-output soak | `bash scripts/player_soak_loopback.sh` | Longer streamer-to-player RTP receive soak without requiring an audio device | No |
 | Player CPAL loopback | `bash scripts/player_cpal_loopback.sh` | Streamer-to-player validation using real CPAL audio output | No |
 | Soak validation | `bash scripts/soak_loopback.sh` | Longer local release-candidate run using the media loopback path | No |
 | Receiver compatibility | `tests/receiver-compatibility.md` | Manual/pro-tool matrix for VLC, RAVENNA Stream Monitor, Dante AES67 mode, and Wireshark | No |
@@ -96,6 +97,18 @@ silence frames, jitter lost/late/dropped-full packets, timestamp
 discontinuities, output silence frames, and output dropped samples. Any warning
 line from the player should be treated as a dropout or smoothness issue to
 investigate before release.
+
+For longer CI-safe receive validation, run the player soak loopback:
+
+```bash
+bash scripts/player_soak_loopback.sh
+```
+
+The default duration is 60 seconds. To change it:
+
+```bash
+AES67_PLAYER_SOAK_DURATION_SECONDS=300 bash scripts/player_soak_loopback.sh
+```
 
 ## Optional Multicast E2E
 
