@@ -42,6 +42,7 @@ async fn main() {
 
     let player_config = PlayerConfig {
         output_mode: OutputMode::from(args.output),
+        output_device: args.output_device.clone(),
         latency_ms: args.latency_ms,
         duration: args.duration_seconds.map(Duration::from_secs_f64),
         verbose: args.verbose,

@@ -42,9 +42,10 @@ pub fn build_output(
     sample_rate: u32,
     channels: u16,
     latency_ms: u32,
+    output_device: Option<&str>,
 ) -> Result<Box<dyn AudioOutput + Send>> {
     #[cfg(not(feature = "cpal-output"))]
-    let _ = (sample_rate, channels, latency_ms);
+    let _ = (sample_rate, channels, latency_ms, output_device);
 
     match mode {
         OutputMode::Null => Ok(Box::new(NullOutput::default())),
@@ -53,6 +54,7 @@ pub fn build_output(
             sample_rate,
             channels,
             latency_ms,
+            output_device,
         )?)),
         #[cfg(not(feature = "cpal-output"))]
         OutputMode::Cpal => Err(anyhow!(
@@ -174,7 +176,12 @@ mod cpal_backend {
     }
 
     impl CpalOutput {
-        fn new(sample_rate: u32, channels: u16, latency_ms: u32) -> Result<Self> {
+        fn new(
+            sample_rate: u32,
+            channels: u16,
+            latency_ms: u32,
+            output_device: Option<&str>,
+        ) -> Result<Self> {
             if sample_rate == 0 {
                 return Err(anyhow!("sample rate must be greater than zero"));
             }
@@ -183,9 +190,7 @@ mod cpal_backend {
             }
 
             let host = cpal::default_host();
-            let device = host
-                .default_output_device()
-                .ok_or_else(|| anyhow!("no default output device is available"))?;
+            let device = select_output_device(&host, output_device)?;
             let device_name = device
                 .name()
                 .unwrap_or_else(|_| "unknown output device".to_string());
@@ -221,6 +226,67 @@ mod cpal_backend {
                 channels,
                 started: false,
             })
+        }
+    }
+
+    fn select_output_device(
+        host: &cpal::Host,
+        output_device: Option<&str>,
+    ) -> Result<cpal::Device> {
+        let Some(selector) = output_device
+            .map(str::trim)
+            .filter(|selector| !selector.is_empty())
+        else {
+            return host
+                .default_output_device()
+                .ok_or_else(|| anyhow!("no default output device is available"));
+        };
+
+        let devices = host
+            .output_devices()
+            .context("failed to query output devices")?
+            .enumerate()
+            .map(|(index, device)| {
+                let name = device
+                    .name()
+                    .unwrap_or_else(|_| "unknown output device".to_string());
+                (index, name, device)
+            })
+            .collect::<Vec<_>>();
+
+        if let Ok(index) = selector.parse::<usize>() {
+            return devices
+                .into_iter()
+                .find_map(|(device_index, _, device)| (device_index == index).then_some(device))
+                .ok_or_else(|| anyhow!("no output device found at index {index}"));
+        }
+
+        let exact_match = devices
+            .iter()
+            .find(|(_, name, _)| name == selector)
+            .map(|(_, _, device)| device.clone());
+        if let Some(device) = exact_match {
+            return Ok(device);
+        }
+
+        let selector_lower = selector.to_lowercase();
+        let mut partial_matches = devices
+            .iter()
+            .filter(|(_, name, _)| name.to_lowercase().contains(&selector_lower))
+            .map(|(_, name, device)| (name.clone(), device.clone()))
+            .collect::<Vec<_>>();
+
+        match partial_matches.len() {
+            1 => Ok(partial_matches.remove(0).1),
+            0 => Err(anyhow!("no output device found matching '{selector}'")),
+            _ => Err(anyhow!(
+                "output device selector '{selector}' is ambiguous: {}",
+                partial_matches
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         }
     }
 
