@@ -10,20 +10,21 @@ receives AES67 RTP into CPAL audio output.
 
 ## Features
 
-### Audio Processing
+### Audio Handling for File Streaming
 - **Multi-format Support**: WAV, FLAC, MP3, and AIFF via [Symphonia](https://github.com/pdeljanov/Symphonia)
-- **Sample Rate Conversion**: High-quality resampling with [Rubato](https://github.com/HEnquist/rubato)
-- **Release Target**: Single stream with 1-8 channels
+- **Sample Rate Conversion**: Resampling with [Rubato](https://github.com/HEnquist/rubato)
+- **Release Target**: Single stream with 1-8 channels (Multi-stream support to come in future releases)
 - **Real-time Processing**: Node-based audio pipeline with gain control
 
 ### Network Streaming
 - **AES67-Oriented RTP**: 48 kHz, 24-bit L24 RTP streaming with generated SDP
 - **RTP over UDP**: RFC 3550 compliant with proper sequence numbering
 - **Multicast**: Standard administratively scoped multicast addresses
+- **SAP Announcements**: Announces generated SDP over SAP by default, configurable with `stream.sap`, stream discoverable by other AES67 devices
 - **Packet Timing Metrics**: Reports packet rate, late packets, max lateness, and average late-packet lateness
 
 ### AES67 Player
-- **CPAL Playback**: Native audio output through CPAL on Linux and macOS first
+- **CPAL Playback**: Native audio output through CPAL on Linux and macOS first (Windows in the future)
 - **Basic Receive Mode**: Receive with address, port, interface, payload type, and channel count
 - **SDP Receive Mode**: Parse stream address, port, payload type, L24 format, packet time, and clock metadata from SDP
 - **Device Selection**: List devices with `--list-devices` / `-L` and select one with `--output-device` / `-o`
@@ -37,6 +38,8 @@ receives AES67 RTP into CPAL audio output.
 ## Quick Start
 
 ### Installation
+
+To build from source:
 
 ```bash
 # Clone the repository
