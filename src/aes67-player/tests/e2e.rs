@@ -1,11 +1,31 @@
 use anyhow::{anyhow, Context, Result};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Output, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time;
 
 #[tokio::test]
-async fn streamer_to_player_null_output_decodes_loopback_rtp() -> Result<()> {
+async fn basic_args_decode_loopback_rtp() -> Result<()> {
+    run_loopback_receive_test(ReceiveMode::BasicArgs).await
+}
+
+#[tokio::test]
+async fn sdp_file_decodes_loopback_rtp() -> Result<()> {
+    run_loopback_receive_test(ReceiveMode::SdpFile).await
+}
+
+#[tokio::test]
+async fn sdp_file_controls_payload_type_and_packet_time() -> Result<()> {
+    run_loopback_receive_test(ReceiveMode::SdpMetadata).await
+}
+
+#[tokio::test]
+async fn sender_filter_accepts_matching_streamer_address() -> Result<()> {
+    run_loopback_receive_test(ReceiveMode::SenderFilter).await
+}
+
+async fn run_loopback_receive_test(receive_mode: ReceiveMode) -> Result<()> {
     let player_binary = player_binary_path();
     let streamer_binary = streamer_binary_path()?;
     let audio_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -13,13 +33,26 @@ async fn streamer_to_player_null_output_decodes_loopback_rtp() -> Result<()> {
         .canonicalize()
         .context("failed to locate loopback test audio file")?;
     let (address, port) = loopback_multicast_endpoint();
+    let session = receive_mode.session();
+    let sdp_file = match receive_mode {
+        ReceiveMode::BasicArgs | ReceiveMode::SenderFilter => None,
+        ReceiveMode::SdpFile | ReceiveMode::SdpMetadata => {
+            Some(write_loopback_sdp(&address, &port, session)?)
+        }
+    };
+    let streamer_config = match receive_mode {
+        ReceiveMode::SdpMetadata => Some(write_loopback_streamer_config(
+            &audio_file,
+            &address,
+            &port,
+            session,
+        )?),
+        ReceiveMode::BasicArgs | ReceiveMode::SdpFile | ReceiveMode::SenderFilter => None,
+    };
 
-    let player = tokio::process::Command::new(player_binary)
+    let mut player_command = tokio::process::Command::new(player_binary);
+    player_command
         .kill_on_drop(true)
-        .arg("--address")
-        .arg(&address)
-        .arg("--port")
-        .arg(&port)
         .arg("--interface")
         .arg("127.0.0.1")
         .arg("--test-null-output")
@@ -28,24 +61,54 @@ async fn streamer_to_player_null_output_decodes_loopback_rtp() -> Result<()> {
         .arg("--duration-seconds")
         .arg("4")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if receive_mode.uses_sender_filter() {
+        player_command.arg("--sender").arg("127.0.0.1");
+    }
+
+    match sdp_file.as_ref() {
+        Some(sdp) => {
+            player_command.arg("--sdp").arg(sdp.path());
+        }
+        None => {
+            player_command
+                .arg("--address")
+                .arg(&address)
+                .arg("--port")
+                .arg(&port);
+        }
+    }
+
+    let player = player_command
         .spawn()
         .context("failed to start aes67-player")?;
 
     time::sleep(Duration::from_millis(100)).await;
 
-    let mut streamer = tokio::process::Command::new(streamer_binary)
-        .kill_on_drop(true)
-        .arg("--file")
-        .arg(audio_file)
-        .arg("--address")
-        .arg(&address)
-        .arg("--port")
-        .arg(&port)
-        .arg("--interface")
-        .arg("127.0.0.1")
-        .arg("--duration-seconds")
-        .arg("1")
+    let mut streamer_command = tokio::process::Command::new(streamer_binary);
+    streamer_command.kill_on_drop(true);
+
+    match streamer_config.as_ref() {
+        Some(config) => {
+            streamer_command.arg("--config").arg(config.path());
+        }
+        None => {
+            streamer_command
+                .arg("--file")
+                .arg(&audio_file)
+                .arg("--address")
+                .arg(&address)
+                .arg("--port")
+                .arg(&port)
+                .arg("--interface")
+                .arg("127.0.0.1")
+                .arg("--duration-seconds")
+                .arg("1");
+        }
+    }
+
+    let mut streamer = streamer_command
         .spawn()
         .context("failed to start aes67-streamer")?;
 
@@ -67,9 +130,18 @@ async fn streamer_to_player_null_output_decodes_loopback_rtp() -> Result<()> {
         player_output.status,
         player_logs
     );
-    assert_eq!(summary_value(&player_logs, "Packets received")?, 100);
-    assert_eq!(summary_value(&player_logs, "Packets accepted")?, 100);
-    assert_eq!(summary_value(&player_logs, "Packets decoded")?, 100);
+    assert_eq!(
+        summary_value(&player_logs, "Packets received")?,
+        session.expected_packets
+    );
+    assert_eq!(
+        summary_value(&player_logs, "Packets accepted")?,
+        session.expected_packets
+    );
+    assert_eq!(
+        summary_value(&player_logs, "Packets decoded")?,
+        session.expected_packets
+    );
     assert_eq!(summary_value(&player_logs, "Frames decoded")?, 4800);
     assert_eq!(summary_value(&player_logs, "RTP silence frames")?, 0);
     assert_eq!(summary_value(&player_logs, "Jitter lost packets")?, 0);
@@ -89,6 +161,42 @@ async fn streamer_to_player_null_output_decodes_loopback_rtp() -> Result<()> {
     assert_eq!(summary_value(&player_logs, "Output dropped samples")?, 0);
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReceiveMode {
+    BasicArgs,
+    SdpFile,
+    SdpMetadata,
+    SenderFilter,
+}
+
+impl ReceiveMode {
+    fn session(self) -> LoopbackSession {
+        match self {
+            Self::BasicArgs | Self::SdpFile | Self::SenderFilter => LoopbackSession {
+                payload_type: 97,
+                packet_time_ms: 1,
+                expected_packets: 100,
+            },
+            Self::SdpMetadata => LoopbackSession {
+                payload_type: 101,
+                packet_time_ms: 2,
+                expected_packets: 50,
+            },
+        }
+    }
+
+    fn uses_sender_filter(self) -> bool {
+        matches!(self, Self::SenderFilter)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LoopbackSession {
+    payload_type: u8,
+    packet_time_ms: u32,
+    expected_packets: u64,
 }
 
 fn process_output_text(output: &Output) -> String {
@@ -112,6 +220,103 @@ fn loopback_multicast_endpoint() -> (String, String) {
         format!("239.1.{group_octet_3}.{group_octet_4}"),
         port.to_string(),
     )
+}
+
+struct TempSdpFile {
+    path: PathBuf,
+}
+
+impl TempSdpFile {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempSdpFile {
+    fn drop(&mut self) {
+        fs::remove_file(&self.path).ok();
+    }
+}
+
+struct TempConfigFile {
+    path: PathBuf,
+}
+
+impl TempConfigFile {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempConfigFile {
+    fn drop(&mut self) {
+        fs::remove_file(&self.path).ok();
+    }
+}
+
+fn write_loopback_sdp(address: &str, port: &str, session: LoopbackSession) -> Result<TempSdpFile> {
+    let path = std::env::temp_dir().join(format!(
+        "aes67-player-loopback-{}-{port}.sdp",
+        std::process::id()
+    ));
+    let contents = format!(
+        concat!(
+            "v=0\r\n",
+            "o=- 123456 123456 IN IP4 127.0.0.1\r\n",
+            "s=AES67 Player E2E\r\n",
+            "c=IN IP4 {address}/32\r\n",
+            "t=0 0\r\n",
+            "m=audio {port} RTP/AVP {payload_type}\r\n",
+            "a=rtpmap:{payload_type} L24/48000/2\r\n",
+            "a=ptime:{packet_time_ms}\r\n",
+            "a=recvonly\r\n",
+        ),
+        address = address,
+        port = port,
+        payload_type = session.payload_type,
+        packet_time_ms = session.packet_time_ms,
+    );
+    fs::write(&path, contents)
+        .with_context(|| format!("failed to write loopback SDP {}", path.display()))?;
+    Ok(TempSdpFile { path })
+}
+
+fn write_loopback_streamer_config(
+    audio_file: &Path,
+    address: &str,
+    port: &str,
+    session: LoopbackSession,
+) -> Result<TempConfigFile> {
+    let path = std::env::temp_dir().join(format!(
+        "aes67-player-streamer-{}-{port}.toml",
+        std::process::id()
+    ));
+    let contents = format!(
+        concat!(
+            "[audio]\n",
+            "file = {audio_file:?}\n",
+            "\n",
+            "[stream]\n",
+            "address = {address:?}\n",
+            "port = {port}\n",
+            "interface = \"127.0.0.1\"\n",
+            "payload_type = {payload_type}\n",
+            "packet_time_ms = {packet_time_ms}\n",
+            "sap = false\n",
+        ),
+        audio_file = audio_file.display().to_string(),
+        address = address,
+        port = port,
+        payload_type = session.payload_type,
+        packet_time_ms = session.packet_time_ms,
+    );
+    fs::write(&path, contents).with_context(|| {
+        format!(
+            "failed to write loopback streamer config {}",
+            path.display()
+        )
+    })?;
+    Ok(TempConfigFile { path })
 }
 
 fn summary_value(logs: &str, label: &str) -> Result<u64> {
