@@ -23,8 +23,8 @@ async fn main() {
         }
     };
 
-    let default_level = if args.verbose { "debug" } else { "info" };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
+    let default_log_level = if args.verbose { "debug" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_log_level))
         .init();
 
     if args.list_devices {
