@@ -8,6 +8,42 @@ fn binary() -> &'static str {
 }
 
 #[test]
+fn help_exits_successfully_and_hides_test_only_output() {
+    let output = Command::new(binary())
+        .arg("--help")
+        .output()
+        .expect("player binary should run");
+    let logs = process_output_text(&output);
+
+    assert!(
+        output.status.success(),
+        "help should exit successfully\n{logs}"
+    );
+    assert!(logs.contains("Usage: aes67-player"));
+    assert!(logs.contains("--list-devices"));
+    assert!(logs.contains("--output-device"));
+    assert!(
+        !logs.contains("--test-null-output"),
+        "test-only output flag should stay hidden from user help\n{logs}"
+    );
+}
+
+#[test]
+fn version_exits_successfully() {
+    let output = Command::new(binary())
+        .arg("--version")
+        .output()
+        .expect("player binary should run");
+    let logs = process_output_text(&output);
+
+    assert!(
+        output.status.success(),
+        "version should exit successfully\n{logs}"
+    );
+    assert!(logs.trim().starts_with("aes67-player "));
+}
+
+#[test]
 fn invalid_sender_filter_exits_with_clear_error() {
     let output = Command::new(binary())
         .arg("--address")
