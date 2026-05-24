@@ -25,12 +25,6 @@ pub struct StreamerArgs {
 
 pub type Args = StreamerArgs;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayerOutput {
-    Cpal,
-    Null,
-}
-
 #[derive(Debug, Clone)]
 pub struct PlayerArgs {
     pub sdp: Option<String>,
@@ -41,11 +35,11 @@ pub struct PlayerArgs {
     pub channels: Option<u16>,
     pub payload_type: Option<u8>,
     pub latency_ms: u32,
-    pub output: PlayerOutput,
     pub output_device: Option<String>,
     pub duration_seconds: Option<f64>,
     pub verbose: bool,
     pub list_devices: bool,
+    pub test_null_output: bool,
 }
 
 pub fn parse_args() -> Result<StreamerArgs> {
@@ -223,17 +217,9 @@ fn player_cli() -> Command {
             Arg::new("latency-ms")
                 .long("latency-ms")
                 .value_name("MS")
-                .help("Initial playout latency in milliseconds [default: 50]")
+                .help("Initial playout latency in milliseconds")
                 .default_value("50")
                 .value_parser(parse_positive_u32),
-        )
-        .arg(
-            Arg::new("output")
-                .long("output")
-                .value_name("MODE")
-                .help("Audio output mode")
-                .default_value("cpal")
-                .value_parser(["cpal", "null"]),
         )
         .arg(
             Arg::new("output-device")
@@ -247,6 +233,13 @@ fn player_cli() -> Command {
                 .short('L')
                 .long("list-devices")
                 .help("List audio output devices and exit")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("test-null-output")
+                .long("test-null-output")
+                .help("Use an internal null output sink for automated tests")
+                .hide(true)
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -391,15 +384,11 @@ fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
         latency_ms: *matches
             .get_one::<u32>("latency-ms")
             .expect("clap should supply latency default"),
-        output: parse_player_output(
-            matches
-                .get_one::<String>("output")
-                .expect("clap should supply output default"),
-        ),
         output_device: cli_string(matches, "output-device"),
         duration_seconds: matches.get_one::<f64>("duration-seconds").copied(),
         verbose: matches.get_flag("verbose"),
         list_devices,
+        test_null_output: matches.get_flag("test-null-output"),
     })
 }
 
@@ -424,13 +413,6 @@ fn cli_u16(matches: &ArgMatches, id: &str) -> Option<u16> {
         matches.get_one::<u16>(id).copied()
     } else {
         None
-    }
-}
-
-fn parse_player_output(value: &str) -> PlayerOutput {
-    match value {
-        "null" => PlayerOutput::Null,
-        _ => PlayerOutput::Cpal,
     }
 }
 
@@ -897,8 +879,6 @@ mod tests {
             "127.0.0.1",
             "--sender",
             "127.0.0.1",
-            "--output",
-            "null",
             "--duration-seconds",
             "1.5",
             "--verbose",
@@ -913,9 +893,9 @@ mod tests {
         assert_eq!(args.channels, Some(2));
         assert_eq!(args.payload_type, Some(97));
         assert_eq!(args.latency_ms, 50);
-        assert_eq!(args.output, PlayerOutput::Null);
         assert_eq!(args.duration_seconds, Some(1.5));
         assert!(args.verbose);
+        assert!(!args.test_null_output);
     }
 
     #[test]
@@ -932,8 +912,6 @@ mod tests {
             "101",
             "--latency-ms",
             "75",
-            "--output",
-            "cpal",
             "-o",
             "Studio Monitor",
         ])
@@ -942,7 +920,6 @@ mod tests {
         assert_eq!(args.channels, Some(8));
         assert_eq!(args.payload_type, Some(101));
         assert_eq!(args.latency_ms, 75);
-        assert_eq!(args.output, PlayerOutput::Cpal);
         assert_eq!(args.output_device.as_deref(), Some("Studio Monitor"));
     }
 
@@ -978,8 +955,6 @@ mod tests {
             "127.0.0.1",
             "--latency-ms",
             "100",
-            "--output",
-            "null",
         ])
         .expect("sdp mode should parse with runtime args");
 
@@ -991,7 +966,6 @@ mod tests {
         assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
         assert_eq!(args.sender.as_deref(), Some("127.0.0.1"));
         assert_eq!(args.latency_ms, 100);
-        assert_eq!(args.output, PlayerOutput::Null);
     }
 
     #[test]
@@ -1060,6 +1034,25 @@ mod tests {
             "0"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn player_cli_accepts_hidden_test_null_output() {
+        let args = parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--test-null-output",
+        ])
+        .expect("hidden test output should parse");
+
+        assert!(args.test_null_output);
+    }
+
+    #[test]
+    fn player_cli_does_not_expose_output_backend_choice() {
         assert!(parse_player_args_from([
             "aes67-player",
             "--address",

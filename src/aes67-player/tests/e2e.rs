@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
 use std::process::{Command as StdCommand, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time;
 
 #[tokio::test]
@@ -12,19 +12,17 @@ async fn streamer_to_player_null_output_decodes_loopback_rtp() -> Result<()> {
         .join("../aes67-streamer/tests/resources/audio-formats/tone.wav")
         .canonicalize()
         .context("failed to locate loopback test audio file")?;
-    let address = "239.1.4.1";
-    let port = "55200";
+    let (address, port) = loopback_multicast_endpoint();
 
     let player = tokio::process::Command::new(player_binary)
         .kill_on_drop(true)
         .arg("--address")
-        .arg(address)
+        .arg(&address)
         .arg("--port")
-        .arg(port)
+        .arg(&port)
         .arg("--interface")
         .arg("127.0.0.1")
-        .arg("--output")
-        .arg("null")
+        .arg("--test-null-output")
         .arg("--latency-ms")
         .arg("10")
         .arg("--duration-seconds")
@@ -41,9 +39,9 @@ async fn streamer_to_player_null_output_decodes_loopback_rtp() -> Result<()> {
         .arg("--file")
         .arg(audio_file)
         .arg("--address")
-        .arg(address)
+        .arg(&address)
         .arg("--port")
-        .arg(port)
+        .arg(&port)
         .arg("--interface")
         .arg("127.0.0.1")
         .arg("--duration-seconds")
@@ -98,6 +96,22 @@ fn process_output_text(output: &Output) -> String {
     text.push_str(&String::from_utf8_lossy(&output.stdout));
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     text
+}
+
+fn loopback_multicast_endpoint() -> (String, String) {
+    let time_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(0);
+    let seed = time_seed ^ std::process::id();
+    let group_octet_3 = 1 + (seed % 200);
+    let group_octet_4 = 1 + ((seed / 200) % 200);
+    let port = 55200 + (seed % 1000) as u16;
+
+    (
+        format!("239.1.{group_octet_3}.{group_octet_4}"),
+        port.to_string(),
+    )
 }
 
 fn summary_value(logs: &str, label: &str) -> Result<u64> {
