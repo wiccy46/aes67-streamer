@@ -21,7 +21,7 @@ Before running on Linux, install the CPAL backend dependency. On Fedora:
   sudo dnf install alsa-lib-devel
 
 To list selectable devices:
-  cargo run -p aes67-player --features cpal-output -- -L
+  cargo run -p aes67-player -- -L
 USAGE
 }
 
@@ -87,7 +87,7 @@ fail_with_logs() {
     echo "--- streamer log ---" >&2
     tail -n 120 "$STREAMER_LOG" 2>/dev/null >&2 || true
     echo "--- device list command ---" >&2
-    echo "cargo run -p aes67-player --features cpal-output -- -L" >&2
+    echo "cargo run -p aes67-player -- -L" >&2
     exit 1
 }
 
@@ -126,7 +126,7 @@ rm -f "$PLAYER_LOG" "$STREAMER_LOG"
 
 echo "Building aes67-streamer and aes67-player with CPAL output..."
 cargo build -p aes67-streamer
-if ! cargo build -p aes67-player --features cpal-output; then
+if ! cargo build -p aes67-player; then
     fail_with_logs "Failed to build aes67-player with CPAL output. On Fedora, install alsa-lib-devel."
 fi
 
@@ -134,7 +134,6 @@ player_args=(
     --address "$ADDRESS"
     --port "$PORT"
     --interface "$INTERFACE"
-    --output cpal
     --latency-ms "$LATENCY_MS"
     --duration-seconds "$player_duration"
 )

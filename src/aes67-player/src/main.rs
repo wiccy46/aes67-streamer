@@ -5,7 +5,7 @@ mod output;
 mod player;
 mod runtime;
 
-use output::{list_output_devices, OutputMode};
+use output::list_output_devices;
 use player::{Aes67Player, PlayerConfig};
 use runtime::RuntimeSupervisor;
 
@@ -41,11 +41,11 @@ async fn main() {
     }
 
     let player_config = PlayerConfig {
-        output_mode: OutputMode::from(args.output),
         output_device: args.output_device.clone(),
         latency_ms: args.latency_ms,
         duration: args.duration_seconds.map(Duration::from_secs_f64),
         verbose: args.verbose,
+        test_null_output: args.test_null_output,
     };
 
     let mut player = match Aes67Player::new(&args, player_config).await {

@@ -10,17 +10,19 @@ use std::time::{Duration, Instant};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::output::{build_output, AudioOutput, OutputMode, OutputStats};
+#[cfg(any(test, debug_assertions))]
+use crate::output::NullOutput;
+use crate::output::{build_cpal_output, AudioOutput, OutputStats};
 
 const RTP_RECEIVE_BUFFER_BYTES: usize = 2048;
 
 #[derive(Debug, Clone)]
 pub struct PlayerConfig {
-    pub output_mode: OutputMode,
     pub output_device: Option<String>,
     pub latency_ms: u32,
     pub duration: Option<Duration>,
     pub verbose: bool,
+    pub test_null_output: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -46,13 +48,7 @@ pub struct Aes67Player {
 impl Aes67Player {
     pub async fn new(args: &PlayerArgs, config: PlayerConfig) -> Result<Self> {
         let session = session_from_args(args)?;
-        let output = build_output(
-            config.output_mode,
-            session.sample_rate,
-            session.channels,
-            config.latency_ms,
-            config.output_device.as_deref(),
-        )?;
+        let output = build_player_output(&session, &config)?;
         let interface = resolve_interface_ip(args.interface.as_deref().unwrap_or("127.0.0.1"))
             .context("Failed to resolve receive interface")?;
         let sender_filter = args
@@ -253,6 +249,31 @@ impl Aes67Player {
             log::debug!("  Output stats: {output_stats:?}");
         }
     }
+}
+
+fn build_player_output(
+    session: &Aes67SessionDescription,
+    config: &PlayerConfig,
+) -> Result<Box<dyn AudioOutput + Send>> {
+    #[cfg(any(test, debug_assertions))]
+    if config.test_null_output {
+        log::warn!("Using internal null audio output for test validation");
+        return Ok(Box::new(NullOutput::default()));
+    }
+
+    #[cfg(not(any(test, debug_assertions)))]
+    if config.test_null_output {
+        return Err(anyhow!(
+            "test null output is not available in release builds"
+        ));
+    }
+
+    build_cpal_output(
+        session.sample_rate,
+        session.channels,
+        config.latency_ms,
+        config.output_device.as_deref(),
+    )
 }
 
 fn session_from_args(args: &PlayerArgs) -> Result<Aes67SessionDescription> {
