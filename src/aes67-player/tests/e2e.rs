@@ -25,6 +25,78 @@ async fn sender_filter_accepts_matching_streamer_address() -> Result<()> {
     run_loopback_receive_test(ReceiveMode::SenderFilter).await
 }
 
+#[tokio::test]
+async fn sender_filter_rejects_non_matching_streamer_address() -> Result<()> {
+    let player_binary = player_binary_path();
+    let streamer_binary = streamer_binary_path()?;
+    let audio_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../aes67-streamer/tests/resources/audio-formats/tone.wav")
+        .canonicalize()
+        .context("failed to locate loopback test audio file")?;
+    let (address, port) = loopback_multicast_endpoint();
+
+    let player = tokio::process::Command::new(player_binary)
+        .kill_on_drop(true)
+        .arg("--address")
+        .arg(&address)
+        .arg("--port")
+        .arg(&port)
+        .arg("--interface")
+        .arg("127.0.0.1")
+        .arg("--sender")
+        .arg("127.0.0.2")
+        .arg("--test-null-output")
+        .arg("--latency-ms")
+        .arg("10")
+        .arg("--duration-seconds")
+        .arg("1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to start aes67-player")?;
+
+    time::sleep(Duration::from_millis(100)).await;
+
+    let mut streamer = tokio::process::Command::new(streamer_binary)
+        .kill_on_drop(true)
+        .arg("--file")
+        .arg(audio_file)
+        .arg("--address")
+        .arg(&address)
+        .arg("--port")
+        .arg(&port)
+        .arg("--interface")
+        .arg("127.0.0.1")
+        .arg("--duration-seconds")
+        .arg("1")
+        .spawn()
+        .context("failed to start aes67-streamer")?;
+
+    let streamer_status = time::timeout(Duration::from_secs(5), streamer.wait())
+        .await
+        .context("timed out waiting for streamer")??;
+    assert!(
+        streamer_status.success(),
+        "aes67-streamer exited with {streamer_status}"
+    );
+
+    let player_output = time::timeout(Duration::from_secs(5), player.wait_with_output())
+        .await
+        .context("timed out waiting for player")??;
+    let player_logs = process_output_text(&player_output);
+
+    assert!(
+        !player_output.status.success(),
+        "aes67-player should reject all packets from a non-matching sender\n{player_logs}"
+    );
+    assert!(
+        player_logs.contains("no RTP audio packets were decoded"),
+        "player should report that no packets were decoded\n{player_logs}"
+    );
+
+    Ok(())
+}
+
 async fn run_loopback_receive_test(receive_mode: ReceiveMode) -> Result<()> {
     let player_binary = player_binary_path();
     let streamer_binary = streamer_binary_path()?;
