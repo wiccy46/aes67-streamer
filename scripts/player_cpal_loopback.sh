@@ -10,6 +10,8 @@ This is a manual validation path for audible playback smoothness.
 
 Environment:
   AES67_PLAYER_OUTPUT_DEVICE      Optional CPAL device index or name from -L
+  AES67_PLAYER_ALLOW_UNCLOCKED_OUTPUT
+                                  Set to 1 only for diagnostics with null/discard devices
   AES67_PLAYER_DURATION_SECONDS   Playback duration in seconds, default 10
   AES67_PLAYER_LATENCY_MS         Player latency in milliseconds, default 50
   AES67_PLAYER_ARTIFACT_DIR       Artifact directory, default target/player-cpal-loopback
@@ -53,6 +55,10 @@ INTERFACE="${AES67_PLAYER_INTERFACE:-127.0.0.1}"
 DURATION_SECONDS="${AES67_PLAYER_DURATION_SECONDS:-10}"
 LATENCY_MS="${AES67_PLAYER_LATENCY_MS:-50}"
 OUTPUT_DEVICE="${AES67_PLAYER_OUTPUT_DEVICE:-}"
+ALLOW_UNCLOCKED_OUTPUT="${AES67_PLAYER_ALLOW_UNCLOCKED_OUTPUT:-0}"
+CARGO_CMD="${AES67_PLAYER_CARGO:-cargo}"
+PLAYER_BIN="${AES67_PLAYER_PLAYER_BIN:-target/debug/aes67-player}"
+STREAMER_BIN="${AES67_PLAYER_STREAMER_BIN:-target/debug/aes67-streamer}"
 INPUT_WAV="src/aes67-streamer/tests/resources/audio-formats/tone.wav"
 PLAYER_LOG="$ARTIFACT_DIR/player.log"
 STREAMER_LOG="$ARTIFACT_DIR/streamer.log"
@@ -79,19 +85,50 @@ summary_value() {
     awk -F': ' -v label="$label" '$0 ~ label { value=$NF } END { print value }' "$PLAYER_LOG"
 }
 
+wait_for_log_content() {
+    local file="$1"
+    for _ in {1..20}; do
+        if [[ -s "$file" ]]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+print_log_tail() {
+    local file="$1"
+    local label="$2"
+
+    echo "--- $label ---" >&2
+    if [[ -s "$file" ]]; then
+        tail -n 120 "$file" >&2
+    elif [[ -e "$file" ]]; then
+        echo "(log file exists but is empty: $file)" >&2
+    else
+        echo "(log file was not created: $file)" >&2
+    fi
+}
+
 fail_with_logs() {
     echo "$1" >&2
-    sleep 0.2
-    echo "--- player log ---" >&2
-    tail -n 120 "$PLAYER_LOG" 2>/dev/null >&2 || true
-    echo "--- streamer log ---" >&2
-    tail -n 120 "$STREAMER_LOG" 2>/dev/null >&2 || true
+    wait_for_log_content "$PLAYER_LOG" || true
+    print_log_tail "$PLAYER_LOG" "player log"
+    print_log_tail "$STREAMER_LOG" "streamer log"
     echo "--- device list command ---" >&2
     echo "cargo run -p aes67-player -- -L" >&2
     exit 1
 }
 
-require_command cargo
+player_log_has_unclocked_output() {
+    grep -Eiq "Created CPAL output on '.*(Discard all samples|generate zero samples|null|dummy)" "$PLAYER_LOG"
+}
+
+allow_unclocked_output() {
+    [[ "$ALLOW_UNCLOCKED_OUTPUT" == "1" ]]
+}
+
+require_command "$CARGO_CMD"
 require_command awk
 
 if ! [[ "$DURATION_SECONDS" =~ ^[0-9]+$ ]] || (( DURATION_SECONDS < 1 )); then
@@ -114,6 +151,7 @@ CPAL player loopback configuration
   Port:          $PORT
   Interface:     $INTERFACE
   Output device: ${OUTPUT_DEVICE:-default}
+  Allow null:    $ALLOW_UNCLOCKED_OUTPUT
   Artifacts:     $ARTIFACT_DIR
 CONFIG
 
@@ -125,8 +163,8 @@ mkdir -p "$ARTIFACT_DIR"
 rm -f "$PLAYER_LOG" "$STREAMER_LOG"
 
 echo "Building aes67-streamer and aes67-player with CPAL output..."
-cargo build -p aes67-streamer
-if ! cargo build -p aes67-player; then
+"$CARGO_CMD" build -p aes67-streamer
+if ! "$CARGO_CMD" build -p aes67-player; then
     fail_with_logs "Failed to build aes67-player with CPAL output. On Fedora, install alsa-lib-devel."
 fi
 
@@ -142,7 +180,7 @@ if [[ -n "$OUTPUT_DEVICE" ]]; then
 fi
 
 echo "Starting aes67-player..."
-RUST_LOG=info target/debug/aes67-player "${player_args[@]}" >"$PLAYER_LOG" 2>&1 &
+RUST_LOG=info "$PLAYER_BIN" "${player_args[@]}" >"$PLAYER_LOG" 2>&1 &
 player_pid=$!
 
 sleep 1
@@ -150,9 +188,16 @@ if ! kill -0 "$player_pid" 2>/dev/null; then
     wait "$player_pid" || true
     fail_with_logs "aes67-player exited before the streamer started"
 fi
+if player_log_has_unclocked_output; then
+    if allow_unclocked_output; then
+        echo "Warning: selected CPAL output appears to be an unclocked null/discard device; smoothness results are diagnostic only" >&2
+    else
+        fail_with_logs "Selected CPAL output appears to be an unclocked null/discard device. Select a real clocked playback device from -L, or set AES67_PLAYER_ALLOW_UNCLOCKED_OUTPUT=1 for diagnostics only."
+    fi
+fi
 
 echo "Running aes67-streamer for ${DURATION_SECONDS}s..."
-RUST_LOG=info target/debug/aes67-streamer \
+RUST_LOG=info "$STREAMER_BIN" \
     --file "$INPUT_WAV" \
     --address "$ADDRESS" \
     --port "$PORT" \
@@ -176,6 +221,7 @@ rtp_silence_frames="$(summary_value "RTP silence frames")"
 jitter_lost_packets="$(summary_value "Jitter lost packets")"
 jitter_late_packets="$(summary_value "Jitter late packets")"
 jitter_dropped_full_packets="$(summary_value "Jitter dropped-full packets")"
+jitter_timestamp_discontinuities="$(summary_value "Jitter timestamp discontinuities")"
 output_silence_frames="$(summary_value "Output silence frames")"
 output_dropped_samples="$(summary_value "Output dropped samples")"
 
@@ -184,6 +230,7 @@ output_dropped_samples="$(summary_value "Output dropped samples")"
 [[ "${jitter_lost_packets:-}" == "0" ]] || fail_with_logs "Jitter buffer reported ${jitter_lost_packets:-unknown} lost packets"
 [[ "${jitter_late_packets:-}" == "0" ]] || fail_with_logs "Jitter buffer reported ${jitter_late_packets:-unknown} late packets"
 [[ "${jitter_dropped_full_packets:-}" == "0" ]] || fail_with_logs "Jitter buffer dropped ${jitter_dropped_full_packets:-unknown} packets while full"
+[[ "${jitter_timestamp_discontinuities:-}" == "0" ]] || fail_with_logs "Jitter buffer reported ${jitter_timestamp_discontinuities:-unknown} timestamp discontinuities"
 [[ "${output_silence_frames:-}" == "0" ]] || fail_with_logs "Audio output inserted ${output_silence_frames:-unknown} silence frames"
 [[ "${output_dropped_samples:-}" == "0" ]] || fail_with_logs "Audio output dropped ${output_dropped_samples:-unknown} samples"
 

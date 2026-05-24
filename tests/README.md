@@ -87,7 +87,9 @@ AES67_PLAYER_OUTPUT_DEVICE=<index-or-name> bash scripts/player_cpal_loopback.sh
 Use a real clocked playback device for smoothness validation. ALSA's `null` /
 discard device is useful for checking CPAL startup, but it can consume samples
 faster than wall-clock time and should not be treated as a dropout-free playback
-test.
+test. The loopback script rejects known null/discard devices by default; set
+`AES67_PLAYER_ALLOW_UNCLOCKED_OUTPUT=1` only when intentionally running a
+diagnostic startup check.
 
 The player logs a final summary. Clean playback should report zero for RTP
 silence frames, jitter lost/late/dropped-full packets, timestamp
