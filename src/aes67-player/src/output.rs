@@ -119,7 +119,7 @@ mod cpal_backend {
     use super::{output_buffer_capacity_samples, AudioOutput, OutputStats};
     use anyhow::{anyhow, Context, Result};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use cpal::{FromSample, SampleFormat, SampleRate, SizedSample, StreamConfig};
+    use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
     use ringbuf::{traits::*, HeapCons, HeapProd, HeapRb};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -135,9 +135,7 @@ mod cpal_backend {
             .enumerate()
         {
             found = true;
-            let name = device
-                .name()
-                .unwrap_or_else(|_| "unknown output device".to_string());
+            let name = device_name(&device);
             output.push_str(&format!("  [{index}] {name}\n"));
 
             match device.supported_output_configs() {
@@ -147,8 +145,8 @@ mod cpal_backend {
                             "      {}ch {:?} {}-{} Hz\n",
                             config.channels(),
                             config.sample_format(),
-                            config.min_sample_rate().0,
-                            config.max_sample_rate().0
+                            config.min_sample_rate(),
+                            config.max_sample_rate()
                         ));
                     }
                 }
@@ -176,7 +174,7 @@ mod cpal_backend {
     }
 
     impl CpalOutput {
-        fn new(
+        pub(super) fn new(
             sample_rate: u32,
             channels: u16,
             latency_ms: u32,
@@ -191,9 +189,7 @@ mod cpal_backend {
 
             let host = cpal::default_host();
             let device = select_output_device(&host, output_device)?;
-            let device_name = device
-                .name()
-                .unwrap_or_else(|_| "unknown output device".to_string());
+            let device_name = device_name(&device);
             let supported_config = select_output_config(&device, sample_rate, channels)
                 .with_context(|| format!("failed to select output config for {device_name}"))?;
             let sample_format = supported_config.sample_format();
@@ -213,7 +209,7 @@ mod cpal_backend {
             log::info!(
                 "Created CPAL output on '{}' at {} Hz, {} channels, {:?}, {} sample buffer",
                 device_name,
-                stream_config.sample_rate.0,
+                stream_config.sample_rate,
                 stream_config.channels,
                 sample_format,
                 capacity
@@ -247,9 +243,7 @@ mod cpal_backend {
             .context("failed to query output devices")?
             .enumerate()
             .map(|(index, device)| {
-                let name = device
-                    .name()
-                    .unwrap_or_else(|_| "unknown output device".to_string());
+                let name = device_name(&device);
                 (index, name, device)
             })
             .collect::<Vec<_>>();
@@ -288,6 +282,13 @@ mod cpal_backend {
                     .join(", ")
             )),
         }
+    }
+
+    fn device_name(device: &cpal::Device) -> String {
+        device
+            .description()
+            .map(|description| description.name().to_string())
+            .unwrap_or_else(|_| "unknown output device".to_string())
     }
 
     impl AudioOutput for CpalOutput {
@@ -386,7 +387,7 @@ mod cpal_backend {
         sample_rate: u32,
         channels: u16,
     ) -> Result<cpal::SupportedStreamConfig> {
-        let requested_rate = SampleRate(sample_rate);
+        let requested_rate = sample_rate;
         let mut selected = None;
 
         for config in device
