@@ -2,7 +2,7 @@
 name = "aes67-player"
 version = "0.1.0"
 edition = "2021"
-repository = "https://github.com/wiccy46/aes67-streamer"
+repository = "https://github.com/wiccy46/aes67-tools"
 description = "AES67 RTP audio receiver and player"
 
 [dependencies]
