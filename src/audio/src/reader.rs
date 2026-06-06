@@ -45,8 +45,6 @@ pub struct AudioReader {
     info: AudioInfo,
     /// Samples per packet (e.g., 48 for 1ms at 48kHz)
     samples_per_packet: usize,
-    /// Reusable buffer for packet data to avoid allocations
-    packet_buffer: Vec<f32>,
 }
 
 impl AudioReader {
@@ -76,7 +74,6 @@ impl AudioReader {
             samples_per_packet
         );
 
-        let total_samples_per_packet = samples_per_packet * channels as usize;
         let reader = AudioReader {
             audio_data,
             read_position: 0,
@@ -88,7 +85,6 @@ impl AudioReader {
                 format: "Loaded".to_string(),
             },
             samples_per_packet,
-            packet_buffer: Vec::with_capacity(total_samples_per_packet),
         };
 
         // Export resampled audio for verification (optional) - only in debug mode
@@ -357,35 +353,49 @@ impl AudioReader {
 
     /// Read exactly samples_per_packet frames (e.g., 48 samples for 1ms at 48kHz)
     pub fn read_next_frame(&mut self) -> Result<Option<AudioSample>> {
+        let mut sample = AudioSample {
+            data: Vec::with_capacity(self.samples_per_packet * self.info.channels as usize),
+            channels: self.info.channels,
+            sample_rate: self.info.sample_rate,
+            frames: self.samples_per_packet,
+        };
+
+        if self.read_next_frame_into(&mut sample)? {
+            Ok(Some(sample))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn read_next_frame_into(&mut self, output: &mut AudioSample) -> Result<bool> {
         let channels = self.info.channels as usize;
         let frames_per_channel = self.audio_data.len() / channels;
 
         // Check if we have enough frames left
         if self.read_position + self.samples_per_packet > frames_per_channel {
-            return Ok(None); // End of file
+            return Ok(false); // End of file
         }
 
         // Reuse the pre-allocated buffer to avoid allocations
-        self.packet_buffer.clear();
+        output.data.clear();
 
         for ch in 0..channels {
             let channel_start = ch * frames_per_channel;
             let frame_start = channel_start + self.read_position;
             let frame_end = frame_start + self.samples_per_packet;
 
-            self.packet_buffer
+            output
+                .data
                 .extend_from_slice(&self.audio_data[frame_start..frame_end]);
         }
 
         // Advance read position
         self.read_position += self.samples_per_packet;
+        output.channels = self.info.channels;
+        output.sample_rate = self.info.sample_rate;
+        output.frames = self.samples_per_packet;
 
-        Ok(Some(AudioSample {
-            data: self.packet_buffer.clone(), // Clone the reused buffer data
-            channels: self.info.channels,
-            sample_rate: self.info.sample_rate,
-            frames: self.samples_per_packet,
-        }))
+        Ok(true)
     }
 
     fn convert_audio_buffer(buffer: AudioBufferRef) -> Result<AudioSample> {
@@ -743,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn test_packet_buffer_reuse() {
+    fn test_read_next_frame_returns_independent_owned_samples() {
         let temp_file = create_test_wav_file(48000, 2, 96); // 2ms of audio
         let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
             .expect("Failed to create reader");
@@ -753,24 +763,51 @@ mod tests {
             .read_next_frame()
             .expect("Read failed")
             .expect("Should have data");
-        let ptr1 = sample1.data.as_ptr();
 
         // Read second frame
         let sample2 = reader
             .read_next_frame()
             .expect("Read failed")
             .expect("Should have data");
-        let ptr2 = sample2.data.as_ptr();
-
-        // The internal buffer is reused, but the returned data is cloned
-        // So the pointers will be different, but we can verify the buffer is working
-        assert_ne!(ptr1, ptr2, "Returned data should be independent clones");
 
         // Verify both samples have correct structure
         assert_eq!(sample1.data.len(), 96); // 48 frames × 2 channels
         assert_eq!(sample2.data.len(), 96);
         assert_eq!(sample1.frames, 48);
         assert_eq!(sample2.frames, 48);
+    }
+
+    #[test]
+    fn test_read_next_frame_into_reuses_output_allocation() {
+        let temp_file = create_test_wav_file(48000, 2, 96);
+        let mut reader = AudioReader::with_resampling(temp_file.path(), 48000, 48)
+            .expect("Failed to create reader");
+        let mut output = AudioSample {
+            data: Vec::with_capacity(96),
+            channels: 0,
+            sample_rate: 0,
+            frames: 0,
+        };
+
+        assert!(reader
+            .read_next_frame_into(&mut output)
+            .expect("Read failed"));
+        let first_ptr = output.data.as_ptr();
+        assert_eq!(output.channels, 2);
+        assert_eq!(output.sample_rate, 48000);
+        assert_eq!(output.frames, 48);
+        assert_eq!(output.data.len(), 96);
+
+        assert!(reader
+            .read_next_frame_into(&mut output)
+            .expect("Read failed"));
+
+        assert_eq!(
+            output.data.as_ptr(),
+            first_ptr,
+            "output allocation should be reused across packet reads"
+        );
+        assert_eq!(output.data.len(), 96);
     }
 
     #[test]

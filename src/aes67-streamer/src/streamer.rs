@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use audio::{AudioNode, AudioReader, GainNode};
+use audio::{AudioNode, AudioReader, AudioSample, GainNode};
 use network::{
     parse_stream_address, resolve_interface_ip, MulticastConfig, MulticastSocket, RtpPacketizer,
     SapAnnouncer,
@@ -214,8 +214,17 @@ impl Aes67Streamer {
         let mut next_debug_packet_log = 100;
         let mut next_verbose_stats_log = 1000;
         let mut timing_drift = TimingDriftStats::default();
+        let samples_per_packet =
+            samples_per_packet(self.config.target_sample_rate, self.config.packet_time_ms);
+        let channels = self.audio_reader.get_info().channels;
+        let mut audio_sample = AudioSample {
+            data: Vec::with_capacity(samples_per_packet * channels as usize),
+            channels,
+            sample_rate: self.config.target_sample_rate,
+            frames: samples_per_packet,
+        };
         let rtp_packet_capacity = 12
-            + samples_per_packet(self.config.target_sample_rate, self.config.packet_time_ms)
+            + samples_per_packet
                 * self.audio_reader.get_info().channels as usize
                 * L24_BYTES_PER_SAMPLE;
         let mut rtp_packet_buffer = Vec::with_capacity(rtp_packet_capacity);
@@ -244,92 +253,89 @@ impl Aes67Streamer {
             }
 
             // Read next audio frame
-            match self.audio_reader.read_next_frame()? {
-                Some(mut sample) => {
-                    // Process audio through chain
-                    self.audio_chain
-                        .process(&mut sample)
-                        .context("Failed to process audio sample")?;
+            if self.audio_reader.read_next_frame_into(&mut audio_sample)? {
+                // Process audio through chain
+                self.audio_chain
+                    .process(&mut audio_sample)
+                    .context("Failed to process audio sample")?;
 
-                    self.rtp_packetizer
-                        .write_packet_into(&sample, &mut rtp_packet_buffer)
-                        .context("Failed to create RTP packet")?;
+                self.rtp_packetizer
+                    .write_packet_into(&audio_sample, &mut rtp_packet_buffer)
+                    .context("Failed to create RTP packet")?;
 
-                    // Send packet
-                    let sent = self
-                        .multicast_socket
-                        .send_packet(&rtp_packet_buffer)
-                        .context("Failed to send RTP packet")?;
+                // Send packet
+                let sent = self
+                    .multicast_socket
+                    .send_packet(&rtp_packet_buffer)
+                    .context("Failed to send RTP packet")?;
 
-                    packets_sent += 1;
-                    bytes_sent += sent;
+                packets_sent += 1;
+                bytes_sent += sent;
 
-                    if debug_packet_logging && packets_sent >= next_debug_packet_log {
-                        log::debug!("Sent packet {}", packets_sent);
-                        next_debug_packet_log += 100;
-                    }
-
-                    let packet_sent_at = Instant::now();
-                    if packet_sent_at >= next_sdp_refresh_check {
-                        self.refresh_sdp_if_ptp_reference_changed();
-                        next_sdp_refresh_check = packet_sent_at + Duration::from_secs(10);
-                    }
-
-                    if self.config.verbose && packets_sent >= next_verbose_stats_log {
-                        let ptp_stats = self.ptp_client.get_stats();
-                        log::debug!(
-                            "Sent {} packets, {} bytes - PTP: {:?}, offset: {}ns",
-                            packets_sent,
-                            bytes_sent,
-                            ptp_stats.state,
-                            ptp_stats.offset_ns
-                        );
-                        next_verbose_stats_log += 1000;
-                    }
-
-                    // Timing control - maintain packet rate
-                    // Calculate when this packet should be sent based on audio timeline
-                    let target_time = start_time + packet_duration * packets_sent as u32;
-                    let now = packet_sent_at;
-                    timing_drift.observe(now, target_time);
-
-                    if now < target_time {
-                        tokio::select! {
-                            biased;
-                            _ = shutdown.cancelled() => {
-                                stop_reason = "shutdown requested";
-                                log::info!("Shutdown requested, stopping audio stream...");
-                                break;
-                            }
-                            _ = time::sleep(target_time - now) => {}
-                        }
-                    } else if packets_sent % 1000 == 0 && now > target_time + packet_duration {
-                        // Warn if we're falling behind real-time
-                        let behind_ms = (now - target_time).as_millis();
-                        log::warn!(
-                            "Streaming falling behind by {}ms at packet {}",
-                            behind_ms,
-                            packets_sent
-                        );
-                    }
+                if debug_packet_logging && packets_sent >= next_debug_packet_log {
+                    log::debug!("Sent packet {}", packets_sent);
+                    next_debug_packet_log += 100;
                 }
-                None => {
-                    if self.config.loop_playback {
-                        if self.audio_reader.can_read_full_packet() {
-                            log::debug!("End of audio file reached, restarting from beginning");
-                            self.audio_reader.rewind();
-                            continue;
-                        }
 
-                        log::warn!(
-                            "Loop playback requested, but audio file is shorter than one packet"
-                        );
+                let packet_sent_at = Instant::now();
+                if packet_sent_at >= next_sdp_refresh_check {
+                    self.refresh_sdp_if_ptp_reference_changed();
+                    next_sdp_refresh_check = packet_sent_at + Duration::from_secs(10);
+                }
+
+                if self.config.verbose && packets_sent >= next_verbose_stats_log {
+                    let ptp_stats = self.ptp_client.get_stats();
+                    log::debug!(
+                        "Sent {} packets, {} bytes - PTP: {:?}, offset: {}ns",
+                        packets_sent,
+                        bytes_sent,
+                        ptp_stats.state,
+                        ptp_stats.offset_ns
+                    );
+                    next_verbose_stats_log += 1000;
+                }
+
+                // Timing control - maintain packet rate
+                // Calculate when this packet should be sent based on audio timeline
+                let target_time = start_time + packet_duration * packets_sent as u32;
+                let now = packet_sent_at;
+                timing_drift.observe(now, target_time);
+
+                if now < target_time {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => {
+                            stop_reason = "shutdown requested";
+                            log::info!("Shutdown requested, stopping audio stream...");
+                            break;
+                        }
+                        _ = time::sleep(target_time - now) => {}
+                    }
+                } else if packets_sent % 1000 == 0 && now > target_time + packet_duration {
+                    // Warn if we're falling behind real-time
+                    let behind_ms = (now - target_time).as_millis();
+                    log::warn!(
+                        "Streaming falling behind by {}ms at packet {}",
+                        behind_ms,
+                        packets_sent
+                    );
+                }
+            } else {
+                if self.config.loop_playback {
+                    if self.audio_reader.can_read_full_packet() {
+                        log::debug!("End of audio file reached, restarting from beginning");
+                        self.audio_reader.rewind();
+                        continue;
                     }
 
-                    stop_reason = "end of audio file";
-                    log::info!("End of audio file reached");
-                    break;
+                    log::warn!(
+                        "Loop playback requested, but audio file is shorter than one packet"
+                    );
                 }
+
+                stop_reason = "end of audio file";
+                log::info!("End of audio file reached");
+                break;
             }
         }
 
