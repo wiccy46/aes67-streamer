@@ -239,6 +239,7 @@ impl AudioReader {
 
         let ratio = to_rate as f64 / from_rate as f64;
         let frames = data.len() / channels as usize;
+        let expected_output_frames = (frames as f64 * ratio).round() as usize;
 
         log::info!(
             "High-quality resampling with Rubato: {} frames, ratio {:.6}",
@@ -293,8 +294,12 @@ impl AudioReader {
             input_pos += chunk_size;
         }
 
+        for ch_buffer in &mut output_channels {
+            ch_buffer.truncate(expected_output_frames);
+        }
+
         // Flatten back to non-interleaved format
-        let mut output_data = Vec::new();
+        let mut output_data = Vec::with_capacity(expected_output_frames * channels as usize);
         for ch_buffer in output_channels {
             output_data.extend(ch_buffer);
         }
@@ -616,6 +621,24 @@ mod tests {
         for sample in &result {
             assert!(sample.abs() <= 1.5, "Sample out of range: {}", sample);
         }
+    }
+
+    #[test]
+    fn test_resample_trims_final_padding() {
+        let input_frames = 1500;
+        let channels = 2;
+        let input_data = create_mock_audio_data(input_frames, channels);
+
+        let result = AudioReader::resample_audio_data_simple(input_data, 44100, 48000, channels)
+            .expect("Resampling failed");
+
+        let expected_output_frames = ((input_frames as f64) * (48000.0 / 44100.0)).round() as usize;
+
+        assert_eq!(
+            result.len(),
+            expected_output_frames * channels as usize,
+            "resampler should not keep zero-padding from the final fixed-size input chunk"
+        );
     }
 
     #[test]
