@@ -66,6 +66,14 @@ async fn main() {
         }
     };
 
+    if let Some(path) = args.sdp_output.as_deref() {
+        if let Err(e) = streamer.write_sdp_file(path) {
+            log::error!("Failed to write SDP file: {e:#}");
+            process::exit(1);
+        }
+        log::info!("Wrote SDP file: {path}");
+    }
+
     let supervisor = RuntimeSupervisor::new();
     if let Err(e) = supervisor.run_streamer(&mut streamer).await {
         log::error!("Streaming failed: {:?}", e);

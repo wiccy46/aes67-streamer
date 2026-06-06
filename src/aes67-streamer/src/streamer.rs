@@ -6,6 +6,7 @@ use network::{
 };
 use ptp::{ClockIdentity, PtpClient, PtpConfig};
 use std::net::Ipv4Addr;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -190,6 +191,15 @@ impl Aes67Streamer {
             clock_identity,
             config,
         })
+    }
+
+    pub fn get_sdp(&self) -> String {
+        build_sdp(&self.sdp_context, self.clock_identity, &self.config)
+    }
+
+    pub fn write_sdp_file(&self, path: impl AsRef<Path>) -> Result<()> {
+        let sdp = self.get_sdp();
+        write_sdp_file(path.as_ref(), &sdp)
     }
 
     pub async fn run_until_cancelled(&mut self, shutdown: CancellationToken) -> Result<()> {
@@ -509,6 +519,20 @@ fn refresh_sdp_for_clock_identity(
     Some(build_sdp(context, next_identity, config))
 }
 
+fn write_sdp_file(path: &Path, sdp: &str) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create SDP output directory {}", parent.display())
+        })?;
+    }
+
+    std::fs::write(path, sdp)
+        .with_context(|| format!("failed to write SDP file {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +638,24 @@ mod tests {
         assert!(sdp.contains("a=rtpmap:101 L24/48000/8\r\n"));
         assert!(sdp.contains("a=ptime:2\r\n"));
         assert!(sdp.contains("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:0\r\n"));
+    }
+
+    #[test]
+    fn writes_sdp_file_and_creates_parent_directory() {
+        let path = std::env::temp_dir()
+            .join(format!("aes67-streamer-sdp-test-{}", std::process::id()))
+            .join("stream.sdp");
+        std::fs::remove_file(&path).ok();
+
+        write_sdp_file(&path, "v=0\r\ns=Test Stream\r\n").expect("SDP file should be written");
+
+        let contents = std::fs::read_to_string(&path).expect("SDP file should be readable");
+        assert_eq!(contents, "v=0\r\ns=Test Stream\r\n");
+
+        std::fs::remove_file(&path).ok();
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir(parent).ok();
+        }
     }
 
     #[test]

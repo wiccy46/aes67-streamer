@@ -39,6 +39,11 @@ async fn test_e2e_stream_metadata_controls_rtp_header() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_e2e_streamer_writes_sdp_output_file() -> Result<()> {
+    run_streaming_test(StreamerArgs::SdpOutput).await
+}
+
+#[tokio::test]
 async fn test_e2e_common_audio_file_formats_stream() -> Result<()> {
     for (index, filename) in ["tone.wav", "tone.flac", "tone.mp3", "tone.aiff"]
         .into_iter()
@@ -58,6 +63,7 @@ enum StreamerArgs {
     Sigint,
     LoopPlayback,
     Metadata,
+    SdpOutput,
 }
 
 async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
@@ -84,7 +90,20 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
         StreamerArgs::Sigint => ("239.1.2.6", 55008),
         StreamerArgs::LoopPlayback => ("239.1.2.7", 55009),
         StreamerArgs::Metadata => ("239.1.2.8", 55010),
+        StreamerArgs::SdpOutput => ("239.1.2.9", 55011),
     };
+    let sdp_output = if matches!(args_source, StreamerArgs::SdpOutput) {
+        Some(std::env::temp_dir().join(format!(
+            "aes67-streamer-e2e-{}-{port}.sdp",
+            std::process::id(),
+            port = preferred_port
+        )))
+    } else {
+        None
+    };
+    if let Some(path) = &sdp_output {
+        std::fs::remove_file(path).ok();
+    }
 
     let (listener, port) = bind_rtp_listener(multicast_addr, preferred_port)?;
 
@@ -104,6 +123,7 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
         StreamerArgs::Sigterm => {}
         StreamerArgs::Sigint => {}
         StreamerArgs::LoopPlayback => {}
+        StreamerArgs::SdpOutput => {}
     };
 
     if matches!(
@@ -112,6 +132,7 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
             | StreamerArgs::Sigterm
             | StreamerArgs::Sigint
             | StreamerArgs::LoopPlayback
+            | StreamerArgs::SdpOutput
     ) {
         command
             .arg("--file")
@@ -126,6 +147,10 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
 
     if matches!(args_source, StreamerArgs::LoopPlayback) {
         command.arg("--loop");
+    }
+
+    if let Some(path) = &sdp_output {
+        command.arg("--sdp-output").arg(path);
     }
 
     if !matches!(args_source, StreamerArgs::Sigterm | StreamerArgs::Sigint) {
@@ -221,6 +246,15 @@ async fn run_streaming_test(args_source: StreamerArgs) -> Result<()> {
         std::fs::remove_file(path).ok();
     }
     assert!(status.success(), "streamer exited with {status}");
+
+    if let Some(path) = sdp_output {
+        let sdp = std::fs::read_to_string(&path)?;
+        assert!(sdp.contains("m=audio "));
+        assert!(sdp.contains("RTP/AVP 97\r\n"));
+        assert!(sdp.contains("a=rtpmap:97 L24/48000/2\r\n"));
+        assert!(sdp.contains(&format!("c=IN IP4 {multicast_addr}/32\r\n")));
+        std::fs::remove_file(path).ok();
+    }
 
     Ok(())
 }

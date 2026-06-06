@@ -17,6 +17,7 @@ pub struct StreamerArgs {
     pub gain_db: f32,
     pub ttl: u8,
     pub sap: bool,
+    pub sdp_output: Option<String>,
     pub payload_type: u8,
     pub ssrc: Option<u32>,
     pub session_name: String,
@@ -123,6 +124,12 @@ fn streamer_cli() -> Command {
                 .long("interface")
                 .value_name("INTERFACE")
                 .help("Network interface name or IPv4 address [default: 127.0.0.1]")
+        )
+        .arg(
+            Arg::new("sdp-output")
+                .long("sdp-output")
+                .value_name("FILE")
+                .help("Write the generated SDP description to this file before streaming")
         )
         .arg(
             Arg::new("ptp-domain")
@@ -304,6 +311,11 @@ fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
         gain_db: merged_gain_db(config.as_ref()),
         ttl: merged_ttl(config.as_ref())?,
         sap: merged_sap(config.as_ref()),
+        sdp_output: cli_string(matches, "sdp-output").or_else(|| {
+            config
+                .as_ref()
+                .and_then(|config| config.stream.sdp_output.clone())
+        }),
         payload_type: merged_payload_type(config.as_ref())?,
         ssrc: merged_ssrc(config.as_ref()),
         session_name: merged_session_name(config.as_ref()),
@@ -572,6 +584,7 @@ mod tests {
             gain_db: 0.0,
             ttl: 32,
             sap: true,
+            sdp_output: None,
             payload_type: 97,
             ssrc: None,
             session_name: "AES67 Stream".to_string(),
@@ -788,6 +801,7 @@ mod tests {
                 address = "239.10.20.30"
                 port = 6000
                 interface = "127.0.0.1"
+                sdp_output = "configured.sdp"
                 packet_time_ms = 2
                 payload_type = 101
                 ssrc = 3735928559
@@ -811,6 +825,7 @@ mod tests {
         assert_eq!(args.address, "239.10.20.30");
         assert_eq!(args.port, 6000);
         assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
+        assert_eq!(args.sdp_output.as_deref(), Some("configured.sdp"));
         assert_eq!(args.ptp_domain, Some(7));
         assert_eq!(args.duration_seconds, Some(1.5));
         assert!(args.loop_playback);
@@ -894,6 +909,22 @@ mod tests {
         assert_eq!(args.file, "test.wav");
         assert_eq!(args.address, "239.192.1.1");
         assert_eq!(args.port, 5004);
+    }
+
+    #[test]
+    fn streamer_cli_accepts_sdp_output_path() {
+        let args = parse_streamer_args_from([
+            "aes67-streamer",
+            "--file",
+            "test.wav",
+            "--address",
+            "239.192.1.1",
+            "--sdp-output",
+            "stream.sdp",
+        ])
+        .expect("streamer args should parse");
+
+        assert_eq!(args.sdp_output.as_deref(), Some("stream.sdp"));
     }
 
     #[test]

@@ -17,7 +17,7 @@ receives AES67 RTP into CPAL audio output.
 - **Real-time Processing**: Node-based audio pipeline with gain control
 
 ### Network Streaming
-- **AES67-Oriented RTP**: 48 kHz, 24-bit L24 RTP streaming with generated SDP
+- **AES67-Oriented RTP**: 48 kHz, 24-bit L24 RTP streaming with generated SDP and optional SDP file export
 - **RTP over UDP**: RFC 3550 compliant with proper sequence numbering
 - **Multicast**: Standard administratively scoped multicast addresses
 - **SAP Announcements**: Announces generated SDP over SAP by default, configurable with `stream.sap`, stream discoverable by other AES67 devices
@@ -68,7 +68,8 @@ and the version match.
   --file audio.wav \
   --address 239.69.83.1 \
   --port 5004 \
-  --interface 192.168.1.100
+  --interface 192.168.1.100 \
+  --sdp-output stream.sdp
 ```
 
 ### Player Usage
@@ -157,6 +158,7 @@ name = "AES67 Stream"
 address = "239.69.83.1"
 port = 5004
 interface = "192.168.1.100"
+sdp_output = "stream.sdp"
 packet_time_ms = 1
 payload_type = 97
 ssrc = 305419896
@@ -202,9 +204,9 @@ packet_time_ms = 1
 ttl = 32
 ```
 
-The streamer generates SDP from the loaded file and stream settings and logs it
-at startup. SDP file export can be added later without making users hand-write
-SDP in the config.
+The streamer generates SDP from the loaded file and stream settings, logs it at
+startup, and can write it to a file with `--sdp-output` or `stream.sdp_output`.
+The player can then join the stream with `aes67-player --sdp stream.sdp`.
 
 The streamer applies fixed DSCP values as professional defaults for networks
 that honor QoS marking:
@@ -277,6 +279,7 @@ tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 | `--address` | Multicast IP address; required unless set as `stream.address` in config | Required | `239.69.83.1` |
 | `--port` | UDP port number | `5004` | `5004` |
 | `--interface` | Network interface IP | Auto-detect | `192.168.1.100` |
+| `--sdp-output` | Write generated SDP to a file before streaming | None | `stream.sdp` |
 | `--ptp-domain` | PTP domain number | `0` | `1` |
 | `--duration-seconds` | Stop after a bounded duration | Unlimited | `2` |
 | `--loop` | Repeat the audio file instead of stopping at end-of-file | `false` | - |
