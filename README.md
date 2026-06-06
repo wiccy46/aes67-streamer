@@ -348,6 +348,10 @@ These archives are the input for package-manager metadata. Homebrew can point a
 formula at the tarball URL and checksum. Debian/apt packaging can install the
 same binaries and docs into the standard filesystem layout.
 
+The Homebrew formula template lives at `packaging/homebrew/aes67-tools.rb`.
+After uploading release archives, replace its `REPLACE_WITH_*_SHA256`
+placeholders with the matching values from `target/release-packages/*.sha256`.
+
 Check the player release CLI surface:
 
 ```bash
