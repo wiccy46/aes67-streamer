@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 use crate::output::NullOutput;
 use crate::output::{build_cpal_output, AudioOutput, OutputStats};
 
-const RTP_RECEIVE_BUFFER_BYTES: usize = 2048;
+const MIN_RTP_RECEIVE_BUFFER_BYTES: usize = 2048;
+const RTP_FIXED_HEADER_BYTES: usize = 12;
+const L24_BYTES_PER_SAMPLE: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct PlayerConfig {
@@ -100,7 +102,7 @@ impl Aes67Player {
     }
 
     pub async fn run_until_cancelled(&mut self, shutdown: CancellationToken) -> Result<()> {
-        let mut recv_buffer = [0u8; RTP_RECEIVE_BUFFER_BYTES];
+        let mut recv_buffer = vec![0u8; receive_buffer_bytes(&self.session)];
         let mut decode_buffer = Vec::new();
         let start_time = Instant::now();
         let mut playout_interval =
@@ -353,6 +355,13 @@ fn jitter_capacity_packets(session: &Aes67SessionDescription) -> usize {
     packets_per_second.max(128)
 }
 
+fn receive_buffer_bytes(session: &Aes67SessionDescription) -> usize {
+    let payload_bytes =
+        session.get_frames_per_packet() as usize * session.channels as usize * L24_BYTES_PER_SAMPLE;
+
+    (RTP_FIXED_HEADER_BYTES + payload_bytes).max(MIN_RTP_RECEIVE_BUFFER_BYTES)
+}
+
 fn playback_warning_messages(
     player_stats: PlayerStats,
     jitter_stats: JitterBufferStats,
@@ -455,6 +464,30 @@ mod tests {
         assert_eq!(preroll_packets(50, 1), 50);
         assert_eq!(preroll_packets(51, 2), 26);
         assert_eq!(preroll_packets(1, 2), 1);
+    }
+
+    #[test]
+    fn receive_buffer_fits_release_target_channel_count() {
+        let session = Aes67SessionDescription {
+            session_name: None,
+            address: Ipv4Addr::LOCALHOST,
+            ttl: None,
+            port: 5004,
+            payload_type: 97,
+            encoding: AudioEncoding::L24,
+            sample_rate: 48_000,
+            channels: 8,
+            packet_time_ms: 2,
+            ts_refclk: None,
+            mediaclk: None,
+        };
+
+        let expected_payload_bytes = session.get_frames_per_packet() as usize
+            * session.channels as usize
+            * L24_BYTES_PER_SAMPLE;
+        let expected_packet_bytes = RTP_FIXED_HEADER_BYTES + expected_payload_bytes;
+
+        assert_eq!(receive_buffer_bytes(&session), expected_packet_bytes);
     }
 
     #[tokio::test]
