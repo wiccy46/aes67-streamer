@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use audio::AudioSample;
 
 const RTP_FIXED_HEADER_LEN: usize = 12;
@@ -173,6 +173,19 @@ fn decode_l24_sample(bytes: &[u8]) -> f32 {
     }
 }
 
+fn encode_l24_sample(sample: f32) -> [u8; L24_BYTES_PER_SAMPLE] {
+    let sample_f32 = sample.clamp(-1.0, 1.0);
+    let scale = if sample_f32 < 0.0 {
+        L24_NEGATIVE_SCALE
+    } else {
+        L24_POSITIVE_SCALE
+    };
+    let sample_i32 = (sample_f32 * scale) as i32;
+    let bytes = sample_i32.to_be_bytes();
+
+    [bytes[1], bytes[2], bytes[3]]
+}
+
 /// RTP packet builder for audio samples
 pub struct RtpPacketizer {
     /// Current sequence number
@@ -286,10 +299,7 @@ impl RtpPacketizer {
             for ch_idx in 0..channels {
                 let sample_idx = ch_idx * frames + frame_idx;
                 if sample_idx < sample.data.len() {
-                    let sample_f32 = sample.data[sample_idx].clamp(-1.0, 1.0);
-                    let sample_i32 = (sample_f32 * L24_POSITIVE_SCALE) as i32;
-                    let bytes = sample_i32.to_be_bytes();
-                    payload.extend_from_slice(&bytes[1..4]); // Skip most significant byte for 24-bit
+                    payload.extend_from_slice(&encode_l24_sample(sample.data[sample_idx]));
                 }
             }
         }
@@ -595,10 +605,8 @@ mod tests {
         // 1.0 -> 0x7FFFFF (max positive)
         assert_eq!(&payload[0..3], &[0x7F, 0xFF, 0xFF]);
 
-        // -1.0 -> 0x800001 (max negative in 24-bit two's complement)
-        // When we multiply -1.0 * 8388607, we get -8388607, which is 0xFF800001 as u32
-        // Taking bytes [1..4] gives us [0x80, 0x00, 0x01]
-        assert_eq!(&payload[3..6], &[0x80, 0x00, 0x01]);
+        // -1.0 -> 0x800000 (max negative in 24-bit two's complement)
+        assert_eq!(&payload[3..6], &[0x80, 0x00, 0x00]);
 
         // 0.0 -> 0x000000
         assert_eq!(&payload[6..9], &[0x00, 0x00, 0x00]);
@@ -749,9 +757,7 @@ mod tests {
     }
 
     fn pcm24_bytes(sample: f32) -> [u8; 3] {
-        let sample_i32 = (sample.clamp(-1.0, 1.0) * L24_POSITIVE_SCALE) as i32;
-        let bytes = sample_i32.to_be_bytes();
-        [bytes[1], bytes[2], bytes[3]]
+        encode_l24_sample(sample)
     }
 
     fn assert_close(actual: f32, expected: f32) {
