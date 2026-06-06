@@ -7,7 +7,7 @@ use network::{
 };
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
-use tokio::time;
+use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(any(test, debug_assertions))]
@@ -103,6 +103,9 @@ impl Aes67Player {
         let mut recv_buffer = [0u8; RTP_RECEIVE_BUFFER_BYTES];
         let mut decode_buffer = Vec::new();
         let start_time = Instant::now();
+        let mut playout_interval =
+            time::interval(Duration::from_millis(self.session.packet_time_ms as u64));
+        playout_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let stop_reason: &'static str;
 
         loop {
@@ -125,6 +128,10 @@ impl Aes67Player {
                         stop_reason = "shutdown requested";
                         break;
                     }
+                    _ = playout_interval.tick(), if self.started_playout && !self.jitter.is_empty() => {
+                        self.playout_next_packet(&mut decode_buffer)?;
+                        continue;
+                    }
                     result = time::timeout(remaining, receive) => match result {
                         Ok(received) => received?,
                         Err(_) => {
@@ -139,6 +146,10 @@ impl Aes67Player {
                     _ = shutdown.cancelled() => {
                         stop_reason = "shutdown requested";
                         break;
+                    }
+                    _ = playout_interval.tick(), if self.started_playout && !self.jitter.is_empty() => {
+                        self.playout_next_packet(&mut decode_buffer)?;
+                        continue;
                     }
                     received = receive => received?,
                 }
@@ -155,10 +166,6 @@ impl Aes67Player {
             }
 
             self.start_playout_if_prerolled(&mut decode_buffer)?;
-
-            if self.started_playout {
-                self.decode_available_packets(&mut decode_buffer)?;
-            }
         }
 
         self.decode_available_packets(&mut decode_buffer)?;
@@ -171,31 +178,52 @@ impl Aes67Player {
         Ok(())
     }
 
+    fn playout_next_packet(&mut self, decode_buffer: &mut Vec<f32>) -> Result<bool> {
+        let Some(packet) = self.jitter.pop_next() else {
+            return Ok(false);
+        };
+
+        self.decode_playout_packet(packet, decode_buffer)?;
+        Ok(true)
+    }
+
     fn decode_available_packets(&mut self, decode_buffer: &mut Vec<f32>) -> Result<()> {
         while !self.jitter.is_empty() {
-            match self.jitter.pop_next() {
-                Some(PlayoutPacket::Packet(packet)) => {
-                    let frames = decode_l24_payload_interleaved(
-                        &packet.payload,
-                        self.session.channels,
-                        decode_buffer,
-                    )?;
-                    if frames as u32 != self.session.get_frames_per_packet() {
-                        return Err(anyhow!(
-                            "RTP packet decoded to {frames} frames; expected {}",
-                            self.session.get_frames_per_packet()
-                        ));
-                    }
-                    self.output
-                        .write_interleaved(decode_buffer, self.session.channels)?;
-                    self.stats.packets_decoded += 1;
-                    self.stats.frames_decoded += frames as u64;
+            let Some(packet) = self.jitter.pop_next() else {
+                break;
+            };
+            self.decode_playout_packet(packet, decode_buffer)?;
+        }
+
+        Ok(())
+    }
+
+    fn decode_playout_packet(
+        &mut self,
+        packet: PlayoutPacket,
+        decode_buffer: &mut Vec<f32>,
+    ) -> Result<()> {
+        match packet {
+            PlayoutPacket::Packet(packet) => {
+                let frames = decode_l24_payload_interleaved(
+                    &packet.payload,
+                    self.session.channels,
+                    decode_buffer,
+                )?;
+                if frames as u32 != self.session.get_frames_per_packet() {
+                    return Err(anyhow!(
+                        "RTP packet decoded to {frames} frames; expected {}",
+                        self.session.get_frames_per_packet()
+                    ));
                 }
-                Some(PlayoutPacket::Silence { frames, .. }) => {
-                    self.output.write_silence(frames, self.session.channels)?;
-                    self.stats.silence_frames += frames as u64;
-                }
-                None => break,
+                self.output
+                    .write_interleaved(decode_buffer, self.session.channels)?;
+                self.stats.packets_decoded += 1;
+                self.stats.frames_decoded += frames as u64;
+            }
+            PlayoutPacket::Silence { frames, .. } => {
+                self.output.write_silence(frames, self.session.channels)?;
+                self.stats.silence_frames += frames as u64;
             }
         }
 
@@ -453,6 +481,26 @@ mod tests {
         assert!(player.started_playout);
         assert_eq!(player.stats.packets_decoded, 2);
         assert_eq!(player.output.get_stats().frames_written, 96);
+    }
+
+    #[tokio::test]
+    async fn playout_tick_decodes_only_one_packet_after_preroll() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut player = test_player_with_output(Box::new(RecordingOutput {
+            events: events.clone(),
+        }));
+        player.started_playout = true;
+
+        player.jitter.insert(test_rtp_packet(0, 0)).unwrap();
+        player.jitter.insert(test_rtp_packet(1, 48)).unwrap();
+
+        let mut decode_buffer = Vec::new();
+        assert!(player.playout_next_packet(&mut decode_buffer).unwrap());
+
+        assert_eq!(player.stats.packets_decoded, 1);
+        assert_eq!(player.output.get_stats().frames_written, 48);
+        assert_eq!(player.jitter.len(), 1);
+        assert_eq!(events.lock().unwrap().as_slice(), ["write:96"]);
     }
 
     #[test]
