@@ -1,6 +1,6 @@
-# AES67 Streamer and Player
+# AES67 Tools
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/your-org/aes67-streamer)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/wiccy46/aes67-tools)
 [![AES67 Compliant](https://img.shields.io/badge/AES67-compliant-blue)](https://www.aes.org/publications/standards/search.cfm?docID=96)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
@@ -43,8 +43,8 @@ To build from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/aes67-streamer.git
-cd aes67-streamer
+git clone https://github.com/wiccy46/aes67-tools.git
+cd aes67-tools
 
 # Build the project
 cargo build --release

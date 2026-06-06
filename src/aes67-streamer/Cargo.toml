@@ -2,7 +2,7 @@
 name = "aes67-streamer"
 version = "0.1.0"
 edition = "2021"
-repository = "https://github.com/wiccy46/aes67-streamer"
+repository = "https://github.com/wiccy46/aes67-tools"
 description = "Audio File Streamer on RTP with AES67 compliance"
 
 [dev-dependencies]
