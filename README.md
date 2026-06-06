@@ -326,6 +326,28 @@ bash scripts/player_soak_loopback.sh
 bash scripts/soak_loopback.sh
 ```
 
+Build distributable release archives:
+
+```bash
+bash scripts/package_release.sh
+```
+
+The package script builds both public binaries in release mode, creates
+`target/release-packages/aes67-tools-<version>-<target>.tar.gz`, and writes a
+matching `.sha256` checksum file. Use `--dry-run` to verify the package name,
+target triple, output path, and archive layout without building.
+
+The tarball contains:
+
+- `bin/aes67-streamer`
+- `bin/aes67-player`
+- `README.md`, `LICENSE`, and `VERSION`
+- example streamer TOML and SDP files under `examples/`
+
+These archives are the input for package-manager metadata. Homebrew can point a
+formula at the tarball URL and checksum. Debian/apt packaging can install the
+same binaries and docs into the standard filesystem layout.
+
 Check the player release CLI surface:
 
 ```bash
