@@ -365,10 +365,7 @@ fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
     };
 
     let payload_type = match payload_type {
-        Some(payload_type) if payload_type > 127 => {
-            return Err(anyhow!("--payload-type must be between 0 and 127"));
-        }
-        Some(payload_type) => Some(payload_type),
+        Some(payload_type) => Some(validate_l24_payload_type(payload_type, "--payload-type")?),
         None if sdp.is_none() => Some(97),
         None => None,
     };
@@ -470,8 +467,16 @@ fn merged_payload_type(config: Option<&Config>) -> Result<u8> {
         .and_then(|config| config.stream.payload_type)
         .unwrap_or(97);
 
-    if payload_type > 127 {
-        return Err(anyhow!("stream.payload_type must be between 0 and 127"));
+    validate_l24_payload_type(payload_type, "stream.payload_type")?;
+
+    Ok(payload_type)
+}
+
+fn validate_l24_payload_type(payload_type: u8, name: &str) -> Result<u8> {
+    if !(96..=127).contains(&payload_type) {
+        return Err(anyhow!(
+            "{name} must be a dynamic RTP payload type between 96 and 127 for L24"
+        ));
     }
 
     Ok(payload_type)
@@ -852,6 +857,30 @@ mod tests {
     }
 
     #[test]
+    fn streamer_config_rejects_static_payload_type_for_l24() {
+        let path = write_temp_config(
+            r#"
+                [audio]
+                file = "configured.wav"
+
+                [stream]
+                address = "239.10.20.30"
+                payload_type = 95
+            "#,
+        );
+
+        let result = parse_args_from([
+            "aes67-streamer",
+            "--config",
+            path.to_str().expect("temp path should be utf-8"),
+        ]);
+
+        assert!(result.is_err());
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn parse_streamer_args_from_keeps_existing_streamer_cli_behavior() {
         let args = parse_streamer_args_from([
             "aes67-streamer",
@@ -921,6 +950,21 @@ mod tests {
         assert_eq!(args.payload_type, Some(101));
         assert_eq!(args.latency_ms, 75);
         assert_eq!(args.output_device.as_deref(), Some("Studio Monitor"));
+    }
+
+    #[test]
+    fn player_basic_cli_rejects_static_payload_type_for_l24() {
+        let result = parse_player_args_from([
+            "aes67-player",
+            "--address",
+            "239.192.1.1",
+            "--port",
+            "5004",
+            "--payload-type",
+            "95",
+        ]);
+
+        assert!(result.is_err());
     }
 
     #[test]

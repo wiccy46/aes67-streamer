@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
 use crate::rtp::RtpPacket;
@@ -52,8 +52,10 @@ pub struct RtpJitterBuffer {
 
 impl RtpJitterBuffer {
     pub fn new(config: JitterBufferConfig) -> Result<Self> {
-        if config.payload_type > 127 {
-            return Err(anyhow!("payload type must be between 0 and 127"));
+        if !(96..=127).contains(&config.payload_type) {
+            return Err(anyhow!(
+                "L24 payload type must be dynamic, between 96 and 127"
+            ));
         }
         if config.frames_per_packet == 0 {
             return Err(anyhow!("frames per packet must be greater than zero"));
@@ -304,6 +306,18 @@ mod tests {
         packet.header.payload_type = 98;
 
         assert!(buffer.insert(packet).is_err());
+    }
+
+    #[test]
+    fn static_payload_type_config_is_rejected_for_l24() {
+        let result = RtpJitterBuffer::new(JitterBufferConfig {
+            payload_type: 95,
+            ssrc: None,
+            frames_per_packet: 48,
+            capacity_packets: 16,
+        });
+
+        assert!(result.is_err());
     }
 
     #[test]

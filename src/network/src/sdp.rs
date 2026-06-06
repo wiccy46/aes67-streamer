@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -210,8 +210,10 @@ fn parse_payload_type(value: &str) -> Result<u8> {
     let payload_type = value
         .parse::<u8>()
         .with_context(|| format!("invalid RTP payload type {value}"))?;
-    if payload_type > 127 {
-        return Err(anyhow!("RTP payload type must be between 0 and 127"));
+    if !(96..=127).contains(&payload_type) {
+        return Err(anyhow!(
+            "L24 RTP payload type must be dynamic, between 96 and 127"
+        ));
     }
 
     Ok(payload_type)
@@ -311,39 +313,42 @@ mod tests {
     }
 
     #[test]
+    fn rejects_static_payload_type_for_l24() {
+        let result = parse_sdp(
+            "c=IN IP4 239.192.1.1/32\n\
+             m=audio 5004 RTP/AVP 95\n\
+             a=rtpmap:95 L24/48000/2\n",
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn rejects_unsupported_format_values() {
-        assert!(
-            parse_sdp(
-                "c=IN IP4 239.192.1.1/32\n\
+        assert!(parse_sdp(
+            "c=IN IP4 239.192.1.1/32\n\
                  m=audio 5004 RTP/AVP 97\n\
                  a=rtpmap:97 L16/48000/2\n"
-            )
-            .is_err()
-        );
-        assert!(
-            parse_sdp(
-                "c=IN IP4 239.192.1.1/32\n\
+        )
+        .is_err());
+        assert!(parse_sdp(
+            "c=IN IP4 239.192.1.1/32\n\
                  m=audio 5004 RTP/AVP 97\n\
                  a=rtpmap:97 L24/44100/2\n"
-            )
-            .is_err()
-        );
-        assert!(
-            parse_sdp(
-                "c=IN IP4 239.192.1.1/32\n\
+        )
+        .is_err());
+        assert!(parse_sdp(
+            "c=IN IP4 239.192.1.1/32\n\
                  m=audio 5004 RTP/AVP 97\n\
                  a=rtpmap:97 L24/48000/9\n"
-            )
-            .is_err()
-        );
-        assert!(
-            parse_sdp(
-                "c=IN IP4 239.192.1.1/32\n\
+        )
+        .is_err());
+        assert!(parse_sdp(
+            "c=IN IP4 239.192.1.1/32\n\
                  m=audio 5004 RTP/AVP 97\n\
                  a=rtpmap:97 L24/48000/2\n\
                  a=ptime:0.5\n"
-            )
-            .is_err()
-        );
+        )
+        .is_err());
     }
 }
