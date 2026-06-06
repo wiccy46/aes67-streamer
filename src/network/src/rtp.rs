@@ -225,13 +225,17 @@ impl RtpPacketizer {
 
     /// Create RTP packet from audio sample
     pub fn create_packet(&mut self, sample: &AudioSample) -> Result<RtpPacket> {
-        let timestamp = self.base_timestamp + (self.samples_processed as u32);
+        let timestamp = self
+            .base_timestamp
+            .wrapping_add(self.samples_processed as u32);
         self.create_packet_at_timestamp(sample, timestamp)
     }
 
     /// Write a serialized RTP packet into an existing buffer.
     pub fn write_packet_into(&mut self, sample: &AudioSample, output: &mut Vec<u8>) -> Result<()> {
-        let timestamp = self.base_timestamp + (self.samples_processed as u32);
+        let timestamp = self
+            .base_timestamp
+            .wrapping_add(self.samples_processed as u32);
         self.write_packet_at_timestamp_into(sample, timestamp, output)
     }
 
@@ -540,6 +544,24 @@ mod tests {
         assert_eq!(first.header.timestamp, 0xABCDEF00);
         assert_eq!(second.header.timestamp, 0xABCDEF02);
         assert_eq!(second.header.sequence_number, 1);
+    }
+
+    #[test]
+    fn packet_timestamps_wrap_at_u32_boundary() {
+        let sample = AudioSample {
+            data: vec![0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.2, -0.2],
+            channels: 2,
+            sample_rate: 48000,
+            frames: 4,
+        };
+        let mut packetizer = RtpPacketizer::new(97, 0x12345678);
+        packetizer.set_base_timestamp(u32::MAX - 1);
+
+        let first = packetizer.create_packet(&sample).unwrap();
+        let second = packetizer.create_packet(&sample).unwrap();
+
+        assert_eq!(first.header.timestamp, u32::MAX - 1);
+        assert_eq!(second.header.timestamp, 2);
     }
 
     #[test]
