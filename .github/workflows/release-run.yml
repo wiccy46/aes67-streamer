@@ -1,0 +1,128 @@
+name: Release Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run checks and build package without creating GitHub release or updating Homebrew tap"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TARGET: aarch64-apple-darwin
+  HOMEBREW_TAP_REPO: wiccy46/homebrew-aes67
+
+jobs:
+  release:
+    name: Build and publish Apple Silicon release
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RELEASE_TARGET }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release metadata
+        run: bash scripts/check_release_ready.sh
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build release archive
+        run: AES67_RELEASE_TARGET="${RELEASE_TARGET}" bash scripts/package_release.sh
+
+      - name: Validate release assets
+        run: |
+          archive="target/release-packages/aes67-tools-${{ steps.version.outputs.version }}-${RELEASE_TARGET}.tar.gz"
+          checksum="${archive}.sha256"
+          test -f "$archive"
+          test -f "$checksum"
+          awk '{ print $1 }' "$checksum" | grep -Eq '^[0-9a-fA-F]{64}$'
+
+      - name: Create or update GitHub release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          version="${{ steps.version.outputs.version }}"
+          archive="target/release-packages/aes67-tools-${version}-${RELEASE_TARGET}.tar.gz"
+          checksum="${archive}.sha256"
+
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            tag_commit="$(git rev-list -n 1 "$tag")"
+            head_commit="$(git rev-parse HEAD)"
+            if [ "$tag_commit" != "$head_commit" ]; then
+              echo "Tag $tag already points to $tag_commit, not current HEAD $head_commit" >&2
+              exit 1
+            fi
+          else
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "$archive" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            notes_file="$(mktemp)"
+            awk -v version="$version" '
+              $0 ~ "^##[[:space:]]+\\[?" version "\\]?" { capture = 1; next }
+              capture && /^##[[:space:]]+/ { exit }
+              capture { print }
+            ' CHANGELOG.md > "$notes_file"
+            if [ ! -s "$notes_file" ]; then
+              echo "Release v${version}" > "$notes_file"
+            fi
+            gh release create "$tag" "$archive" "$checksum" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "aes67-tools v${version}" \
+              --notes-file "$notes_file"
+          fi
+
+      - name: Update Homebrew tap
+        if: ${{ !inputs.dry_run }}
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          test -n "$TAP_TOKEN"
+          version="${{ steps.version.outputs.version }}"
+          checksum="target/release-packages/aes67-tools-${version}-${RELEASE_TARGET}.tar.gz.sha256"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" homebrew-tap
+          bash scripts/update_homebrew_formula.sh homebrew-tap/Formula/aes67-tools.rb "$version" "$checksum"
+
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- Formula/aes67-tools.rb; then
+            echo "Homebrew formula already up to date"
+            exit 0
+          fi
+
+          git add Formula/aes67-tools.rb
+          git commit -m "Update aes67-tools to ${version}"
+          git push origin HEAD:main

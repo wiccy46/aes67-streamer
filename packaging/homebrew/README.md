@@ -2,6 +2,10 @@
 
 This directory contains the Homebrew formula template for `aes67-tools`.
 
+The normal release path is the manual GitHub Actions workflow
+`.github/workflows/release-run.yml`. It updates the live tap repository
+`wiccy46/homebrew-aes67` after the GitHub release asset has been uploaded.
+
 Release flow:
 
 1. Build release archives for each supported target:

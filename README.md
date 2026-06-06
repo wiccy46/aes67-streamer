@@ -314,10 +314,32 @@ tcpdump -i eth0 -w capture.pcap host YOURINTERFACE_IP
 
 ### Release Validation
 
-Before tagging a release candidate, run:
+Before starting a release, finish the code change, update `CHANGELOG.md`, and
+bump all release versions:
+
+- `VERSION`
+- `src/aes67-streamer/Cargo.toml`
+- `src/aes67-player/Cargo.toml`
+
+The manual release workflow `.github/workflows/release-run.yml` validates those
+files, builds the Apple Silicon macOS archive, creates or updates the GitHub
+release, and updates the Homebrew tap. It requires the repository secret
+`HOMEBREW_TAP_TOKEN` with write access to `wiccy46/homebrew-aes67`.
+
+Run it from GitHub Actions:
+
+```text
+Actions -> Release Run -> Run workflow
+```
+
+Use `dry_run=true` first to run validation and package building without tagging,
+creating a GitHub release, or pushing the Homebrew tap.
+
+Before triggering a non-dry-run release, run local checks when practical:
 
 ```bash
 cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p aes67-player
 cargo check --release -p aes67-player
 cargo build --release -p aes67-player
@@ -326,7 +348,7 @@ bash scripts/player_soak_loopback.sh
 bash scripts/soak_loopback.sh
 ```
 
-Build distributable release archives:
+Build a distributable release archive locally for debugging:
 
 ```bash
 bash scripts/package_release.sh
@@ -348,9 +370,10 @@ These archives are the input for package-manager metadata. Homebrew can point a
 formula at the tarball URL and checksum. Debian/apt packaging can install the
 same binaries and docs into the standard filesystem layout.
 
-The Homebrew formula template lives at `packaging/homebrew/aes67-tools.rb`.
-After uploading release archives, replace its `REPLACE_WITH_*_SHA256`
-placeholders with the matching values from `target/release-packages/*.sha256`.
+The Homebrew formula template lives at `packaging/homebrew/aes67-tools.rb`. The
+release workflow updates the live `wiccy46/homebrew-aes67` tap with the
+generated archive URL and checksum. Only replace template placeholders manually
+when testing packaging outside the workflow.
 
 Check the player release CLI surface:
 
