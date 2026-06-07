@@ -188,7 +188,11 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          test -n "$TAP_TOKEN"
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error title=Missing HOMEBREW_TAP_TOKEN::Add a repository secret named HOMEBREW_TAP_TOKEN with write access to wiccy46/homebrew-aes67."
+            exit 1
+          fi
+
           version="${{ needs.validate.outputs.version }}"
           macos_checksum="target/release-packages/aes67-tools-${version}-aarch64-apple-darwin.tar.gz.sha256"
           linux_checksum="target/release-packages/aes67-tools-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256"
