@@ -148,8 +148,22 @@ Use `dry_run=true` first. A dry run validates metadata, runs tests and clippy,
 and builds both release packages without tagging, creating a GitHub release, or
 pushing the Homebrew tap.
 
-Set `update_homebrew=false` to publish only the GitHub release assets. Set
-`update_homebrew=true` only after `HOMEBREW_TAP_TOKEN` is configured.
+For a real release, leave `update_homebrew=true`. That is the default release
+path: the workflow creates or updates the GitHub release, uploads the archives,
+then commits the generated formula to `wiccy46/homebrew-aes67`. Set
+`update_homebrew=false` only for an emergency release where the tap will be
+updated separately.
+
+One-time Homebrew automation setup:
+
+1. Create a fine-grained GitHub token with access to `wiccy46/homebrew-aes67`.
+2. Grant `Contents: Read and write` permission.
+3. Add it to `wiccy46/aes67-tools` as an Actions repository secret named
+   `HOMEBREW_TAP_TOKEN`.
+
+The workflow validates this secret before publishing a non-dry-run release when
+`update_homebrew=true`, so a missing token fails before a GitHub release is
+created.
 
 The workflow builds and publishes:
 

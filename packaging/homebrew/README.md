@@ -3,8 +3,14 @@
 This directory contains the Homebrew formula template for `aes67-tools`.
 
 The normal release path is the manual GitHub Actions workflow
-`.github/workflows/release-run.yml`. It updates the live tap repository
-`wiccy46/homebrew-aes67` after the GitHub release asset has been uploaded.
+`.github/workflows/release-run.yml`. For a non-dry-run release, leave
+`update_homebrew=true`; the workflow uploads the GitHub release assets and then
+commits the generated formula to the live tap repository
+`wiccy46/homebrew-aes67`.
+
+That cross-repository push requires a one-time Actions secret named
+`HOMEBREW_TAP_TOKEN` in `wiccy46/aes67-tools`. Use a fine-grained GitHub token
+with `Contents: Read and write` access to `wiccy46/homebrew-aes67`.
 
 Manual local formula test flow:
 
