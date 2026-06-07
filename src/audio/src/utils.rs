@@ -52,7 +52,7 @@ pub fn flat_noninterleaved_to_channels(flat_noninterleaved: &[f32], channels: us
     let mut channel_vecs = Vec::with_capacity(channels);
     
     // Calculate actual frames available per channel
-    let available_frames = if channels > 0 { flat_noninterleaved.len() / channels } else { 0 };
+    let available_frames = flat_noninterleaved.len().checked_div(channels).unwrap_or(0);
     let actual_frames = frames.min(available_frames);
     
     for ch_idx in 0..channels {
