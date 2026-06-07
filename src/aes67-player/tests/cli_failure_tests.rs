@@ -13,6 +13,13 @@ fn version_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION")
 }
 
+fn version_from_file() -> String {
+    fs::read_to_string(version_file())
+        .expect("VERSION file should exist")
+        .trim()
+        .to_string()
+}
+
 #[test]
 fn help_exits_successfully_and_hides_test_only_output() {
     let output = Command::new(binary())
@@ -46,19 +53,13 @@ fn version_exits_successfully() {
         output.status.success(),
         "version should exit successfully\n{logs}"
     );
-    assert_eq!(
-        logs.trim(),
-        format!("aes67-player {}", env!("CARGO_PKG_VERSION"))
-    );
+    assert_eq!(logs.trim(), format!("aes67-player {}", version_from_file()));
 }
 
 #[test]
-fn version_file_matches_player_package_version_and_is_valid_semver() {
-    let version = fs::read_to_string(version_file()).expect("VERSION file should exist");
-    let version = version.trim();
-
-    Version::parse(version).expect("VERSION should be valid SemVer");
-    assert_eq!(version, env!("CARGO_PKG_VERSION"));
+fn version_file_is_valid_semver() {
+    let version = version_from_file();
+    Version::parse(&version).expect("VERSION should be valid SemVer");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 class Aes67Tools < Formula
   desc "AES67-oriented RTP audio streamer and player"
   homepage "https://github.com/wiccy46/aes67-tools"
-  version "0.1.0"
+  version "REPLACE_WITH_VERSION"
   license "GPL-3.0-only"
 
   on_macos do

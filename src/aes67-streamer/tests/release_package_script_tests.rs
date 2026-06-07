@@ -9,18 +9,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[test]
 fn package_release_dry_run_reports_package_layout() {
     let temp = TempDir::new("dry-run");
+    let target = "x86_64-unknown-linux-gnu";
+    let package_name = format!("aes67-tools-{}-{target}", release_version());
     let output = Command::new("bash")
         .arg(repo_root().join("scripts/package_release.sh"))
         .arg("--dry-run")
         .env("AES67_RELEASE_OUTPUT_DIR", temp.path().join("out"))
-        .env("AES67_RELEASE_TARGET", "x86_64-unknown-linux-gnu")
+        .env("AES67_RELEASE_TARGET", target)
         .output()
         .expect("script should run");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Release package configuration"));
-    assert!(stdout.contains("Package:     aes67-tools-0.1.0-x86_64-unknown-linux-gnu"));
+    assert!(stdout.contains(&format!("Package:     {package_name}")));
     assert!(stdout.contains("bin/aes67-streamer"));
     assert!(stdout.contains("bin/aes67-player"));
     assert!(stdout.contains("examples/streamer.toml"));
@@ -33,6 +35,8 @@ fn package_release_dry_run_reports_package_layout() {
 fn package_release_creates_tarball_with_expected_layout() {
     let temp = TempDir::new("package");
     let bin_dir = temp.path().join("bin");
+    let target = "x86_64-unknown-linux-gnu";
+    let package_name = format!("aes67-tools-{}-{target}", release_version());
     fs::create_dir_all(&bin_dir).expect("test bin dir should be writable");
     write_executable(&bin_dir.join("aes67-streamer"));
     write_executable(&bin_dir.join("aes67-player"));
@@ -42,7 +46,7 @@ fn package_release_creates_tarball_with_expected_layout() {
         .env("AES67_RELEASE_OUTPUT_DIR", temp.path().join("out"))
         .env("AES67_RELEASE_BINARY_DIR", &bin_dir)
         .env("AES67_RELEASE_SKIP_BUILD", "1")
-        .env("AES67_RELEASE_TARGET", "x86_64-unknown-linux-gnu")
+        .env("AES67_RELEASE_TARGET", target)
         .output()
         .expect("script should run");
 
@@ -52,13 +56,15 @@ fn package_release_creates_tarball_with_expected_layout() {
         output_text(&output)
     );
 
-    let archive = temp
-        .path()
-        .join("out/aes67-tools-0.1.0-x86_64-unknown-linux-gnu.tar.gz");
+    let archive = temp.path().join(format!("out/{package_name}.tar.gz"));
     let checksum = temp
         .path()
-        .join("out/aes67-tools-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256");
-    assert!(archive.exists(), "archive should exist at {}", archive.display());
+        .join(format!("out/{package_name}.tar.gz.sha256"));
+    assert!(
+        archive.exists(),
+        "archive should exist at {}",
+        archive.display()
+    );
     assert!(
         checksum.exists(),
         "checksum should exist at {}",
@@ -76,7 +82,6 @@ fn package_release_creates_tarball_with_expected_layout() {
         output_text(&tar_output)
     );
     let contents = String::from_utf8_lossy(&tar_output.stdout);
-    let package_root = "aes67-tools-0.1.0-x86_64-unknown-linux-gnu";
     for path in [
         "bin/aes67-streamer",
         "bin/aes67-player",
@@ -86,7 +91,7 @@ fn package_release_creates_tarball_with_expected_layout() {
         "examples/streamer.toml",
         "examples/example.sdp",
     ] {
-        let expected = format!("{package_root}/{path}");
+        let expected = format!("{package_name}/{path}");
         assert!(
             contents.lines().any(|line| line == expected),
             "archive should contain {expected}\n{contents}"
@@ -121,6 +126,13 @@ fn repo_root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .expect("repo root should be reachable")
+}
+
+fn release_version() -> String {
+    fs::read_to_string(repo_root().join("VERSION"))
+        .expect("VERSION file should exist")
+        .trim()
+        .to_string()
 }
 
 fn write_executable(path: &Path) {

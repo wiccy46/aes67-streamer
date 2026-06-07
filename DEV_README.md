@@ -115,14 +115,12 @@ only when validating multicast behavior specifically.
 The public binary version follows SemVer and is recorded in the root `VERSION`
 file.
 
-Release changes must keep these in sync:
+`VERSION` is the only source of truth for public release versions. The
+`config` crate build script reads it and injects the value used by
+`aes67-streamer --version` and `aes67-player --version`.
 
-- `VERSION`
-- `src/aes67-streamer/Cargo.toml`
-- `src/aes67-player/Cargo.toml`
-
-The release workflow and tests validate that both public binaries match
-`VERSION` and that `VERSION` is valid SemVer.
+The release workflow validates that `VERSION` is valid SemVer and that
+`CHANGELOG.md` contains a matching section.
 
 ## Release Workflow
 
@@ -136,8 +134,7 @@ Before running it:
 
 1. Finish and merge the code change.
 2. Update `CHANGELOG.md`.
-3. Bump `VERSION`, `src/aes67-streamer/Cargo.toml`, and
-   `src/aes67-player/Cargo.toml`.
+3. Bump `VERSION`.
 4. Make sure the GitHub secret `HOMEBREW_TAP_TOKEN` has write access to
    `wiccy46/homebrew-aes67`.
 

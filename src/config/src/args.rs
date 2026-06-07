@@ -92,7 +92,7 @@ where
 
 fn streamer_cli() -> Command {
     Command::new("aes67-streamer")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(env!("AES67_TOOLS_VERSION"))
         .author("Jiajun Yang")
         .about("Cross-platform CLI tool for streaming audio files over RTP networks with AES67 compliance")
         .arg(
@@ -169,7 +169,7 @@ fn streamer_cli() -> Command {
 
 fn player_cli() -> Command {
     Command::new("aes67-player")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(env!("AES67_TOOLS_VERSION"))
         .author("Jiajun Yang")
         .about("CLI tool for receiving and playing AES67 RTP audio streams")
         .arg(

@@ -20,9 +20,9 @@ Manual local formula test flow:
    checksum to the GitHub release tagged `v<VERSION>`. The release workflow
    does this automatically for normal releases.
 
-3. In `packaging/homebrew/aes67-tools.rb`, replace each
-   `REPLACE_WITH_*_SHA256` value with the first field from the matching
-   `.sha256` file. The release workflow updates the live tap automatically.
+3. In `packaging/homebrew/aes67-tools.rb`, replace `REPLACE_WITH_VERSION`
+   with the value from `VERSION`, then replace each `REPLACE_WITH_*_SHA256`
+   value with the first field from the matching `.sha256` file. The release workflow updates the live tap automatically.
 
 4. Test locally:
 
