@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.2]
+
+- Make the root `VERSION` file the single source of truth for public release
+  versioning.
+- Add Linux x86_64 release archive generation and Homebrew formula support.
+
 ## [0.1.0]
 
 Initial Apple Silicon macOS and x86_64 Linux release for the AES67 tools workspace.
