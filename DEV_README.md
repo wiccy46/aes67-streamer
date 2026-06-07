@@ -148,6 +148,9 @@ Use `dry_run=true` first. A dry run validates metadata, runs tests and clippy,
 and builds both release packages without tagging, creating a GitHub release, or
 pushing the Homebrew tap.
 
+Set `update_homebrew=false` to publish only the GitHub release assets. Set
+`update_homebrew=true` only after `HOMEBREW_TAP_TOKEN` is configured.
+
 The workflow builds and publishes:
 
 - `aes67-tools-<version>-aarch64-apple-darwin.tar.gz`
@@ -155,8 +158,8 @@ The workflow builds and publishes:
 - `aes67-tools-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `aes67-tools-<version>-x86_64-unknown-linux-gnu.tar.gz.sha256`
 
-Then it creates or updates GitHub release `v<VERSION>` and updates the Homebrew
-tap formula in `wiccy46/homebrew-aes67`.
+Then it creates or updates GitHub release `v<VERSION>`. If `update_homebrew` is
+true, it also updates the Homebrew tap formula in `wiccy46/homebrew-aes67`.
 
 ## Local Release Debugging
 
