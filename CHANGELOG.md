@@ -2,7 +2,7 @@
 
 ## [0.1.0]
 
-Initial Apple Silicon macOS release for the AES67 tools workspace.
+Initial Apple Silicon macOS and x86_64 Linux release for the AES67 tools workspace.
 
 ### `aes67-streamer`
 
@@ -32,6 +32,6 @@ Initial Apple Silicon macOS release for the AES67 tools workspace.
 ### Release Packaging
 
 - Packages `aes67-streamer` and `aes67-player` together as `aes67-tools`.
-- Publishes an Apple Silicon macOS archive for Homebrew installation.
+- Publishes Apple Silicon macOS and x86_64 Linux archives for Homebrew installation.
 - Includes README, license, version, and example SDP/TOML files in the release
   archive.

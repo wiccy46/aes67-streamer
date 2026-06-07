@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Run checks and build package without creating GitHub release or updating Homebrew tap"
+        description: "Run checks and build packages without creating GitHub release or updating Homebrew tap"
         required: true
         default: false
         type: boolean
@@ -13,13 +13,15 @@ permissions:
   contents: write
 
 env:
-  RELEASE_TARGET: aarch64-apple-darwin
   HOMEBREW_TAP_REPO: wiccy46/homebrew-aes67
 
 jobs:
-  release:
-    name: Build and publish Apple Silicon release
-    runs-on: macos-latest
+  validate:
+    name: Validate release metadata and tests
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
 
     steps:
       - name: Check out source
@@ -29,8 +31,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ env.RELEASE_TARGET }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -51,26 +56,100 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  package:
+    name: Package ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Build release archive
-        run: AES67_RELEASE_TARGET="${RELEASE_TARGET}" bash scripts/package_release.sh
+        run: AES67_RELEASE_TARGET="${{ matrix.target }}" bash scripts/package_release.sh
 
       - name: Validate release assets
         run: |
-          archive="target/release-packages/aes67-tools-${{ steps.version.outputs.version }}-${RELEASE_TARGET}.tar.gz"
+          archive="target/release-packages/aes67-tools-${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz"
           checksum="${archive}.sha256"
           test -f "$archive"
           test -f "$checksum"
           awk '{ print $1 }' "$checksum" | grep -Eq '^[0-9a-fA-F]{64}$'
+
+      - name: Upload release package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package-${{ matrix.target }}
+          path: |
+            target/release-packages/aes67-tools-${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz
+            target/release-packages/aes67-tools-${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release and Homebrew tap
+    needs:
+      - validate
+      - package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-package-*
+          path: target/release-packages
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -la target/release-packages
+
+      - name: Validate downloaded release assets
+        run: |
+          version="${{ needs.validate.outputs.version }}"
+          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
+            archive="target/release-packages/aes67-tools-${version}-${target}.tar.gz"
+            checksum="${archive}.sha256"
+            test -f "$archive"
+            test -f "$checksum"
+            awk '{ print $1 }' "$checksum" | grep -Eq '^[0-9a-fA-F]{64}$'
+          done
 
       - name: Create or update GitHub release
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ steps.version.outputs.tag }}"
-          version="${{ steps.version.outputs.version }}"
-          archive="target/release-packages/aes67-tools-${version}-${RELEASE_TARGET}.tar.gz"
-          checksum="${archive}.sha256"
+          git fetch --tags origin
+
+          tag="${{ needs.validate.outputs.tag }}"
+          version="${{ needs.validate.outputs.version }}"
 
           if git rev-parse "$tag" >/dev/null 2>&1; then
             tag_commit="$(git rev-list -n 1 "$tag")"
@@ -85,7 +164,9 @@ jobs:
           fi
 
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" "$archive" "$checksum" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$tag" target/release-packages/*.tar.gz target/release-packages/*.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
           else
             notes_file="$(mktemp)"
             awk -v version="$version" '
@@ -96,7 +177,7 @@ jobs:
             if [ ! -s "$notes_file" ]; then
               echo "Release v${version}" > "$notes_file"
             fi
-            gh release create "$tag" "$archive" "$checksum" \
+            gh release create "$tag" target/release-packages/*.tar.gz target/release-packages/*.sha256 \
               --repo "$GITHUB_REPOSITORY" \
               --title "aes67-tools v${version}" \
               --notes-file "$notes_file"
@@ -108,11 +189,16 @@ jobs:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           test -n "$TAP_TOKEN"
-          version="${{ steps.version.outputs.version }}"
-          checksum="target/release-packages/aes67-tools-${version}-${RELEASE_TARGET}.tar.gz.sha256"
+          version="${{ needs.validate.outputs.version }}"
+          macos_checksum="target/release-packages/aes67-tools-${version}-aarch64-apple-darwin.tar.gz.sha256"
+          linux_checksum="target/release-packages/aes67-tools-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256"
 
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" homebrew-tap
-          bash scripts/update_homebrew_formula.sh homebrew-tap/Formula/aes67-tools.rb "$version" "$checksum"
+          bash scripts/update_homebrew_formula.sh \
+            homebrew-tap/Formula/aes67-tools.rb \
+            "$version" \
+            "$macos_checksum" \
+            "$linux_checksum"
 
           cd homebrew-tap
           git config user.name "github-actions[bot]"

@@ -116,11 +116,17 @@ for RTP silence frames, jitter lost/late/dropped-full packets, jitter timestamp
 discontinuities, output silence frames, and output dropped samples. Warning logs
 from the player should be treated as playback smoothness issues to investigate.
 
-On Linux, CPAL's ALSA backend requires the ALSA development package at build
-time. On Fedora:
+On Linux, CPAL's ALSA backend requires ALSA development headers at build
+time. On Ubuntu/Debian:
 
 ```bash
-sudo dnf install alsa-lib-devel
+sudo apt-get install libasound2-dev pkg-config
+```
+
+On Fedora:
+
+```bash
+sudo dnf install alsa-lib-devel pkgconf-pkg-config
 ```
 
 ### Advanced Usage
@@ -322,7 +328,8 @@ bump all release versions:
 - `src/aes67-player/Cargo.toml`
 
 The manual release workflow `.github/workflows/release-run.yml` validates those
-files, builds the Apple Silicon macOS archive, creates or updates the GitHub
+files, builds Apple Silicon macOS and x86_64 Linux archives, creates or
+updates the GitHub
 release, and updates the Homebrew tap. It requires the repository secret
 `HOMEBREW_TAP_TOKEN` with write access to `wiccy46/homebrew-aes67`.
 
@@ -332,7 +339,8 @@ Run it from GitHub Actions:
 Actions -> Release Run -> Run workflow
 ```
 
-Use `dry_run=true` first to run validation and package building without tagging,
+Use `dry_run=true` first to run validation and package building on both release
+targets without tagging,
 creating a GitHub release, or pushing the Homebrew tap.
 
 Before triggering a non-dry-run release, run local checks when practical:
@@ -372,7 +380,8 @@ same binaries and docs into the standard filesystem layout.
 
 The Homebrew formula template lives at `packaging/homebrew/aes67-tools.rb`. The
 release workflow updates the live `wiccy46/homebrew-aes67` tap with the
-generated archive URL and checksum. Only replace template placeholders manually
+generated macOS and Linux archive URLs and checksums. Only replace template
+placeholders manually
 when testing packaging outside the workflow.
 
 Check the player release CLI surface:

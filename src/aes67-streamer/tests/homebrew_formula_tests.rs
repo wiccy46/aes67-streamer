@@ -5,12 +5,7 @@ use std::path::PathBuf;
 fn homebrew_formula_points_to_release_archives_for_supported_targets() {
     let formula = read_formula();
 
-    for target in [
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-    ] {
+    for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
         let archive = format!("aes67-tools-#{{version}}-{target}.tar.gz");
         assert!(
             formula.contains(&archive),
@@ -18,10 +13,16 @@ fn homebrew_formula_points_to_release_archives_for_supported_targets() {
         );
     }
 
+    for unsupported_target in ["x86_64-apple-darwin", "aarch64-unknown-linux-gnu"] {
+        let archive = format!("aes67-tools-#{{version}}-{unsupported_target}.tar.gz");
+        assert!(
+            !formula.contains(&archive),
+            "formula should not reference unsupported release archive {archive}"
+        );
+    }
+
     for placeholder in [
         "REPLACE_WITH_AARCH64_APPLE_DARWIN_SHA256",
-        "REPLACE_WITH_X86_64_APPLE_DARWIN_SHA256",
-        "REPLACE_WITH_AARCH64_UNKNOWN_LINUX_GNU_SHA256",
         "REPLACE_WITH_X86_64_UNKNOWN_LINUX_GNU_SHA256",
     ] {
         assert!(
@@ -37,6 +38,8 @@ fn homebrew_formula_installs_binaries_docs_and_examples() {
 
     for expected in [
         "license \"GPL-3.0-only\"",
+        "depends_on arch: :arm64",
+        "on_linux do",
         "bin.install \"bin/aes67-streamer\"",
         "bin.install \"bin/aes67-player\"",
         "doc.install \"README.md\"",
