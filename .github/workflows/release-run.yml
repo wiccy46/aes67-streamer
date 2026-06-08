@@ -23,6 +23,7 @@ env:
 jobs:
   validate:
     name: Validate release metadata and tests
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -73,6 +74,7 @@ jobs:
 
   package:
     name: Package ${{ matrix.target }}
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs: validate
     strategy:
       fail-fast: false
@@ -124,6 +126,7 @@ jobs:
 
   publish:
     name: Publish GitHub release and optional Homebrew tap
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs:
       - validate
       - package
