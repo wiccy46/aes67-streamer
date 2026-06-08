@@ -14,7 +14,7 @@ The current release target is one stream with 1-8 channels on macOS and Linux.
 
 ## Install
 
-### Homebrew
+### Homebrew (MacOS and Linux)
 
 ```bash
 brew install wiccy46/aes67/aes67-tools
@@ -44,14 +44,6 @@ git clone https://github.com/wiccy46/aes67-tools.git
 cd aes67-tools
 cargo build --release
 ```
-
-Binaries are written to:
-
-```text
-target/release/aes67-streamer
-target/release/aes67-player
-```
-
 On Linux, building the player requires ALSA development headers. On
 Ubuntu/Debian:
 
@@ -93,7 +85,7 @@ To stop after a bounded duration:
 aes67-streamer --file audio.wav --address 239.69.83.1 --duration-seconds 30
 ```
 
-## Receive Audio
+## Receive Audio and Playback on Output Device
 
 List output devices:
 
