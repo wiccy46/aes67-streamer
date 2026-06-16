@@ -5,7 +5,7 @@ usage() {
     cat <<'USAGE'
 Usage: bash scripts/package_release.sh [--dry-run]
 
-Builds and packages aes67-streamer and aes67-player release binaries.
+Builds and packages aes67-streamer, aes67-player, and aes67-sap release binaries.
 
 Environment overrides:
   AES67_RELEASE_OUTPUT_DIR     Output directory, default target/release-packages
@@ -87,6 +87,7 @@ Release package configuration
   Contents:
     bin/aes67-streamer
     bin/aes67-player
+    bin/aes67-sap
     README.md
     LICENSE
     VERSION
@@ -101,7 +102,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 if [[ "${AES67_RELEASE_SKIP_BUILD:-0}" != "1" ]]; then
-    cargo_args=(build --release -p aes67-streamer -p aes67-player)
+    cargo_args=(build --release -p aes67-streamer -p aes67-player -p aes67-sap)
     if [[ -n "${AES67_RELEASE_TARGET:-}" ]]; then
         cargo_args+=(--target "$TARGET")
     fi
@@ -110,8 +111,10 @@ fi
 
 STREAMER_BIN="$BINARY_DIR/aes67-streamer"
 PLAYER_BIN="$BINARY_DIR/aes67-player"
+SAP_BIN="$BINARY_DIR/aes67-sap"
 [[ -x "$STREAMER_BIN" ]] || fail "Missing executable release binary: $STREAMER_BIN"
 [[ -x "$PLAYER_BIN" ]] || fail "Missing executable release binary: $PLAYER_BIN"
+[[ -x "$SAP_BIN" ]] || fail "Missing executable release binary: $SAP_BIN"
 
 mkdir -p "$OUTPUT_DIR" "$STAGING_ROOT"
 rm -rf "$PACKAGE_DIR" "$ARCHIVE" "$CHECKSUM"
@@ -119,6 +122,7 @@ mkdir -p "$PACKAGE_DIR/bin" "$PACKAGE_DIR/examples"
 
 cp "$STREAMER_BIN" "$PACKAGE_DIR/bin/aes67-streamer"
 cp "$PLAYER_BIN" "$PACKAGE_DIR/bin/aes67-player"
+cp "$SAP_BIN" "$PACKAGE_DIR/bin/aes67-sap"
 cp "$ROOT_DIR/README.md" "$PACKAGE_DIR/README.md"
 cp "$ROOT_DIR/LICENSE" "$PACKAGE_DIR/LICENSE"
 cp "$ROOT_DIR/VERSION" "$PACKAGE_DIR/VERSION"

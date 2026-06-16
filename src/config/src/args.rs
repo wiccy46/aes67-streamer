@@ -43,6 +43,16 @@ pub struct PlayerArgs {
     pub test_null_output: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct SapArgs {
+    pub interface: String,
+    pub once: bool,
+    pub sdp_output_dir: Option<String>,
+    pub verbose: bool,
+    pub listen_address: String,
+    pub port: u16,
+}
+
 pub fn parse_args() -> Result<StreamerArgs> {
     parse_streamer_args()
 }
@@ -61,6 +71,10 @@ pub fn parse_streamer_args() -> Result<StreamerArgs> {
 
 pub fn parse_player_args() -> Result<PlayerArgs> {
     parse_player_args_from(std::env::args_os())
+}
+
+pub fn parse_sap_args() -> Result<SapArgs> {
+    parse_sap_args_from(std::env::args_os())
 }
 
 pub fn is_display_control_error(error: &anyhow::Error) -> bool {
@@ -88,6 +102,15 @@ where
 {
     let matches = player_cli().try_get_matches_from(args)?;
     player_args_from_matches(&matches)
+}
+
+pub fn parse_sap_args_from<I, T>(args: I) -> Result<SapArgs>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let matches = sap_cli().try_get_matches_from(args)?;
+    sap_args_from_matches(&matches)
 }
 
 fn streamer_cli() -> Command {
@@ -265,6 +288,57 @@ fn player_cli() -> Command {
         )
 }
 
+fn sap_cli() -> Command {
+    Command::new("aes67-sap")
+        .version(env!("AES67_TOOLS_VERSION"))
+        .author("Jiajun Yang")
+        .about("Browse AES67 streams announced with SAP")
+        .arg(
+            Arg::new("interface")
+                .short('i')
+                .long("interface")
+                .value_name("INTERFACE")
+                .help("Network interface name or IPv4 address used for SAP multicast")
+                .required(true),
+        )
+        .arg(
+            Arg::new("once")
+                .long("once")
+                .help("Exit after the first discovered AES67 SAP stream")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("sdp-output-dir")
+                .long("sdp-output-dir")
+                .value_name("DIR")
+                .help("Write each discovered SDP payload to this directory"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Enable verbose logging [default: false]")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("test-address")
+                .long("test-address")
+                .value_name("IP")
+                .help("Override SAP listen address for automated tests")
+                .hide(true)
+                .default_value("239.255.255.255"),
+        )
+        .arg(
+            Arg::new("test-port")
+                .long("test-port")
+                .value_name("PORT")
+                .help("Override SAP listen port for automated tests")
+                .hide(true)
+                .default_value("9875")
+                .value_parser(clap::value_parser!(u16)),
+        )
+}
+
 fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
     let config_file = matches.get_one::<String>("config").cloned();
     let config = match config_file.as_deref() {
@@ -398,6 +472,23 @@ fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
         verbose: matches.get_flag("verbose"),
         list_devices,
         test_null_output: matches.get_flag("test-null-output"),
+    })
+}
+
+fn sap_args_from_matches(matches: &ArgMatches) -> Result<SapArgs> {
+    Ok(SapArgs {
+        interface: cli_string(matches, "interface")
+            .expect("clap should require SAP browser interface"),
+        once: matches.get_flag("once"),
+        sdp_output_dir: cli_string(matches, "sdp-output-dir"),
+        verbose: matches.get_flag("verbose"),
+        listen_address: matches
+            .get_one::<String>("test-address")
+            .expect("clap should supply SAP listen address default")
+            .clone(),
+        port: *matches
+            .get_one::<u16>("test-port")
+            .expect("clap should supply SAP listen port default"),
     })
 }
 
@@ -1138,5 +1229,59 @@ mod tests {
             "alsa"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn sap_cli_requires_interface() {
+        assert!(parse_sap_args_from(["aes67-sap"]).is_err());
+    }
+
+    #[test]
+    fn sap_cli_defaults_to_continuous_multicast_browse() {
+        let args = parse_sap_args_from(["aes67-sap", "--interface", "127.0.0.1"])
+            .expect("SAP browser args should parse");
+
+        assert_eq!(args.interface, "127.0.0.1");
+        assert!(!args.once);
+        assert_eq!(args.sdp_output_dir, None);
+        assert!(!args.verbose);
+        assert_eq!(args.listen_address, "239.255.255.255");
+        assert_eq!(args.port, 9875);
+    }
+
+    #[test]
+    fn sap_cli_accepts_once_sdp_output_dir_and_verbose() {
+        let args = parse_sap_args_from([
+            "aes67-sap",
+            "--interface",
+            "en0",
+            "--once",
+            "--sdp-output-dir",
+            "discovered",
+            "--verbose",
+        ])
+        .expect("SAP browser args should parse");
+
+        assert_eq!(args.interface, "en0");
+        assert!(args.once);
+        assert_eq!(args.sdp_output_dir.as_deref(), Some("discovered"));
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn sap_cli_accepts_hidden_listen_override_for_tests() {
+        let args = parse_sap_args_from([
+            "aes67-sap",
+            "--interface",
+            "127.0.0.1",
+            "--test-address",
+            "127.0.0.1",
+            "--test-port",
+            "19000",
+        ])
+        .expect("SAP browser test args should parse");
+
+        assert_eq!(args.listen_address, "127.0.0.1");
+        assert_eq!(args.port, 19000);
     }
 }

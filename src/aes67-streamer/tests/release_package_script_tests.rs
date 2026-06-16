@@ -25,6 +25,7 @@ fn package_release_dry_run_reports_package_layout() {
     assert!(stdout.contains(&format!("Package:     {package_name}")));
     assert!(stdout.contains("bin/aes67-streamer"));
     assert!(stdout.contains("bin/aes67-player"));
+    assert!(stdout.contains("bin/aes67-sap"));
     assert!(stdout.contains("examples/streamer.toml"));
     assert!(stdout.contains("examples/example.sdp"));
     assert!(stdout.contains(".tar.gz"));
@@ -40,6 +41,7 @@ fn package_release_creates_tarball_with_expected_layout() {
     fs::create_dir_all(&bin_dir).expect("test bin dir should be writable");
     write_executable(&bin_dir.join("aes67-streamer"));
     write_executable(&bin_dir.join("aes67-player"));
+    write_executable(&bin_dir.join("aes67-sap"));
 
     let output = Command::new("bash")
         .arg(repo_root().join("scripts/package_release.sh"))
@@ -85,6 +87,7 @@ fn package_release_creates_tarball_with_expected_layout() {
     for path in [
         "bin/aes67-streamer",
         "bin/aes67-player",
+        "bin/aes67-sap",
         "README.md",
         "LICENSE",
         "VERSION",

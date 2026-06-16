@@ -1,5 +1,5 @@
 class Aes67Tools < Formula
-  desc "AES67-oriented RTP audio streamer and player"
+  desc "AES67-oriented RTP audio streaming, playback, and SAP browsing tools"
   homepage "https://github.com/wiccy46/aes67-tools"
   version "REPLACE_WITH_VERSION"
   license "GPL-3.0-only"
@@ -19,6 +19,7 @@ class Aes67Tools < Formula
   def install
     bin.install "bin/aes67-streamer"
     bin.install "bin/aes67-player"
+    bin.install "bin/aes67-sap"
     doc.install "README.md"
     doc.install "LICENSE"
     pkgshare.install "examples"
@@ -27,5 +28,6 @@ class Aes67Tools < Formula
   test do
     assert_match version.to_s, shell_output("#{bin}/aes67-streamer --version")
     assert_match version.to_s, shell_output("#{bin}/aes67-player --version")
+    assert_match version.to_s, shell_output("#{bin}/aes67-sap --version")
   end
 end
