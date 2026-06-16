@@ -34,6 +34,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes67-sap"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "env_logger",
+ "log",
+ "network",
+ "tokio",
+]
+
+[[package]]
 name = "aes67-streamer"
 version = "0.1.0"
 dependencies = [

@@ -5,12 +5,14 @@ README is intentionally focused on installing and running the tools.
 
 ## Workspace Overview
 
-This is a Cargo workspace with six crates:
+This is a Cargo workspace with seven crates:
 
 - `src/aes67-streamer`: streamer binary, CLI entry point, stream orchestration.
 - `src/aes67-player`: player binary, CLI entry point, receive/playout
   orchestration.
-- `src/config`: streamer/player CLI parsing and streamer TOML configuration.
+- `src/aes67-sap`: SAP browser binary, CLI entry point, discovery output.
+- `src/config`: streamer/player/SAP CLI parsing and streamer TOML
+  configuration.
 - `src/audio`: audio decoding, resampling, sample buffering, gain node
   processing.
 - `src/network`: RTP packetization/parsing, SDP/SAP, jitter buffer, UDP sockets.
@@ -35,6 +37,16 @@ This is a Cargo workspace with six crates:
 5. Decode L24 RTP payloads into interleaved samples.
 6. Play through CPAL output or null output in tests.
 7. Log final playback summary and warnings for smoothness issues.
+
+## SAP Browser Flow
+
+1. Parse SAP browser CLI arguments in `config`.
+2. Resolve the selected interface name or IPv4 address.
+3. Bind the SAP browser socket to `239.255.255.255:9875`.
+4. Parse SAP datagrams into reusable `network::sap` message types.
+5. Parse `application/sdp` payloads into AES67 session descriptions.
+6. Track added, updated, removed, and expired streams.
+7. Print browse-style event lines and optionally write discovered SDP files.
 
 ## Development Setup
 
@@ -73,7 +85,9 @@ cargo test -p config
 cargo test -p aes67-streamer --test e2e
 cargo test -p aes67-player --test e2e
 cargo test -p aes67-player --test cli_failure_tests
+cargo test -p aes67-sap
 cargo test -p network sdp
+cargo test -p network sap
 cargo test -p network jitter
 ```
 
@@ -117,7 +131,8 @@ file.
 
 `VERSION` is the only source of truth for public release versions. The
 `config` crate build script reads it and injects the value used by
-`aes67-streamer --version` and `aes67-player --version`.
+`aes67-streamer --version`, `aes67-player --version`, and
+`aes67-sap --version`.
 
 The release workflow validates that `VERSION` is valid SemVer and that
 `CHANGELOG.md` contains a matching section.
@@ -212,6 +227,7 @@ The tarball contains:
 
 - `bin/aes67-streamer`
 - `bin/aes67-player`
+- `bin/aes67-sap`
 - `README.md`
 - `LICENSE`
 - `VERSION`

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "src/aes67-player",
+    "src/aes67-sap",
     "src/aes67-streamer",
     "src/config",
     "src/audio",

@@ -11,7 +11,7 @@ bash scripts/e2e_loopback.sh
 
 | Tier | Command | Purpose | CI |
 | --- | --- | --- | --- |
-| Unit and integration | `cargo test --workspace` | Fast Rust coverage for audio, config, RTP, PTP, socket behavior, and script dry-run validation | Yes |
+| Unit and integration | `cargo test --workspace` | Fast Rust coverage for audio, config, RTP, PTP, SAP browsing, socket behavior, and script dry-run validation | Yes |
 | Media loopback | `bash scripts/e2e_loopback.sh` | Full streamer-to-ffmpeg RTP loopback with decoded WAV validation | Yes |
 | Multicast validation | `AES67_E2E_INTERFACE=<local-ip> bash scripts/e2e_multicast.sh` | Opt-in multicast group join and receive validation on a real interface | No |
 | Player null-output E2E | `cargo test -p aes67-player --test e2e` | Streamer-to-player RTP validation without requiring an audio device | Yes |
@@ -108,6 +108,17 @@ The default duration is 60 seconds. To change it:
 
 ```bash
 AES67_PLAYER_SOAK_DURATION_SECONDS=300 bash scripts/player_soak_loopback.sh
+```
+
+## AES67 SAP Browser Validation
+
+The SAP browser has parser, registry, socket, and process-level coverage. The
+process E2E test launches `aes67-sap --once`, sends a real SAP UDP datagram on
+loopback, verifies the browse output, and checks that `--sdp-output-dir` writes
+the announced SDP:
+
+```bash
+cargo test -p aes67-sap
 ```
 
 ## Optional Multicast E2E
