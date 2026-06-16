@@ -42,6 +42,7 @@ fn homebrew_formula_installs_binaries_docs_and_examples() {
         "on_linux do",
         "bin.install \"bin/aes67-streamer\"",
         "bin.install \"bin/aes67-player\"",
+        "bin.install \"bin/aes67-sap\"",
         "doc.install \"README.md\"",
         "doc.install \"LICENSE\"",
         "pkgshare.install \"examples\"",
@@ -60,6 +61,7 @@ fn homebrew_formula_smoke_tests_public_binaries() {
     assert!(formula.contains("test do"));
     assert!(formula.contains("shell_output(\"#{bin}/aes67-streamer --version\")"));
     assert!(formula.contains("shell_output(\"#{bin}/aes67-player --version\")"));
+    assert!(formula.contains("shell_output(\"#{bin}/aes67-sap --version\")"));
 }
 
 fn read_formula() -> String {

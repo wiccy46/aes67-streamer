@@ -7,12 +7,16 @@ pub mod socket;
 pub use jitter::{
     InsertResult, JitterBufferConfig, JitterBufferStats, PlayoutPacket, RtpJitterBuffer,
 };
-pub use rtp::{RtpHeader, RtpPacket, RtpPacketizer, decode_l24_payload_interleaved};
-pub use sap::SapAnnouncer;
-pub use sdp::{Aes67SessionDescription, AudioEncoding, parse_sdp, parse_sdp_file};
+pub use rtp::{decode_l24_payload_interleaved, RtpHeader, RtpPacket, RtpPacketizer};
+pub use sap::{
+    parse_sap_packet, ReceivedSapMessage, SapAnnouncer, SapBrowser, SapBrowserConfig, SapMessage,
+    SapMessageKey, SapMessageType, SapRegistry, SapRegistryEvent, SapStream, SAP_MULTICAST_ADDRESS,
+    SAP_PORT,
+};
+pub use sdp::{parse_sdp, parse_sdp_file, Aes67SessionDescription, AudioEncoding};
 pub use socket::{
-    MulticastConfig, MulticastSocket, ReceivedRtpPacket, RtpReceiveSocket, RtpReceiveSocketConfig,
-    SocketStats, parse_stream_address, resolve_interface_ip,
+    parse_stream_address, resolve_interface_ip, MulticastConfig, MulticastSocket,
+    ReceivedRtpPacket, RtpReceiveSocket, RtpReceiveSocketConfig, SocketStats,
 };
 
 pub type Result<T> = anyhow::Result<T>;
