@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.3]
+
+- Add `aes67-sap` tool. This is a sap listener that prints out sap annoucements on the network 
+from a given interface.
+
 ## [0.1.2]
 
 - Make the root `VERSION` file the single source of truth for public release
