@@ -9,6 +9,8 @@ Command-line tools for sending and receiving AES67-oriented RTP audio streams.
 - `aes67-streamer` streams audio files as 48 kHz, 24-bit L24 RTP.
 - `aes67-player` receives AES67 RTP streams and plays them through the local
   audio output device.
+- `aes67-sap` browses AES67 streams announced with SAP and can write discovered
+  SDP payloads to files.
 
 The current release target is one stream with 1-8 channels on macOS and Linux.
 
@@ -20,11 +22,12 @@ The current release target is one stream with 1-8 channels on macOS and Linux.
 brew install wiccy46/aes67/aes67-tools
 ```
 
-This installs both binaries:
+This installs all public binaries:
 
 ```bash
 aes67-streamer --version
 aes67-player --version
+aes67-sap --version
 ```
 
 ### GitHub Release Archive
@@ -128,6 +131,31 @@ The player logs a final summary when it exits. Clean playback should report zero
 for RTP silence frames, jitter lost/late/dropped-full packets, jitter timestamp
 discontinuities, output silence frames, and output dropped samples.
 
+## Browse SAP Announcements
+
+Browse AES67 streams announced on the local SAP multicast group:
+
+```bash
+aes67-sap --interface 192.168.1.100
+```
+
+The browser prints one line when a stream is discovered, changed, removed, or
+expired. Event markers follow the common browse convention: `+` for added, `=`
+for updated, and `-` for removed or expired.
+
+To exit after the first discovered AES67 SAP stream:
+
+```bash
+aes67-sap --interface 192.168.1.100 --once
+```
+
+To save discovered SDP payloads for `aes67-player`:
+
+```bash
+aes67-sap --interface 192.168.1.100 --sdp-output-dir discovered-sdp
+aes67-player --sdp discovered-sdp/sap-192.168.1.50-1234.sdp --interface 192.168.1.100
+```
+
 ## Streamer Configuration File
 
 The streamer can load runtime settings from TOML:
@@ -203,6 +231,15 @@ aes67-streamer --config streamer.toml --port 6000
 | `--duration-seconds` | Stop receiving after a bounded duration | Unlimited |
 | `--verbose` / `-v` | Enable verbose logging | `false` |
 
+### `aes67-sap`
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--interface` / `-i` | Local interface name or IPv4 address used for SAP multicast | Required |
+| `--once` | Exit after the first discovered AES67 SAP stream | Continuous browse |
+| `--sdp-output-dir` | Write discovered SDP payloads to this directory | None |
+| `--verbose` / `-v` | Enable verbose logging | `false` |
+
 ## AES67 Defaults
 
 - Sample rate: 48 kHz.
@@ -216,8 +253,10 @@ aes67-streamer --config streamer.toml --port 6000
 - SAP DSCP: 24 / CS3.
 
 The streamer generates SDP from the loaded file and stream settings, logs it at
-startup, and can write it to a file with `--sdp-output` or `stream.sdp_output`.
-The player can then join the stream with `aes67-player --sdp stream.sdp`.
+startup, can write it to a file with `--sdp-output` or `stream.sdp_output`, and
+announces it over SAP by default. The SAP browser can discover those
+announcements and write SDP files that the player can join with
+`aes67-player --sdp stream.sdp`.
 
 ## Troubleshooting
 
@@ -277,7 +316,7 @@ sender/player release:
   SDP/basic-CLI configuration, and CPAL output.
 - RFC 3550 RTP sequence numbers, timestamps, payload type, and SSRC.
 - IEEE 1588-2008 PTPv2 message handling and local master fallback.
-- SAP/SDP discovery.
+- SAP/SDP announcement and discovery through the dedicated `aes67-sap` browser.
 
 The first release does not claim hard real-time scheduling, hardware clock
 discipline, kernel-bypass networking, multiple simultaneous streams, or full ST
