@@ -67,7 +67,7 @@ async fn run_browser(args: config::SapArgs) -> Result<()> {
                     if let Some(event) =
                         registry.apply_message(received.message, received.source, Instant::now())
                     {
-                        emit_registry_event(&event, output_dir)?;
+                        emit_registry_event(&event, output_dir, false)?;
                         return Ok(());
                     }
                 }
@@ -88,14 +88,14 @@ async fn run_browser(args: config::SapArgs) -> Result<()> {
             }
             _ = expire_interval.tick() => {
                 for event in registry.expire(Instant::now()) {
-                    emit_registry_event(&event, output_dir)?;
+                    emit_registry_event(&event, output_dir, true)?;
                 }
             }
             received = browser.recv_message(&mut buffer) => {
                 match received {
                     Ok(received) => {
                         if let Some(event) = registry.apply_message(received.message, received.source, Instant::now()) {
-                            emit_registry_event(&event, output_dir)?;
+                            emit_registry_event(&event, output_dir, true)?;
                         }
                     }
                     Err(e) => log::warn!("Ignoring SAP packet: {e:#}"),
@@ -105,7 +105,11 @@ async fn run_browser(args: config::SapArgs) -> Result<()> {
     }
 }
 
-fn emit_registry_event(event: &SapRegistryEvent, output_dir: Option<&Path>) -> Result<()> {
+fn emit_registry_event(
+    event: &SapRegistryEvent,
+    output_dir: Option<&Path>,
+    show_sdp_details: bool,
+) -> Result<()> {
     if let Some(output_dir) = output_dir {
         if matches!(
             event,
@@ -115,7 +119,7 @@ fn emit_registry_event(event: &SapRegistryEvent, output_dir: Option<&Path>) -> R
         }
     }
 
-    println!("{}", format_registry_event(event));
+    println!("{}", format_registry_event(event, show_sdp_details));
     io::stdout().flush().context("Failed to flush stdout")?;
 
     Ok(())
@@ -146,7 +150,7 @@ fn sdp_output_path(output_dir: &Path, stream: &SapStream) -> PathBuf {
     ))
 }
 
-fn format_registry_event(event: &SapRegistryEvent) -> String {
+fn format_registry_event(event: &SapRegistryEvent, show_sdp_details: bool) -> String {
     let marker = match event {
         SapRegistryEvent::Added(_) => "+",
         SapRegistryEvent::Updated(_) => "=",
@@ -154,7 +158,7 @@ fn format_registry_event(event: &SapRegistryEvent) -> String {
     };
     let stream = event_stream(event);
 
-    if let Some(session) = stream.message.session.as_ref() {
+    let line = if let Some(session) = stream.message.session.as_ref() {
         let name = session
             .session_name
             .as_deref()
@@ -175,7 +179,35 @@ fn format_registry_event(event: &SapRegistryEvent) -> String {
             "{marker} SAP hash={:04x} source={} origin={}",
             stream.key.message_hash, stream.source, stream.key.origin_source
         )
+    };
+
+    if show_sdp_details
+        && matches!(
+            event,
+            SapRegistryEvent::Added(_) | SapRegistryEvent::Updated(_)
+        )
+    {
+        if let Some(sdp) = stream.message.sdp.as_deref() {
+            return format!("{line}\n{}", format_sdp_block(sdp));
+        }
     }
+
+    line
+}
+
+fn format_sdp_block(sdp: &str) -> String {
+    let mut block = String::from("  SDP:\n");
+    for line in sdp
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        block.push_str("    ");
+        block.push_str(line);
+        block.push('\n');
+    }
+    block.pop();
+    block
 }
 
 fn event_stream(event: &SapRegistryEvent) -> &SapStream {
@@ -199,7 +231,8 @@ mod tests {
 
     #[test]
     fn formats_added_stream_like_browse_event_line() {
-        let line = format_registry_event(&SapRegistryEvent::Added(test_stream("Studio Main")));
+        let line =
+            format_registry_event(&SapRegistryEvent::Added(test_stream("Studio Main")), false);
 
         assert!(line.starts_with("+ "));
         assert!(line.contains("Studio Main"));
@@ -207,14 +240,30 @@ mod tests {
         assert!(line.contains("L24/48000/2"));
         assert!(line.contains("ptime=1ms"));
         assert!(line.contains("origin=192.168.1.50"));
+        assert!(!line.contains("SDP:"));
     }
 
     #[test]
     fn formats_removed_stream_with_minus_event_marker() {
-        let line = format_registry_event(&SapRegistryEvent::Removed(test_stream("Studio Main")));
+        let line =
+            format_registry_event(&SapRegistryEvent::Removed(test_stream("Studio Main")), true);
 
         assert!(line.starts_with("- "));
         assert!(line.contains("Studio Main"));
+        assert!(!line.contains("SDP:"));
+    }
+
+    #[test]
+    fn formats_added_stream_with_readable_sdp_block_when_requested() {
+        let output =
+            format_registry_event(&SapRegistryEvent::Added(test_stream("Studio Main")), true);
+
+        assert!(output.starts_with("+ Studio Main"));
+        assert!(output.contains("\n  SDP:\n"));
+        assert!(output.contains("    v=0\n"));
+        assert!(output.contains("    s=Studio Main\n"));
+        assert!(output.contains("    c=IN IP4 239.69.83.1/32\n"));
+        assert!(output.contains("    a=rtpmap:97 L24/48000/2"));
     }
 
     #[test]
