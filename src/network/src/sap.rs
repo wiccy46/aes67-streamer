@@ -1,3 +1,18 @@
+//! SAP announcement and discovery support for AES67 SDP payloads.
+//!
+//! The Session Announcement Protocol (SAP) is used here for two complementary
+//! workflows:
+//!
+//! - `SapAnnouncer` periodically sends the streamer's generated SDP to the
+//!   standard SAP multicast group.
+//! - `SapBrowser` receives SAP datagrams and `parse_sap_packet` turns them into
+//!   structured messages that can be cached by `SapRegistry`.
+//!
+//! The parser focuses on the AES67 release target: IPv4 SAP version 1 messages
+//! carrying `application/sdp` payloads. Unsupported SAP features such as IPv6
+//! origin sources, encrypted payloads, and compressed payloads are rejected with
+//! explicit errors so callers can log or ignore them safely.
+
 use anyhow::{anyhow, Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
@@ -9,55 +24,166 @@ use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
 
+/// DSCP value used for outgoing SAP discovery/control packets.
+///
+/// SAP is marked CS3 (`24`) to align with the project's fixed professional QoS
+/// policy. This only sets the packet field; network devices must still be
+/// configured to honor DSCP markings.
 const SAP_DSCP: u8 = 24;
+
+/// SAP protocol version supported by this implementation.
+///
+/// RFC 2974 SAP version 1 is the interoperable target for the current AES67
+/// announcement/browser workflow.
 const SAP_VERSION: u8 = 1;
+
+/// Standard IPv4 SAP multicast group used for global-scope announcements.
+///
+/// AES67 devices commonly announce SDP payloads to `239.255.255.255:9875`.
+/// Browser tools should listen on this group unless they are running a test or
+/// intentionally targeting a non-standard SAP domain.
 pub const SAP_MULTICAST_ADDRESS: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 255);
+
+/// Standard UDP port for SAP announcements.
+///
+/// `SapAnnouncer` sends to this port and `SapBrowserConfig::new` uses it as the
+/// default browser port.
 pub const SAP_PORT: u16 = 9875;
 
+/// Stable identity for a SAP announcement stream.
+///
+/// SAP identifies a message by the tuple of the IPv4 origin source from the SAP
+/// header and the 16-bit message hash. `SapRegistry` uses this key to decide
+/// whether an incoming announcement creates a new stream, refreshes an existing
+/// stream, updates an existing stream, or removes it through a deletion packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SapMessageKey {
+    /// IPv4 origin source encoded in the SAP header.
+    ///
+    /// This is not necessarily the same as the UDP sender address. It is the
+    /// source identity chosen by the announcer when the SAP packet was built.
     pub origin_source: Ipv4Addr,
+
+    /// SAP message hash from the packet header.
+    ///
+    /// The hash groups announcements and deletion packets for the same logical
+    /// SAP message. The project announcer derives it from the origin source and
+    /// SDP payload.
     pub message_hash: u16,
 }
 
+/// Type of SAP message represented by the packet.
+///
+/// SAP deletion packets are used to withdraw an existing announcement. All
+/// non-deletion packets are treated as current announcements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SapMessageType {
+    /// A current SAP announcement carrying stream metadata.
     Announcement,
+
+    /// A SAP deletion packet that withdraws an existing announcement.
     Deletion,
 }
 
+/// Parsed SAP packet content.
+///
+/// This is the reusable, owned representation returned by
+/// `parse_sap_packet`. For AES67 SDP announcements, both the raw SDP text and a
+/// parsed `Aes67SessionDescription` are populated. If the SAP payload is not an
+/// SDP payload, or the SDP is not within the supported AES67 subset, `session`
+/// is `None` and callers can decide whether to ignore or display the raw
+/// message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SapMessage {
+    /// Stable key for this SAP message.
     pub key: SapMessageKey,
+
+    /// Whether the message announces or deletes a stream.
     pub message_type: SapMessageType,
+
+    /// MIME type declared in the SAP payload header.
+    ///
+    /// The parser also accepts legacy packets that omit the MIME type and start
+    /// directly with SDP text; those are normalized to `application/sdp`.
     pub payload_type: Option<String>,
+
+    /// Raw SDP payload when the SAP message carries `application/sdp`.
     pub sdp: Option<String>,
+
+    /// Parsed AES67 session metadata extracted from `sdp`.
+    ///
+    /// This is present only when the SDP matches the currently supported
+    /// release target: L24 audio, 48 kHz sample rate, dynamic RTP payload type,
+    /// and 1-8 channels.
     pub session: Option<crate::sdp::Aes67SessionDescription>,
 }
 
+/// SAP datagram received from the network.
+///
+/// Combines the parsed `SapMessage` with the UDP source socket address reported
+/// by the OS. The source address is useful for diagnostics and filtering, while
+/// `SapMessage::key.origin_source` remains the protocol-level SAP identity.
 #[derive(Debug, Clone)]
 pub struct ReceivedSapMessage {
+    /// Parsed SAP message.
     pub message: SapMessage,
+
+    /// UDP source address that sent the datagram.
     pub source: SocketAddr,
 }
 
+/// Cached state for a discovered SAP stream.
+///
+/// A `SapStream` is created and maintained by `SapRegistry`. It keeps the most
+/// recent SAP message for a stream plus first/last observation times so browser
+/// tools can render stable output and expire announcements that stop refreshing.
 #[derive(Debug, Clone)]
 pub struct SapStream {
+    /// Stable registry key for the stream.
     pub key: SapMessageKey,
+
+    /// Most recent parsed SAP message for the stream.
     pub message: SapMessage,
+
+    /// Most recent UDP source address that sent the announcement.
     pub source: SocketAddr,
+
+    /// Time when this stream first appeared in the registry.
     pub first_seen: Instant,
+
+    /// Time when this stream was most recently announced or updated.
     pub last_seen: Instant,
 }
 
+/// Lifecycle event emitted by `SapRegistry`.
+///
+/// Browser applications should use these events to update their display or
+/// notify callers. Repeated identical SAP refreshes do not emit events; they
+/// only update `SapStream::last_seen` internally.
 #[derive(Debug, Clone)]
 pub enum SapRegistryEvent {
+    /// A previously unseen stream was discovered.
     Added(SapStream),
+
+    /// A known stream changed SDP content, parsed session metadata, payload
+    /// type, or UDP source.
     Updated(SapStream),
+
+    /// A known stream was withdrawn by a SAP deletion packet.
     Removed(SapStream),
+
+    /// A known stream stopped refreshing for longer than the configured expiry
+    /// duration.
     Expired(SapStream),
 }
 
+/// In-memory cache of SAP-discovered AES67 streams.
+///
+/// `SapRegistry` is deliberately independent of sockets and async runtime. Feed
+/// it parsed `SapMessage` values from `SapBrowser::recv_message` or
+/// `parse_sap_packet`, then call `expire` periodically using the caller's clock.
+/// Only messages with parsed AES67 session metadata are added to the registry;
+/// unsupported or non-SDP SAP packets are ignored by returning `None`.
 #[derive(Debug, Clone)]
 pub struct SapRegistry {
     expiry: Duration,
@@ -65,6 +191,10 @@ pub struct SapRegistry {
 }
 
 impl SapRegistry {
+    /// Create an empty registry with the provided stale-stream expiry duration.
+    ///
+    /// A stream is considered expired when `now - last_seen >= expiry` during a
+    /// call to `expire`.
     pub fn new(expiry: Duration) -> Self {
         Self {
             expiry,
@@ -72,6 +202,19 @@ impl SapRegistry {
         }
     }
 
+    /// Apply one parsed SAP message to the registry.
+    ///
+    /// Returns:
+    ///
+    /// - `Some(SapRegistryEvent::Added)` when a supported stream is first seen.
+    /// - `Some(SapRegistryEvent::Updated)` when an existing stream changes.
+    /// - `Some(SapRegistryEvent::Removed)` when a deletion packet withdraws a
+    ///   known stream.
+    /// - `None` for identical refreshes, deletion packets for unknown streams,
+    ///   and SAP messages that do not contain supported AES67 SDP metadata.
+    ///
+    /// `source` should be the UDP sender address and `now` should be the time
+    /// the datagram was received.
     pub fn apply_message(
         &mut self,
         message: SapMessage,
@@ -117,6 +260,11 @@ impl SapRegistry {
         }
     }
 
+    /// Remove stale streams and return one `Expired` event for each removal.
+    ///
+    /// Call this periodically from a browser loop. This method does not inspect
+    /// the network; it only compares the supplied `now` value with each
+    /// stream's `last_seen` timestamp.
     pub fn expire(&mut self, now: Instant) -> Vec<SapRegistryEvent> {
         let expired_keys = self
             .streams
@@ -135,6 +283,11 @@ impl SapRegistry {
             .collect()
     }
 
+    /// Return the currently tracked streams in stable display order.
+    ///
+    /// The returned vector is cloned from registry state and sorted by session
+    /// name, origin source, and message hash. Mutating the returned streams does
+    /// not affect the registry.
     pub fn get_streams(&self) -> Vec<SapStream> {
         let mut streams = self.streams.values().cloned().collect::<Vec<_>>();
         streams.sort_by_key(|stream| {
@@ -153,15 +306,34 @@ impl SapRegistry {
     }
 }
 
+/// Configuration for a SAP browser receive socket.
+///
+/// Use `SapBrowserConfig::new(interface)` for normal AES67 SAP discovery. Tests
+/// can override `address` and `port` to bind a loopback unicast socket while
+/// still exercising the same parser and registry path.
 #[derive(Debug, Clone)]
 pub struct SapBrowserConfig {
+    /// SAP multicast or test listen address.
+    ///
+    /// Multicast addresses bind the socket to `0.0.0.0` and join the group on
+    /// `interface`. Non-multicast addresses bind directly to this address.
     pub address: Ipv4Addr,
+
+    /// UDP port to listen on.
     pub port: u16,
+
+    /// Local IPv4 interface used when joining a multicast SAP group.
     pub interface: Ipv4Addr,
+
+    /// UDP receive buffer size requested for the socket.
     pub recv_buffer_size: usize,
 }
 
 impl SapBrowserConfig {
+    /// Build the standard SAP browser configuration for an interface.
+    ///
+    /// Defaults to `SAP_MULTICAST_ADDRESS`, `SAP_PORT`, and a 64 KiB receive
+    /// buffer.
     pub fn new(interface: Ipv4Addr) -> Self {
         Self {
             address: SAP_MULTICAST_ADDRESS,
@@ -172,11 +344,22 @@ impl SapBrowserConfig {
     }
 }
 
+/// Async SAP datagram receiver.
+///
+/// `SapBrowser` owns a nonblocking Tokio UDP socket configured for SAP browsing.
+/// It handles binding and multicast group membership, then exposes
+/// `recv_message` to receive and parse one SAP datagram at a time.
 pub struct SapBrowser {
     socket: UdpSocket,
 }
 
 impl SapBrowser {
+    /// Create and bind a SAP browser socket from the provided configuration.
+    ///
+    /// For multicast `config.address`, this binds to `0.0.0.0:config.port` and
+    /// joins the multicast group on `config.interface`. For non-multicast
+    /// addresses, this binds directly to `config.address:config.port`, which is
+    /// primarily useful for deterministic loopback tests.
     pub fn new(config: SapBrowserConfig) -> Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         crate::socket::apply_udp_socket_defaults(
@@ -217,6 +400,12 @@ impl SapBrowser {
         Ok(Self { socket })
     }
 
+    /// Receive and parse one SAP datagram.
+    ///
+    /// `buffer` is caller-provided scratch storage and should be large enough
+    /// for the expected SAP packet. A 64 KiB buffer is sufficient for normal
+    /// UDP datagrams. The returned `ReceivedSapMessage` owns the parsed message
+    /// data, so the buffer may be reused immediately after this call returns.
     pub async fn recv_message(&self, buffer: &mut [u8]) -> Result<ReceivedSapMessage> {
         let (len, source) = self
             .socket
@@ -229,6 +418,10 @@ impl SapBrowser {
         Ok(ReceivedSapMessage { message, source })
     }
 
+    /// Return the OS-assigned local socket address.
+    ///
+    /// This is mostly useful in tests that bind to port `0` and need to discover
+    /// the actual port selected by the OS.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket
             .local_addr()
@@ -236,6 +429,13 @@ impl SapBrowser {
     }
 }
 
+/// Periodic SAP announcer for SDP payloads.
+///
+/// `SapAnnouncer` is used by the streamer side. It sends the current SDP
+/// payload to `SAP_MULTICAST_ADDRESS:SAP_PORT` every 30 seconds using DSCP 24
+/// / CS3 marking and the configured multicast interface. The payload can be
+/// updated while the announcer is running, which lets the streamer refresh SDP
+/// metadata when its PTP reference changes.
 pub struct SapAnnouncer {
     socket: Arc<UdpSocket>,
     sdp_payload: Arc<Mutex<String>>,
@@ -245,6 +445,10 @@ pub struct SapAnnouncer {
 }
 
 impl SapAnnouncer {
+    /// Create a SAP announcer for an SDP payload and local interface address.
+    ///
+    /// `interface_ip` is used both as the multicast interface and as the SAP
+    /// origin source encoded in outgoing packets.
     pub fn new(sdp_payload: String, interface_ip: Ipv4Addr) -> Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
@@ -272,14 +476,25 @@ impl SapAnnouncer {
         })
     }
 
+    /// Replace the SDP payload used for future SAP announcements.
+    ///
+    /// This does not send immediately; the new payload is picked up by the next
+    /// interval tick in the background announcer task.
     pub fn update_sdp_payload(&self, sdp_payload: String) {
         *self.sdp_payload.lock().unwrap() = sdp_payload;
     }
 
+    /// Return the currently configured SDP payload.
+    ///
+    /// This is mainly useful for tests and diagnostics.
     pub fn get_sdp_payload(&self) -> String {
         self.sdp_payload.lock().unwrap().clone()
     }
 
+    /// Start the background SAP announcement task.
+    ///
+    /// The task sends one SAP packet on each 30-second interval tick until
+    /// `stop` or `shutdown` is called.
     pub async fn start(&self) -> Result<()> {
         let sap_addr = SocketAddrV4::new(SAP_MULTICAST_ADDRESS, SAP_PORT);
         let mut interval = time::interval(Duration::from_secs(30));
@@ -314,10 +529,18 @@ impl SapAnnouncer {
         Ok(())
     }
 
+    /// Signal the background announcer task to stop.
+    ///
+    /// This method is non-blocking. Use `shutdown` when the caller also needs to
+    /// wait for the task to finish.
     pub fn stop(&self) {
         self.shutdown.cancel();
     }
 
+    /// Stop the announcer and wait for its background task to finish.
+    ///
+    /// Join failures are logged and otherwise ignored so shutdown paths do not
+    /// mask the primary streaming result.
     pub async fn shutdown(&self) {
         self.stop();
         let handle = self.task.lock().unwrap().take();
@@ -330,6 +553,21 @@ impl SapAnnouncer {
     }
 }
 
+/// Parse a raw SAP datagram into an owned `SapMessage`.
+///
+/// Supported packets:
+///
+/// - SAP version 1.
+/// - IPv4 origin source addresses.
+/// - Unencrypted and uncompressed payloads.
+/// - `application/sdp` payloads, including legacy packets that omit the MIME
+///   type and begin directly with SDP text.
+///
+/// Unsupported SAP features return an error rather than a partial message. SDP
+/// parse failures do not make the SAP parse fail; instead, the returned
+/// `SapMessage` keeps the raw SDP text and sets `session` to `None`. This lets
+/// browsers report or save unsupported SDP while still avoiding false AES67
+/// discovery events in `SapRegistry`.
 pub fn parse_sap_packet(packet: &[u8]) -> Result<SapMessage> {
     if packet.len() < 8 {
         return Err(anyhow!("SAP packet is too short"));
@@ -395,6 +633,12 @@ pub fn parse_sap_packet(packet: &[u8]) -> Result<SapMessage> {
     })
 }
 
+/// Split the SAP payload into MIME type and body bytes.
+///
+/// RFC-style SAP payloads start with a null-terminated MIME content type such
+/// as `application/sdp`, followed by the payload body. Some real-world SAP
+/// senders omit the MIME prefix and place SDP text directly after the SAP
+/// header; those packets are accepted and normalized to `application/sdp`.
 fn parse_sap_payload(payload: &[u8]) -> Result<(Option<String>, &[u8])> {
     if looks_like_sdp(payload) {
         return Ok((Some("application/sdp".to_string()), payload));
@@ -414,10 +658,21 @@ fn parse_sap_payload(payload: &[u8]) -> Result<(Option<String>, &[u8])> {
     Ok((Some(payload_type), &payload[separator + 1..]))
 }
 
+/// Return whether payload bytes appear to start directly with SDP text.
+///
+/// This heuristic supports legacy or minimal SAP senders that omit the
+/// `application/sdp` MIME prefix. SDP commonly starts with `v=`, `o=`, or `s=`;
+/// if one of those prefixes is present, the parser treats the entire payload as
+/// SDP body bytes.
 fn looks_like_sdp(payload: &[u8]) -> bool {
     payload.starts_with(b"v=") || payload.starts_with(b"o=") || payload.starts_with(b"s=")
 }
 
+/// Build a SAP version 1 IPv4 announcement packet for an SDP payload.
+///
+/// The packet uses an `application/sdp` MIME payload and a deterministic
+/// project-local message hash. This helper is crate-private because the public
+/// production API for sending announcements is `SapAnnouncer`.
 pub(crate) fn build_sap_packet(sdp_payload: &str, origin_source: Ipv4Addr) -> Vec<u8> {
     let message_hash = sap_message_hash(sdp_payload, origin_source);
     let mut packet = Vec::with_capacity(24 + sdp_payload.len());
@@ -430,6 +685,13 @@ pub(crate) fn build_sap_packet(sdp_payload: &str, origin_source: Ipv4Addr) -> Ve
     packet
 }
 
+/// Derive the 16-bit SAP message hash used by this project's announcer.
+///
+/// The SAP RFC leaves hash generation to the announcer. This implementation
+/// uses a deterministic FNV-style fold over the origin source and SDP payload so
+/// identical announcements produce stable keys while payload or origin changes
+/// produce different hashes in normal use. A zero folded value is remapped to
+/// `1` so the generated hash is never zero.
 fn sap_message_hash(sdp_payload: &str, origin_source: Ipv4Addr) -> u16 {
     let mut hash = 0x811c9dc5u32;
 
