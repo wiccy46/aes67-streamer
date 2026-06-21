@@ -21,6 +21,7 @@ use std::time::Duration;
 
 const CONFIG_DIR_ENV: &str = "AES67_MUSIC_PLAYER_CONFIG_DIR";
 const SETTINGS_FILE: &str = "music-player.toml";
+const ACCENT_COLOR: Color = Color::Rgb(214, 132, 58);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct MusicPlayerSettings {
@@ -113,7 +114,7 @@ impl Default for MusicPlayerSettings {
     fn default() -> Self {
         Self {
             stream: StreamSettings {
-                address: "239.69.83.1".to_string(),
+                address: String::new(),
                 port: 5004,
                 interface: None,
                 session_name: "AES67 Music Player".to_string(),
@@ -253,7 +254,13 @@ impl MusicPlayerApp {
         settings_created: bool,
         interface_options: Vec<NetworkInterface>,
     ) -> Self {
-        let settings_required = settings_created || settings.stream.interface.is_none();
+        let missing_required_settings = settings.stream.address.trim().is_empty()
+            || settings
+                .stream
+                .interface
+                .as_deref()
+                .is_none_or(str::is_empty);
+        let settings_required = settings_created || missing_required_settings;
         Self {
             settings,
             settings_path,
@@ -268,7 +275,9 @@ impl MusicPlayerApp {
             edit: None,
             picker: None,
             status: if settings_created {
-                "First launch: select an interface, then press s.".to_string()
+                "First launch: set stream address and interface, then press s.".to_string()
+            } else if missing_required_settings {
+                "Complete required stream settings, then press s.".to_string()
             } else {
                 "Ready".to_string()
             },
@@ -421,6 +430,10 @@ impl MusicPlayerApp {
     }
 
     fn validate_settings(&self) -> Result<()> {
+        if self.settings.stream.address.trim().is_empty() {
+            return Err(anyhow!("Stream address is required"));
+        }
+
         if self
             .settings
             .stream
@@ -603,11 +616,36 @@ impl MusicPlayerApp {
     }
 
     fn setting_display_value(&self, field: SettingsField) -> String {
+        if field == SettingsField::Address && self.settings.stream.address.trim().is_empty() {
+            return "Set stream address".to_string();
+        }
+
         if field == SettingsField::Interface {
             return self.describe_interface_setting();
         }
 
         field.value(&self.settings.stream)
+    }
+
+    fn setting_value_style(&self, field: SettingsField) -> Style {
+        if self.is_required_setting_missing(field) {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Green)
+        }
+    }
+
+    fn is_required_setting_missing(&self, field: SettingsField) -> bool {
+        match field {
+            SettingsField::Address => self.settings.stream.address.trim().is_empty(),
+            SettingsField::Interface => self
+                .settings
+                .stream
+                .interface
+                .as_deref()
+                .is_none_or(str::is_empty),
+            _ => false,
+        }
     }
 
     fn describe_interface_setting(&self) -> String {
@@ -622,6 +660,25 @@ impl MusicPlayerApp {
         }
 
         interface.to_string()
+    }
+
+    fn stream_target_label(&self) -> String {
+        if self.settings.stream.address.trim().is_empty() {
+            "Set stream address".to_string()
+        } else {
+            format!(
+                "{}:{}",
+                self.settings.stream.address, self.settings.stream.port
+            )
+        }
+    }
+
+    fn stream_target_style(&self) -> Style {
+        if self.settings.stream.address.trim().is_empty() {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Green)
+        }
     }
 }
 
@@ -718,20 +775,13 @@ fn render_player_surface(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
         Span::styled(
             " AES67 Music Player ",
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(ACCENT_COLOR)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled("stopped", Style::default().fg(Color::Yellow)),
         Span::raw("  "),
-        Span::styled(
-            format!(
-                "{}:{}",
-                app.settings.stream.address, app.settings.stream.port
-            ),
-            Style::default().fg(Color::Green),
-        ),
+        Span::styled(app.stream_target_label(), app.stream_target_style()),
     ]);
     frame.render_widget(
         Paragraph::new(title)
@@ -770,7 +820,7 @@ fn render_playlist(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
         vec![ListItem::new(Line::from(vec![
             Span::styled("Empty queue", Style::default().fg(Color::DarkGray)),
             Span::raw(" - press "),
-            Span::styled("a", Style::default().fg(Color::Cyan)),
+            Span::styled("a", Style::default().fg(ACCENT_COLOR)),
             Span::raw(" to add music in the next slice"),
         ]))]
     } else {
@@ -786,7 +836,7 @@ fn render_playlist(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
         Block::default()
             .title(" Playlist Queue ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(ACCENT_COLOR)),
     );
     frame.render_widget(list, area);
 }
@@ -823,11 +873,14 @@ fn render_side_panel(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("RTP: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(format!("{}:{}", stream.address, stream.port)),
+            Span::styled(app.stream_target_label(), app.stream_target_style()),
         ]),
         Line::from(vec![
             Span::styled("Interface: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(app.describe_interface_setting()),
+            Span::styled(
+                app.describe_interface_setting(),
+                app.setting_value_style(SettingsField::Interface),
+            ),
         ]),
         Line::from(vec![
             Span::styled("SAP: ", Style::default().fg(Color::DarkGray)),
@@ -859,7 +912,7 @@ fn render_settings_modal(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
     let block = Block::default()
         .title(" Stream Settings ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(ACCENT_COLOR));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -878,7 +931,7 @@ fn render_settings_modal(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
         .map(|field| {
             let mut style = Style::default();
             let marker = if *field == app.settings_focus {
-                style = style.fg(Color::Black).bg(Color::Yellow);
+                style = style.fg(Color::Black).bg(ACCENT_COLOR);
                 ">"
             } else {
                 " "
@@ -892,11 +945,16 @@ fn render_settings_modal(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
             } else {
                 app.setting_display_value(*field)
             };
+            let value_style = if app.edit.as_ref().map(|edit| edit.field) == Some(*field) {
+                Style::default().fg(ACCENT_COLOR)
+            } else {
+                app.setting_value_style(*field)
+            };
 
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{marker} {:<18}", field.label()), style),
                 Span::raw(" "),
-                Span::styled(value, Style::default().fg(Color::Green)),
+                Span::styled(value, value_style),
             ]))
         })
         .collect();
@@ -935,7 +993,7 @@ fn render_settings_modal(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             controls,
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(ACCENT_COLOR),
         ))),
         layout[3],
     );
@@ -945,7 +1003,7 @@ fn render_picker_modal(frame: &mut Frame<'_>, picker: &SettingsPicker, area: Rec
     let block = Block::default()
         .title(format!(" {} ", picker.title))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(ACCENT_COLOR));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -962,7 +1020,7 @@ fn render_picker_modal(frame: &mut Frame<'_>, picker: &SettingsPicker, area: Rec
             let selected = index == picker.selected;
             let marker = if selected { ">" } else { " " };
             let style = if selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                Style::default().fg(Color::Black).bg(ACCENT_COLOR)
             } else {
                 Style::default()
             };
@@ -977,7 +1035,7 @@ fn render_picker_modal(frame: &mut Frame<'_>, picker: &SettingsPicker, area: Rec
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "up/down choose | enter select | r refresh | esc cancel",
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(ACCENT_COLOR),
         ))),
         layout[1],
     );
@@ -1141,6 +1199,11 @@ mod tests {
     }
 
     #[test]
+    fn default_settings_do_not_include_stream_address() {
+        assert_eq!(MusicPlayerSettings::default().stream.address, "");
+    }
+
+    #[test]
     fn first_run_persists_default_settings() {
         let path = temp_settings_file("first-run");
 
@@ -1195,6 +1258,7 @@ mod tests {
     fn existing_settings_launches_on_player_screen() {
         let path = temp_settings_file("existing-settings");
         let mut settings = MusicPlayerSettings::default();
+        settings.stream.address = "239.69.83.1".to_string();
         settings.stream.interface = Some("en0".to_string());
         save_settings(&path, &settings).expect("settings should save");
 
@@ -1210,9 +1274,29 @@ mod tests {
     }
 
     #[test]
+    fn existing_settings_without_address_reopens_required_settings() {
+        let path = temp_settings_file("existing-settings-missing-address");
+        let mut settings = MusicPlayerSettings::default();
+        settings.stream.interface = Some("en0".to_string());
+        save_settings(&path, &settings).expect("settings should save");
+
+        let (settings, created) =
+            load_or_create_settings_with_state(&path).expect("settings should load");
+        let app = MusicPlayerApp::new(settings, path.clone(), created);
+
+        assert!(!created);
+        assert_eq!(app.screen, AppScreen::Settings);
+        assert!(app.settings_required);
+
+        fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
     fn existing_settings_without_interface_reopens_required_settings() {
         let path = temp_settings_file("existing-settings-missing-interface");
-        save_settings(&path, &MusicPlayerSettings::default()).expect("settings should save");
+        let mut settings = MusicPlayerSettings::default();
+        settings.stream.address = "239.69.83.1".to_string();
+        save_settings(&path, &settings).expect("settings should save");
 
         let (settings, created) =
             load_or_create_settings_with_state(&path).expect("settings should load");
@@ -1317,8 +1401,10 @@ mod tests {
     #[test]
     fn settings_cannot_save_without_interface() {
         let path = temp_settings_file("settings-require-interface");
+        let mut settings = MusicPlayerSettings::default();
+        settings.stream.address = "239.69.83.1".to_string();
         let mut app = MusicPlayerApp::new_with_interfaces(
-            MusicPlayerSettings::default(),
+            settings,
             path.clone(),
             true,
             vec![interface("en0", [192, 168, 1, 42])],
@@ -1335,9 +1421,32 @@ mod tests {
     }
 
     #[test]
+    fn settings_cannot_save_without_address() {
+        let path = temp_settings_file("settings-require-address");
+        let mut settings = MusicPlayerSettings::default();
+        settings.stream.interface = Some("en0".to_string());
+        let mut app = MusicPlayerApp::new_with_interfaces(
+            settings,
+            path.clone(),
+            true,
+            vec![interface("en0", [192, 168, 1, 42])],
+        );
+
+        app.handle_key(key('s'))
+            .expect("save without address should not crash");
+
+        assert_eq!(app.screen, AppScreen::Settings);
+        assert!(app.settings_required);
+        assert!(app.status.contains("Stream address is required"));
+
+        fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
     fn ratatui_renderer_shows_player_surface() {
         let path = temp_settings_file("render-player");
         let mut settings = MusicPlayerSettings::default();
+        settings.stream.address = "239.69.83.1".to_string();
         settings.stream.interface = Some("en0".to_string());
         let app = MusicPlayerApp::new(settings, path.clone(), false);
 
@@ -1360,7 +1469,6 @@ mod tests {
 
         assert!(output.contains("AES67 Music Player"));
         assert!(output.contains("Stream Settings"));
-        assert!(output.contains("239.69.83.1"));
 
         fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
     }
