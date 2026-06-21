@@ -22,6 +22,7 @@ use std::time::Duration;
 const CONFIG_DIR_ENV: &str = "AES67_MUSIC_PLAYER_CONFIG_DIR";
 const SETTINGS_FILE: &str = "music-player.toml";
 const ACCENT_COLOR: Color = Color::Rgb(214, 132, 58);
+const COMPLETION_LIST_LIMIT: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct MusicPlayerSettings {
@@ -77,12 +78,14 @@ struct PathInput {
     value: String,
     completions: Vec<String>,
     completion_index: usize,
+    show_completions: bool,
 }
 
 impl PathInput {
     fn clear_completions(&mut self) {
         self.completions.clear();
         self.completion_index = 0;
+        self.show_completions = false;
     }
 }
 
@@ -472,11 +475,14 @@ impl MusicPlayerApp {
         if input.completions.is_empty() {
             input.completions = path_completions(&input.value)?;
             input.completion_index = 0;
+            input.show_completions = false;
         } else {
             input.completion_index = (input.completion_index + 1) % input.completions.len();
+            input.show_completions = input.completions.len() > 1;
         }
 
         if input.completions.is_empty() {
+            input.show_completions = false;
             self.status = "No matching files or folders".to_string();
             return Ok(());
         }
@@ -485,8 +491,10 @@ impl MusicPlayerApp {
         let count = input.completions.len();
         self.status = if count == 1 {
             "Completed path".to_string()
+        } else if input.show_completions {
+            format!("Showing {count} matches, press Tab to cycle")
         } else {
-            format!("{count} matches, press Tab to cycle")
+            format!("{count} matches, press Tab again to show options")
         };
         Ok(())
     }
@@ -654,9 +662,24 @@ impl MusicPlayerApp {
         }
 
         let path = PathBuf::from(value);
+        let expanded_path = expand_user_path(&path);
+        if !expanded_path.exists() {
+            self.status = "Path does not exist".to_string();
+            return Ok(());
+        }
+
+        if expanded_path.is_file() && !is_supported_audio_file(&expanded_path) {
+            self.status = "Unsupported audio file type".to_string();
+            return Ok(());
+        }
+
         let files = collect_audio_files(&path)?;
         if files.is_empty() {
-            self.status = "No supported audio files found".to_string();
+            self.status = if expanded_path.is_dir() {
+                "No supported audio files found in folder".to_string()
+            } else {
+                "No supported audio files found".to_string()
+            };
             return Ok(());
         }
 
@@ -913,7 +936,7 @@ fn render_app(frame: &mut Frame<'_>, app: &MusicPlayerApp) {
     }
 
     if let Some(input) = &app.path_input {
-        let input_area = centered_rect(72, 28, area);
+        let input_area = centered_rect(72, if input.show_completions { 44 } else { 28 }, area);
         frame.render_widget(Clear, input_area);
         render_path_input_modal(frame, input, &app.status, input_area);
     }
@@ -1107,14 +1130,25 @@ fn render_path_input_modal(frame: &mut Frame<'_>, input: &PathInput, status: &st
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let show_completions = input.show_completions && !input.completions.is_empty();
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints(if show_completions {
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ]
+        } else {
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ]
+        })
         .split(inner);
 
     frame.render_widget(
@@ -1133,14 +1167,44 @@ fn render_path_input_modal(frame: &mut Frame<'_>, input: &PathInput, status: &st
         .wrap(Wrap { trim: false }),
         layout[1],
     );
+
+    let status_index = if show_completions {
+        let items: Vec<ListItem> = input
+            .completions
+            .iter()
+            .take(COMPLETION_LIST_LIMIT)
+            .enumerate()
+            .map(|(index, completion)| {
+                let selected = index == input.completion_index;
+                let marker = if selected { ">" } else { " " };
+                let style = if selected {
+                    Style::default().fg(Color::Black).bg(ACCENT_COLOR)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(Span::styled(
+                    format!("{marker} {}", completion_option_label(completion)),
+                    style,
+                )))
+            })
+            .collect();
+        frame.render_widget(
+            List::new(items).block(Block::default().title(" Options ").borders(Borders::ALL)),
+            layout[2],
+        );
+        3
+    } else {
+        2
+    };
+
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(Color::Yellow)),
-        layout[2],
+        layout[status_index],
     );
     frame.render_widget(
         Paragraph::new("tab complete | enter add | esc cancel")
             .style(Style::default().fg(Color::DarkGray)),
-        layout[3],
+        layout[status_index + 1],
     );
 }
 
@@ -1563,6 +1627,20 @@ fn display_path_name(path: &str) -> String {
         .to_string()
 }
 
+fn completion_option_label(path: &str) -> String {
+    let is_dir = path.ends_with(std::path::MAIN_SEPARATOR);
+    let trimmed = path.trim_end_matches(std::path::MAIN_SEPARATOR);
+    let mut label = Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(trimmed)
+        .to_string();
+    if is_dir {
+        label.push(std::path::MAIN_SEPARATOR);
+    }
+    label
+}
+
 fn parse_bool(value: &str, name: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "yes" | "y" | "1" | "on" | "enabled" => Ok(true),
@@ -1962,7 +2040,23 @@ mod tests {
         type_path(&mut app, &text_path);
 
         assert!(app.settings.playlist.files.is_empty());
-        assert!(app.status.contains("No supported audio files"));
+        assert!(app.status.contains("Unsupported audio file type"));
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn missing_playlist_path_does_not_modify_queue() {
+        let (mut app, settings_path) = configured_app("queue-missing-path");
+        let missing_path = settings_path
+            .parent()
+            .expect("settings should have parent")
+            .join("missing.wav");
+
+        type_path(&mut app, &missing_path);
+
+        assert!(app.settings.playlist.files.is_empty());
+        assert!(app.status.contains("Path does not exist"));
 
         fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
     }
@@ -2056,6 +2150,36 @@ mod tests {
                 || second_completion.ends_with(".flac")
                 || second_completion.ends_with(".wav")
         );
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn second_tab_displays_completion_options() {
+        let (mut app, settings_path) = configured_app("queue-complete-display");
+        let root = settings_path.parent().expect("settings should have parent");
+        let music = root.join("Music");
+        let mixes = root.join("Mixes");
+        let ignored = root.join("Memos.txt");
+        fs::create_dir_all(&music).expect("music folder should be created");
+        fs::create_dir_all(&mixes).expect("mixes folder should be created");
+        write_test_file(&ignored);
+
+        app.handle_key(key('a')).expect("path input should open");
+        for ch in root.join("M").to_string_lossy().chars() {
+            app.handle_key(key(ch))
+                .expect("path character should apply");
+        }
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("first tab should complete path");
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("second tab should show options");
+
+        let output = render_app_to_string(&app, 100, 30).expect("app should render");
+
+        assert!(output.contains("Music/"));
+        assert!(output.contains("Mixes/"));
+        assert!(!output.contains("Memos.txt"));
 
         fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
     }
