@@ -59,10 +59,12 @@ dependencies = [
  "ptp",
  "rand",
  "semver",
+ "serde",
  "socket2 0.5.10",
  "streamer-core",
  "tokio",
  "tokio-util",
+ "toml",
 ]
 
 [[package]]

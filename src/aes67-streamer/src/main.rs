@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use config::{StreamerArgs, StreamerCommand};
 
+mod music_player;
 mod runtime;
 use runtime::RuntimeSupervisor;
 use streamer_core::{Aes67Streamer, StreamConfig};
@@ -24,11 +25,10 @@ async fn main() {
     match command {
         StreamerCommand::File(args) => run_file_streamer(args).await,
         StreamerCommand::MusicPlayer(_args) => {
-            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-                .init();
-            log::error!("music-player mode is not implemented yet");
-            eprintln!("Error: music-player mode is not implemented yet");
-            process::exit(1);
+            if let Err(error) = music_player::run() {
+                eprintln!("Error: {error:#}");
+                process::exit(1);
+            }
         }
     }
 }
