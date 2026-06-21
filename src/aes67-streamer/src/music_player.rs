@@ -10,14 +10,17 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use streamer_core::{Aes67Streamer, StreamConfig};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 const CONFIG_DIR_ENV: &str = "AES67_MUSIC_PLAYER_CONFIG_DIR";
 const SETTINGS_FILE: &str = "music-player.toml";
@@ -125,6 +128,35 @@ struct SettingsPicker {
     selected: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlaybackState {
+    Stopped,
+    Starting { track_index: usize },
+    Streaming { track_index: usize },
+    Stopping { track_index: usize },
+    Error { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlaybackStartRequest {
+    track_index: usize,
+    path: String,
+    stream: StreamSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlaybackCommand {
+    Start(PlaybackStartRequest),
+    Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlaybackMeter {
+    elapsed: Duration,
+    target_packets: u64,
+    target_packet_rate: u64,
+}
+
 #[derive(Debug, Clone)]
 struct MusicPlayerApp {
     settings: MusicPlayerSettings,
@@ -137,8 +169,17 @@ struct MusicPlayerApp {
     path_input: Option<PathInput>,
     edit: Option<SettingEdit>,
     picker: Option<SettingsPicker>,
+    playback_state: PlaybackState,
+    playback_started_at: Option<Instant>,
+    pending_playback_command: Option<PlaybackCommand>,
     status: String,
     should_quit: bool,
+}
+
+struct ActiveMusicStream {
+    track_index: usize,
+    shutdown: CancellationToken,
+    handle: JoinHandle<Result<()>>,
 }
 
 impl Default for MusicPlayerSettings {
@@ -307,6 +348,9 @@ impl MusicPlayerApp {
             path_input: None,
             edit: None,
             picker: None,
+            playback_state: PlaybackState::Stopped,
+            playback_started_at: None,
+            pending_playback_command: None,
             status: if settings_created {
                 "First launch: set stream address and interface, then press s.".to_string()
             } else if missing_required_settings {
@@ -369,12 +413,167 @@ impl MusicPlayerApp {
             KeyCode::Char('d') | KeyCode::Delete => self.remove_selected_queue_item()?,
             KeyCode::Down | KeyCode::Char('j') => self.move_queue_selection_next(),
             KeyCode::Up | KeyCode::Char('k') => self.move_queue_selection_previous(),
-            KeyCode::Char(' ') => {
-                self.status = "Playback controls will connect to the streamer next.".to_string();
-            }
+            KeyCode::Char(' ') => self.toggle_playback(),
             _ => {}
         }
         Ok(())
+    }
+
+    fn toggle_playback(&mut self) {
+        match self.playback_state {
+            PlaybackState::Stopped | PlaybackState::Error { .. } => self.request_stream_start(),
+            PlaybackState::Starting { track_index } | PlaybackState::Streaming { track_index } => {
+                self.request_stream_stop(track_index)
+            }
+            PlaybackState::Stopping { .. } => {
+                self.status = "Stopping current stream...".to_string();
+            }
+        }
+    }
+
+    fn request_stream_start(&mut self) {
+        if let Err(error) = self.validate_settings() {
+            self.status = error.to_string();
+            return;
+        }
+
+        if self.settings.playlist.files.is_empty() {
+            self.status = "Queue is empty".to_string();
+            return;
+        }
+
+        let track_index = self
+            .queue_selected
+            .min(self.settings.playlist.files.len().saturating_sub(1));
+        let Some(path) = self.settings.playlist.files.get(track_index).cloned() else {
+            self.status = "Queue is empty".to_string();
+            return;
+        };
+
+        self.queue_selected = track_index;
+        self.playback_started_at = None;
+        self.playback_state = PlaybackState::Starting { track_index };
+        self.pending_playback_command = Some(PlaybackCommand::Start(PlaybackStartRequest {
+            track_index,
+            path: path.clone(),
+            stream: self.settings.stream.clone(),
+        }));
+        self.status = format!("Starting {}", display_path_name(&path));
+    }
+
+    fn request_stream_stop(&mut self, track_index: usize) {
+        self.playback_state = PlaybackState::Stopping { track_index };
+        self.pending_playback_command = Some(PlaybackCommand::Stop);
+        self.status = "Stopping current stream...".to_string();
+    }
+
+    fn take_playback_command(&mut self) -> Option<PlaybackCommand> {
+        self.pending_playback_command.take()
+    }
+
+    fn mark_stream_started(&mut self, track_index: usize, started_at: Instant) {
+        self.playback_started_at = Some(started_at);
+        self.playback_state = PlaybackState::Streaming { track_index };
+        self.queue_selected = track_index.min(self.settings.playlist.files.len().saturating_sub(1));
+        self.status = format!(
+            "Streaming {}",
+            self.settings
+                .playlist
+                .files
+                .get(track_index)
+                .map(|path| display_path_name(path))
+                .unwrap_or_else(|| "track".to_string())
+        );
+    }
+
+    fn mark_stream_finished(&mut self, track_index: usize, result: Result<()>) {
+        self.playback_started_at = None;
+
+        if let Err(error) = result {
+            self.playback_state = PlaybackState::Error {
+                message: error.to_string(),
+            };
+            self.status = format!("Streaming failed: {error}");
+            return;
+        }
+
+        if matches!(self.playback_state, PlaybackState::Stopping { .. }) {
+            self.playback_state = PlaybackState::Stopped;
+            self.status = "Stopped".to_string();
+            return;
+        }
+
+        let next_index = track_index + 1;
+        if next_index < self.settings.playlist.files.len() {
+            self.queue_selected = next_index;
+            self.request_stream_start();
+        } else {
+            self.playback_state = PlaybackState::Stopped;
+            self.queue_selected =
+                track_index.min(self.settings.playlist.files.len().saturating_sub(1));
+            self.status = "Queue finished".to_string();
+        }
+    }
+
+    fn playback_meter_at(&self, now: Instant) -> PlaybackMeter {
+        let elapsed = self
+            .playback_started_at
+            .and_then(|started_at| now.checked_duration_since(started_at))
+            .unwrap_or(Duration::ZERO);
+        let packet_time_ms = u64::from(self.settings.stream.packet_time_ms.max(1));
+        PlaybackMeter {
+            elapsed,
+            target_packets: elapsed.as_millis() as u64 / packet_time_ms,
+            target_packet_rate: 1_000 / packet_time_ms,
+        }
+    }
+
+    fn playback_state_label(&self) -> &'static str {
+        match self.playback_state {
+            PlaybackState::Stopped => "stopped",
+            PlaybackState::Starting { .. } => "starting",
+            PlaybackState::Streaming { .. } => "streaming",
+            PlaybackState::Stopping { .. } => "stopping",
+            PlaybackState::Error { .. } => "error",
+        }
+    }
+
+    fn playback_state_style(&self) -> Style {
+        match self.playback_state {
+            PlaybackState::Stopped => Style::default().fg(Color::Yellow),
+            PlaybackState::Starting { .. } => Style::default().fg(ACCENT_COLOR),
+            PlaybackState::Streaming { .. } => Style::default().fg(Color::Green),
+            PlaybackState::Stopping { .. } => Style::default().fg(Color::Yellow),
+            PlaybackState::Error { .. } => Style::default().fg(Color::Red),
+        }
+    }
+
+    fn playback_action_label(&self) -> &'static str {
+        match self.playback_state {
+            PlaybackState::Stopped | PlaybackState::Error { .. } => "play",
+            PlaybackState::Starting { .. }
+            | PlaybackState::Streaming { .. }
+            | PlaybackState::Stopping { .. } => "stop",
+        }
+    }
+
+    fn active_track_index(&self) -> Option<usize> {
+        match self.playback_state {
+            PlaybackState::Starting { track_index }
+            | PlaybackState::Streaming { track_index }
+            | PlaybackState::Stopping { track_index } => Some(track_index),
+            PlaybackState::Stopped | PlaybackState::Error { .. } => None,
+        }
+    }
+
+    fn visible_track_name(&self) -> String {
+        let index = self.active_track_index().unwrap_or(self.queue_selected);
+        self.settings
+            .playlist
+            .files
+            .get(index)
+            .map(|path| display_path_name(path))
+            .unwrap_or_else(|| "No track loaded".to_string())
     }
 
     fn handle_path_input_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -932,7 +1131,7 @@ impl MusicPlayerApp {
     }
 }
 
-pub fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let settings_path = settings_file_path()?;
     let (settings, settings_created) = load_or_create_settings_with_state(&settings_path)?;
     let app = MusicPlayerApp::new(settings, settings_path, settings_created);
@@ -944,28 +1143,36 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
-    run_terminal_app(app)
+    run_terminal_app(app).await
 }
 
-fn run_terminal_app(mut app: MusicPlayerApp) -> Result<()> {
+async fn run_terminal_app(mut app: MusicPlayerApp) -> Result<()> {
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("failed to create terminal")?;
+    let mut active_stream = None;
 
-    let run_result = run_event_loop(&mut terminal, &mut app);
+    let run_result = run_event_loop(&mut terminal, &mut app, &mut active_stream).await;
     let restore_result = restore_terminal(&mut terminal);
+    let shutdown_result = shutdown_active_stream(active_stream).await;
 
-    match (run_result, restore_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+    match (run_result, restore_result, shutdown_result) {
+        (Err(error), _, _) => Err(error),
+        (Ok(()), Err(error), _) => Err(error),
+        (Ok(()), Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
     }
 }
 
-fn run_event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut MusicPlayerApp) -> Result<()> {
+async fn run_event_loop<B: Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut MusicPlayerApp,
+    active_stream: &mut Option<ActiveMusicStream>,
+) -> Result<()> {
     loop {
+        poll_active_stream(app, active_stream).await?;
         terminal.draw(|frame| render_app(frame, app))?;
         if app.should_quit {
             return Ok(());
@@ -974,9 +1181,99 @@ fn run_event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut MusicPlayerA
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 app.handle_key(key)?;
+                handle_playback_command(app, active_stream).await?;
             }
         }
     }
+}
+
+async fn handle_playback_command(
+    app: &mut MusicPlayerApp,
+    active_stream: &mut Option<ActiveMusicStream>,
+) -> Result<()> {
+    while let Some(command) = app.take_playback_command() {
+        match command {
+            PlaybackCommand::Start(request) => {
+                if let Some(active) = active_stream.take() {
+                    shutdown_active_stream(Some(active)).await?;
+                }
+                let track_index = request.track_index;
+                *active_stream = Some(spawn_music_stream(request));
+                app.mark_stream_started(track_index, Instant::now());
+            }
+            PlaybackCommand::Stop => {
+                if let Some(active) = active_stream.as_ref() {
+                    active.shutdown.cancel();
+                } else {
+                    app.playback_state = PlaybackState::Stopped;
+                    app.playback_started_at = None;
+                    app.status = "Stopped".to_string();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn poll_active_stream(
+    app: &mut MusicPlayerApp,
+    active_stream: &mut Option<ActiveMusicStream>,
+) -> Result<()> {
+    let Some(active) = active_stream.as_ref() else {
+        return Ok(());
+    };
+
+    if !active.handle.is_finished() {
+        return Ok(());
+    }
+
+    let active = active_stream
+        .take()
+        .expect("active stream should exist after finished check");
+    let track_index = active.track_index;
+    let result = match active.handle.await {
+        Ok(result) => result,
+        Err(error) => Err(anyhow!("music streamer task failed: {error}")),
+    };
+    app.mark_stream_finished(track_index, result);
+    handle_playback_command(app, active_stream).await
+}
+
+fn spawn_music_stream(request: PlaybackStartRequest) -> ActiveMusicStream {
+    let shutdown = CancellationToken::new();
+    let task_shutdown = shutdown.clone();
+    let track_index = request.track_index;
+    let handle = tokio::spawn(async move {
+        let config = stream_config_from_settings(&request.stream);
+        let mut streamer = Aes67Streamer::new(
+            &request.path,
+            &request.stream.address,
+            request.stream.port,
+            request.stream.interface.as_deref(),
+            config,
+        )
+        .await?;
+        streamer.run_until_cancelled(task_shutdown).await
+    });
+
+    ActiveMusicStream {
+        track_index,
+        shutdown,
+        handle,
+    }
+}
+
+async fn shutdown_active_stream(active_stream: Option<ActiveMusicStream>) -> Result<()> {
+    let Some(active) = active_stream else {
+        return Ok(());
+    };
+
+    active.shutdown.cancel();
+    active
+        .handle
+        .await
+        .map_err(|error| anyhow!("music streamer task failed: {error}"))??;
+    Ok(())
 }
 
 fn restore_terminal<W: Write>(terminal: &mut Terminal<CrosstermBackend<W>>) -> Result<()> {
@@ -1035,7 +1332,7 @@ fn render_player_surface(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("stopped", Style::default().fg(Color::Yellow)),
+        Span::styled(app.playback_state_label(), app.playback_state_style()),
         Span::raw("  "),
         Span::styled(app.stream_target_label(), app.stream_target_style()),
     ]);
@@ -1069,7 +1366,7 @@ fn render_player_surface(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
         ),
         Span::raw(" queue   "),
         Span::styled(" space ", Style::default().fg(Color::Black).bg(Color::Gray)),
-        Span::raw(" play/pause   "),
+        Span::raw(format!(" {}   ", app.playback_action_label())),
         Span::styled(&app.status, Style::default().fg(Color::Yellow)),
     ]);
     frame.render_widget(
@@ -1122,28 +1419,30 @@ fn render_playlist(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
 fn render_side_panel(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints([
+            Constraint::Percentage(36),
+            Constraint::Length(5),
+            Constraint::Min(7),
+        ])
         .split(area);
 
-    let selected_track = app
-        .settings
-        .playlist
-        .files
-        .get(app.queue_selected)
-        .map(|path| display_path_name(path))
-        .unwrap_or_else(|| "No track loaded".to_string());
     let now_playing = Paragraph::new(vec![
         Line::from(Span::styled(
-            selected_track,
+            app.visible_track_name(),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(if app.settings.playlist.files.is_empty() {
-            "Add files or folders to build the queue."
-        } else {
-            "Playback and queue streaming will be connected next."
+        Line::from(match app.playback_state {
+            PlaybackState::Stopped if app.settings.playlist.files.is_empty() => {
+                "Add files or folders to build the queue."
+            }
+            PlaybackState::Stopped => "Ready to stream the selected queue item.",
+            PlaybackState::Starting { .. } => "Preparing AES67 streamer.",
+            PlaybackState::Streaming { .. } => "Streaming RTP audio from the queue.",
+            PlaybackState::Stopping { .. } => "Stopping current stream.",
+            PlaybackState::Error { .. } => "Streaming failed; check the status line.",
         }),
     ])
     .block(
@@ -1153,6 +1452,8 @@ fn render_side_panel(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
     )
     .wrap(Wrap { trim: true });
     frame.render_widget(now_playing, chunks[0]);
+
+    render_stream_meter(frame, app, chunks[1]);
 
     let stream = &app.settings.stream;
     let stream_lines = vec![
@@ -1194,7 +1495,43 @@ fn render_side_panel(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
     let stream_panel = Paragraph::new(stream_lines)
         .block(Block::default().title(" Stream ").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    frame.render_widget(stream_panel, chunks[1]);
+    frame.render_widget(stream_panel, chunks[2]);
+}
+
+fn render_stream_meter(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
+    let meter = app.playback_meter_at(Instant::now());
+    let active = matches!(
+        app.playback_state,
+        PlaybackState::Starting { .. }
+            | PlaybackState::Streaming { .. }
+            | PlaybackState::Stopping { .. }
+    );
+    let ratio = if active {
+        (meter.target_packets % 100) as f64 / 100.0
+    } else {
+        0.0
+    };
+    let label = if active {
+        format!(
+            "{}  ~{} RTP packets  {} pps",
+            format_elapsed(meter.elapsed),
+            meter.target_packets,
+            meter.target_packet_rate
+        )
+    } else {
+        "idle".to_string()
+    };
+
+    let gauge = Gauge::default()
+        .block(
+            Block::default()
+                .title(" Stream Meter ")
+                .borders(Borders::ALL),
+        )
+        .gauge_style(Style::default().fg(ACCENT_COLOR))
+        .ratio(ratio)
+        .label(label);
+    frame.render_widget(gauge, area);
 }
 
 fn render_path_input_modal(frame: &mut Frame<'_>, input: &PathInput, status: &str, area: Rect) {
@@ -1515,6 +1852,23 @@ fn save_settings(path: &Path, settings: &MusicPlayerSettings) -> Result<()> {
         .with_context(|| format!("failed to write settings file {}", path.display()))
 }
 
+fn stream_config_from_settings(stream: &StreamSettings) -> StreamConfig {
+    StreamConfig {
+        target_sample_rate: 48_000,
+        packet_time_ms: stream.packet_time_ms,
+        gain_db: 0.0,
+        ptp_domain: stream.ptp_domain,
+        verbose: false,
+        duration: None,
+        loop_playback: false,
+        ttl: stream.ttl,
+        sap: stream.sap,
+        payload_type: stream.payload_type,
+        ssrc: None,
+        session_name: stream.session_name.clone(),
+    }
+}
+
 fn collect_audio_files(path: &Path) -> Result<Vec<PathBuf>> {
     let expanded_path = expand_user_path(path);
 
@@ -1712,6 +2066,13 @@ fn display_path_name(path: &str) -> String {
         .to_string()
 }
 
+fn format_elapsed(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
+}
+
 fn completion_option_label(path: &str) -> String {
     let is_dir = path.ends_with(std::path::MAIN_SEPARATOR);
     let trimmed = path.trim_end_matches(std::path::MAIN_SEPARATOR);
@@ -1764,6 +2125,7 @@ mod tests {
     use super::*;
     use network::NetworkInterface;
     use std::net::Ipv4Addr;
+    use std::time::Instant;
 
     fn temp_settings_file(name: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("aes67-music-player-{name}-{}", std::process::id()));
@@ -2574,6 +2936,155 @@ mod tests {
         assert!(!saved.contains("two.wav"));
 
         fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn space_on_empty_queue_does_not_start_playback() {
+        let (mut app, settings_path) = configured_app("playback-empty-queue");
+
+        app.handle_key(key(' '))
+            .expect("space should not fail with an empty queue");
+
+        assert_eq!(app.playback_state, PlaybackState::Stopped);
+        assert_eq!(app.take_playback_command(), None);
+        assert!(app.status.contains("Queue is empty"));
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn space_requires_stream_settings_before_playback() {
+        let path = temp_settings_file("playback-missing-settings");
+        let mut settings = MusicPlayerSettings::default();
+        settings.playlist.files = vec!["track.wav".to_string()];
+        let mut app = MusicPlayerApp::new_with_interfaces(
+            settings,
+            path.clone(),
+            false,
+            vec![interface("en0", [192, 168, 1, 42])],
+        );
+
+        app.handle_player_key(key(' '))
+            .expect("space should not fail when settings are incomplete");
+
+        assert_eq!(app.playback_state, PlaybackState::Stopped);
+        assert_eq!(app.take_playback_command(), None);
+        assert!(app.status.contains("Stream address is required"));
+
+        fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn space_starts_selected_queue_item() {
+        let (mut app, settings_path) = configured_app("playback-start-selected");
+        app.settings.playlist.files = vec!["one.wav".to_string(), "two.wav".to_string()];
+        app.queue_selected = 1;
+
+        app.handle_key(key(' '))
+            .expect("space should request playback start");
+
+        assert_eq!(
+            app.playback_state,
+            PlaybackState::Starting { track_index: 1 }
+        );
+        assert_eq!(
+            app.take_playback_command(),
+            Some(PlaybackCommand::Start(PlaybackStartRequest {
+                track_index: 1,
+                path: "two.wav".to_string(),
+                stream: app.settings.stream.clone(),
+            }))
+        );
+        assert_eq!(app.take_playback_command(), None);
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn space_stops_active_stream() {
+        let (mut app, settings_path) = configured_app("playback-stop-active");
+        app.settings.playlist.files = vec!["one.wav".to_string()];
+        app.mark_stream_started(0, Instant::now());
+
+        app.handle_key(key(' '))
+            .expect("space should request playback stop");
+
+        assert_eq!(
+            app.playback_state,
+            PlaybackState::Stopping { track_index: 0 }
+        );
+        assert_eq!(app.take_playback_command(), Some(PlaybackCommand::Stop));
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn completed_track_advances_to_next_queue_item() {
+        let (mut app, settings_path) = configured_app("playback-advance");
+        app.settings.playlist.files = vec!["one.wav".to_string(), "two.wav".to_string()];
+        app.mark_stream_started(0, Instant::now());
+
+        app.mark_stream_finished(0, Ok(()));
+
+        assert_eq!(app.queue_selected, 1);
+        assert_eq!(
+            app.playback_state,
+            PlaybackState::Starting { track_index: 1 }
+        );
+        assert_eq!(
+            app.take_playback_command(),
+            Some(PlaybackCommand::Start(PlaybackStartRequest {
+                track_index: 1,
+                path: "two.wav".to_string(),
+                stream: app.settings.stream.clone(),
+            }))
+        );
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn playback_meter_reports_elapsed_target_packets_and_rate() {
+        let (mut app, settings_path) = configured_app("playback-meter");
+        let started_at = Instant::now();
+        app.settings.stream.packet_time_ms = 1;
+        app.mark_stream_started(0, started_at);
+
+        let meter = app.playback_meter_at(started_at + Duration::from_millis(2_345));
+
+        assert_eq!(meter.elapsed, Duration::from_millis(2_345));
+        assert_eq!(meter.target_packets, 2_345);
+        assert_eq!(meter.target_packet_rate, 1_000);
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn stream_settings_build_streamer_config_for_music_mode() {
+        let stream = StreamSettings {
+            address: "239.69.83.1".to_string(),
+            port: 5006,
+            interface: Some("en0".to_string()),
+            session_name: "Set".to_string(),
+            sap: false,
+            ptp_domain: 12,
+            payload_type: 101,
+            packet_time_ms: 2,
+            ttl: 8,
+        };
+
+        let config = stream_config_from_settings(&stream);
+
+        assert_eq!(config.target_sample_rate, 48_000);
+        assert_eq!(config.packet_time_ms, 2);
+        assert_eq!(config.ptp_domain, 12);
+        assert_eq!(config.duration, None);
+        assert!(!config.loop_playback);
+        assert_eq!(config.ttl, 8);
+        assert!(!config.sap);
+        assert_eq!(config.payload_type, 101);
+        assert_eq!(config.ssrc, None);
+        assert_eq!(config.session_name, "Set");
     }
 
     #[test]
