@@ -72,6 +72,11 @@ struct SettingEdit {
     value: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathInput {
+    value: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerKind {
     Interface,
@@ -104,6 +109,8 @@ struct MusicPlayerApp {
     screen: AppScreen,
     settings_required: bool,
     settings_focus: SettingsField,
+    queue_selected: usize,
+    path_input: Option<PathInput>,
     edit: Option<SettingEdit>,
     picker: Option<SettingsPicker>,
     status: String,
@@ -272,6 +279,8 @@ impl MusicPlayerApp {
             },
             settings_required,
             settings_focus: SettingsField::SessionName,
+            queue_selected: 0,
+            path_input: None,
             edit: None,
             picker: None,
             status: if settings_created {
@@ -289,6 +298,10 @@ impl MusicPlayerApp {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
             return Ok(());
+        }
+
+        if self.path_input.is_some() {
+            return self.handle_path_input_key(key);
         }
 
         if self.picker.is_some() {
@@ -328,11 +341,40 @@ impl MusicPlayerApp {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('s') | KeyCode::Char('c') => self.open_settings(false),
-            KeyCode::Char('a') => {
-                self.status = "Add file/folder is planned for the playlist slice.".to_string();
-            }
+            KeyCode::Char('a') => self.open_path_input(),
+            KeyCode::Char('d') | KeyCode::Delete => self.remove_selected_queue_item()?,
+            KeyCode::Down | KeyCode::Char('j') => self.move_queue_selection_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.move_queue_selection_previous(),
             KeyCode::Char(' ') => {
                 self.status = "Playback controls will connect to the streamer next.".to_string();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_path_input_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.path_input = None;
+                self.status = "Add canceled".to_string();
+            }
+            KeyCode::Enter => {
+                let input = self
+                    .path_input
+                    .take()
+                    .expect("path input state should exist");
+                self.add_playlist_path(&input.value)?;
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = &mut self.path_input {
+                    input.value.pop();
+                }
+            }
+            KeyCode::Char(ch) => {
+                if let Some(input) = &mut self.path_input {
+                    input.value.push(ch);
+                }
             }
             _ => {}
         }
@@ -403,6 +445,13 @@ impl MusicPlayerApp {
         self.edit = None;
         self.picker = None;
         self.status = "Review stream settings.".to_string();
+    }
+
+    fn open_path_input(&mut self) {
+        self.path_input = Some(PathInput {
+            value: String::new(),
+        });
+        self.status = "Enter a music file or folder path.".to_string();
     }
 
     fn close_settings_or_warn(&mut self) {
@@ -558,6 +607,72 @@ impl MusicPlayerApp {
         } else {
             "SAP announcements disabled".to_string()
         };
+    }
+
+    fn add_playlist_path(&mut self, value: &str) -> Result<()> {
+        let value = value.trim();
+        if value.is_empty() {
+            self.status = "Enter a file or folder path".to_string();
+            return Ok(());
+        }
+
+        let path = PathBuf::from(value);
+        let files = collect_audio_files(&path)?;
+        if files.is_empty() {
+            self.status = "No supported audio files found".to_string();
+            return Ok(());
+        }
+
+        let was_empty = self.settings.playlist.files.is_empty();
+        let count = files.len();
+        self.settings.playlist.files.extend(
+            files
+                .into_iter()
+                .map(|path| path.to_string_lossy().to_string()),
+        );
+        if was_empty {
+            self.queue_selected = 0;
+        }
+
+        save_settings(&self.settings_path, &self.settings)?;
+        self.status = if count == 1 {
+            "Added 1 track".to_string()
+        } else {
+            format!("Added {count} tracks")
+        };
+        Ok(())
+    }
+
+    fn move_queue_selection_next(&mut self) {
+        let len = self.settings.playlist.files.len();
+        if len > 0 {
+            self.queue_selected = (self.queue_selected + 1) % len;
+        }
+    }
+
+    fn move_queue_selection_previous(&mut self) {
+        let len = self.settings.playlist.files.len();
+        if len > 0 {
+            self.queue_selected = (self.queue_selected + len - 1) % len;
+        }
+    }
+
+    fn remove_selected_queue_item(&mut self) -> Result<()> {
+        if self.settings.playlist.files.is_empty() {
+            self.status = "Queue is empty".to_string();
+            return Ok(());
+        }
+
+        let index = self
+            .queue_selected
+            .min(self.settings.playlist.files.len().saturating_sub(1));
+        let removed = self.settings.playlist.files.remove(index);
+        self.queue_selected = self
+            .queue_selected
+            .min(self.settings.playlist.files.len().saturating_sub(1));
+        save_settings(&self.settings_path, &self.settings)?;
+        self.status = format!("Removed {}", display_path_name(&removed));
+        Ok(())
     }
 
     fn apply_field_value(&mut self, field: SettingsField, value: &str) -> Result<()> {
@@ -759,6 +874,12 @@ fn render_app(frame: &mut Frame<'_>, app: &MusicPlayerApp) {
             render_picker_modal(frame, picker, picker_area);
         }
     }
+
+    if let Some(input) = &app.path_input {
+        let input_area = centered_rect(72, 28, area);
+        frame.render_widget(Clear, input_area);
+        render_path_input_modal(frame, input, input_area);
+    }
 }
 
 fn render_player_surface(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
@@ -805,6 +926,13 @@ fn render_player_surface(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
         Span::raw(" settings   "),
         Span::styled(" a ", Style::default().fg(Color::Black).bg(Color::Gray)),
         Span::raw(" add   "),
+        Span::styled(" d ", Style::default().fg(Color::Black).bg(Color::Gray)),
+        Span::raw(" remove   "),
+        Span::styled(
+            " up/down ",
+            Style::default().fg(Color::Black).bg(Color::Gray),
+        ),
+        Span::raw(" queue   "),
         Span::styled(" space ", Style::default().fg(Color::Black).bg(Color::Gray)),
         Span::raw(" play/pause   "),
         Span::styled(&app.status, Style::default().fg(Color::Yellow)),
@@ -828,7 +956,22 @@ fn render_playlist(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
             .playlist
             .files
             .iter()
-            .map(|path| ListItem::new(path.clone()))
+            .enumerate()
+            .map(|(index, path)| {
+                let selected = index == app.queue_selected;
+                let marker = if selected { ">" } else { " " };
+                let style = if selected {
+                    Style::default()
+                        .fg(ACCENT_COLOR)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(Span::styled(
+                    format!("{marker} {}", display_path_name(path)),
+                    style,
+                )))
+            })
             .collect()
     };
 
@@ -847,15 +990,26 @@ fn render_side_panel(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(area);
 
+    let selected_track = app
+        .settings
+        .playlist
+        .files
+        .get(app.queue_selected)
+        .map(|path| display_path_name(path))
+        .unwrap_or_else(|| "No track loaded".to_string());
     let now_playing = Paragraph::new(vec![
         Line::from(Span::styled(
-            "No track loaded",
+            selected_track,
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("Playback and queue streaming will be connected next."),
+        Line::from(if app.settings.playlist.files.is_empty() {
+            "Add files or folders to build the queue."
+        } else {
+            "Playback and queue streaming will be connected next."
+        }),
     ])
     .block(
         Block::default()
@@ -906,6 +1060,45 @@ fn render_side_panel(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
         .block(Block::default().title(" Stream ").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     frame.render_widget(stream_panel, chunks[1]);
+}
+
+fn render_path_input_modal(frame: &mut Frame<'_>, input: &PathInput, area: Rect) {
+    let block = Block::default()
+        .title(" Add Music ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_COLOR));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new("File or folder path").style(Style::default().fg(Color::DarkGray)),
+        layout[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("> "),
+            Span::styled(
+                format!("{}_", input.value),
+                Style::default().fg(ACCENT_COLOR),
+            ),
+        ]))
+        .block(Block::default().borders(Borders::ALL))
+        .wrap(Wrap { trim: false }),
+        layout[1],
+    );
+    frame.render_widget(
+        Paragraph::new("enter add | esc cancel").style(Style::default().fg(Color::DarkGray)),
+        layout[2],
+    );
 }
 
 fn render_settings_modal(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
@@ -1136,6 +1329,54 @@ fn save_settings(path: &Path, settings: &MusicPlayerSettings) -> Result<()> {
         .with_context(|| format!("failed to write settings file {}", path.display()))
 }
 
+fn collect_audio_files(path: &Path) -> Result<Vec<PathBuf>> {
+    if path.is_file() {
+        return Ok(if is_supported_audio_file(path) {
+            vec![path.to_path_buf()]
+        } else {
+            Vec::new()
+        });
+    }
+
+    if path.is_dir() {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(path)
+            .with_context(|| format!("failed to read folder {}", path.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to read entry in {}", path.display()))?;
+            let entry_path = entry.path();
+            if entry_path.is_file() && is_supported_audio_file(&entry_path) {
+                files.push(entry_path);
+            }
+        }
+        files.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
+        return Ok(files);
+    }
+
+    Ok(Vec::new())
+}
+
+fn is_supported_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "wav" | "flac" | "mp3" | "aiff" | "aif"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn display_path_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
 fn parse_bool(value: &str, name: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "yes" | "y" | "1" | "on" | "enabled" => Ok(true),
@@ -1196,6 +1437,36 @@ mod tests {
             ipv4: Ipv4Addr::from(ipv4),
             is_loopback: ipv4[0] == 127,
         }
+    }
+
+    fn configured_app(name: &str) -> (MusicPlayerApp, PathBuf) {
+        let path = temp_settings_file(name);
+        let mut settings = MusicPlayerSettings::default();
+        settings.stream.address = "239.69.83.1".to_string();
+        settings.stream.interface = Some("en0".to_string());
+        (
+            MusicPlayerApp::new_with_interfaces(
+                settings,
+                path.clone(),
+                false,
+                vec![interface("en0", [192, 168, 1, 42])],
+            ),
+            path,
+        )
+    }
+
+    fn type_path(app: &mut MusicPlayerApp, path: &Path) {
+        app.handle_key(key('a')).expect("path input should open");
+        for ch in path.to_string_lossy().chars() {
+            app.handle_key(key(ch))
+                .expect("path character should apply");
+        }
+        app.handle_key(key_code(KeyCode::Enter))
+            .expect("path input should apply");
+    }
+
+    fn write_test_file(path: &Path) {
+        fs::write(path, b"test").expect("test file should be written");
     }
 
     #[test]
@@ -1440,6 +1711,111 @@ mod tests {
         assert!(app.status.contains("Stream address is required"));
 
         fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn add_audio_file_from_path_input_persists_queue() {
+        let (mut app, settings_path) = configured_app("queue-add-file");
+        let audio_path = settings_path
+            .parent()
+            .expect("settings should have parent")
+            .join("track.wav");
+        write_test_file(&audio_path);
+
+        type_path(&mut app, &audio_path);
+
+        assert_eq!(
+            app.settings.playlist.files,
+            vec![audio_path.to_string_lossy().to_string()]
+        );
+        assert!(app.status.contains("Added"));
+        assert!(fs::read_to_string(&settings_path)
+            .expect("settings should be readable")
+            .contains("track.wav"));
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn add_folder_adds_supported_audio_files_in_sorted_order() {
+        let (mut app, settings_path) = configured_app("queue-add-folder");
+        let folder = settings_path
+            .parent()
+            .expect("settings should have parent")
+            .join("music");
+        fs::create_dir_all(&folder).expect("music folder should be created");
+        let first = folder.join("a.WAV");
+        let second = folder.join("b.flac");
+        let ignored = folder.join("notes.txt");
+        write_test_file(&second);
+        write_test_file(&ignored);
+        write_test_file(&first);
+
+        type_path(&mut app, &folder);
+
+        assert_eq!(
+            app.settings.playlist.files,
+            vec![
+                first.to_string_lossy().to_string(),
+                second.to_string_lossy().to_string()
+            ]
+        );
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn unsupported_playlist_path_does_not_modify_queue() {
+        let (mut app, settings_path) = configured_app("queue-unsupported-path");
+        let text_path = settings_path
+            .parent()
+            .expect("settings should have parent")
+            .join("notes.txt");
+        write_test_file(&text_path);
+
+        type_path(&mut app, &text_path);
+
+        assert!(app.settings.playlist.files.is_empty());
+        assert!(app.status.contains("No supported audio files"));
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn queue_selection_moves_with_player_arrow_keys() {
+        let (mut app, settings_path) = configured_app("queue-selection");
+        app.settings.playlist.files = vec!["one.wav".to_string(), "two.wav".to_string()];
+
+        app.handle_key(key_code(KeyCode::Down))
+            .expect("down should move queue selection");
+        assert_eq!(app.queue_selected, 1);
+
+        app.handle_key(key_code(KeyCode::Up))
+            .expect("up should move queue selection");
+        assert_eq!(app.queue_selected, 0);
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn remove_selected_queue_item_persists_queue() {
+        let (mut app, settings_path) = configured_app("queue-remove");
+        app.settings.playlist.files = vec!["one.wav".to_string(), "two.wav".to_string()];
+        app.save_and_close_settings()
+            .expect("initial queue should persist");
+
+        app.handle_key(key_code(KeyCode::Down))
+            .expect("down should move queue selection");
+        app.handle_key(key('d'))
+            .expect("delete should remove selected queue item");
+
+        assert_eq!(app.settings.playlist.files, vec!["one.wav".to_string()]);
+        assert_eq!(app.queue_selected, 0);
+        let saved = fs::read_to_string(&settings_path).expect("settings should be readable");
+        assert!(saved.contains("one.wav"));
+        assert!(!saved.contains("two.wav"));
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
     }
 
     #[test]
