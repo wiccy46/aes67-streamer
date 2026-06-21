@@ -33,18 +33,7 @@ pub enum StreamerCommand {
 }
 
 #[derive(Debug, Clone)]
-pub struct MusicPlayerArgs {
-    pub address: String,
-    pub port: u16,
-    pub interface: Option<String>,
-    pub ptp_domain: u8,
-    pub verbose: bool,
-    pub ttl: u8,
-    pub sap: bool,
-    pub payload_type: u8,
-    pub session_name: String,
-    pub packet_time_ms: u32,
-}
+pub struct MusicPlayerArgs;
 
 #[derive(Debug, Clone)]
 pub struct PlayerArgs {
@@ -227,82 +216,11 @@ fn streamer_cli() -> Command {
 
 fn music_player_cli() -> Command {
     Command::new("music-player")
-        .about("Open a terminal music player that streams a playlist over AES67")
-        .arg(
-            Arg::new("address")
-                .short('a')
-                .long("address")
-                .value_name("IP")
-                .help("Multicast IP address for the AES67 RTP stream")
-                .required(true),
-        )
-        .arg(
-            Arg::new("port")
-                .short('p')
-                .long("port")
-                .value_name("PORT")
-                .help("UDP port number")
-                .default_value("5004")
-                .value_parser(clap::value_parser!(u16)),
-        )
-        .arg(
-            Arg::new("interface")
-                .short('i')
-                .long("interface")
-                .value_name("INTERFACE")
-                .help("Network interface name or IPv4 address [default: 127.0.0.1]"),
-        )
-        .arg(
-            Arg::new("ptp-domain")
-                .long("ptp-domain")
-                .value_name("DOMAIN")
-                .help("PTP domain number (0-255) [default: 0]")
-                .default_value("0")
-                .value_parser(clap::value_parser!(u8)),
-        )
-        .arg(
-            Arg::new("session-name")
-                .long("session-name")
-                .value_name("NAME")
-                .help("SAP/SDP session name for the music player stream")
-                .default_value("AES67 Music Player"),
-        )
-        .arg(
-            Arg::new("packet-time-ms")
-                .long("packet-time-ms")
-                .value_name("MS")
-                .help("RTP packet time in milliseconds [default: 1]")
-                .default_value("1")
-                .value_parser(parse_positive_u32),
-        )
-        .arg(
-            Arg::new("payload-type")
-                .long("payload-type")
-                .value_name("PT")
-                .help("Dynamic RTP payload type for L24 audio [default: 97]")
-                .default_value("97")
-                .value_parser(clap::value_parser!(u8)),
-        )
-        .arg(
-            Arg::new("ttl")
-                .long("ttl")
-                .value_name("HOPS")
-                .help("Multicast TTL for RTP and SAP packets [default: 32]")
-                .default_value("32")
-                .value_parser(clap::value_parser!(u8)),
-        )
-        .arg(
-            Arg::new("no-sap")
-                .long("no-sap")
-                .help("Disable SAP announcement for the music player stream")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .help("Enable verbose logging [default: false]")
-                .action(clap::ArgAction::SetTrue),
+        .about("Open a terminal music player that guides stream setup in the UI")
+        .long_about(
+            "Open a terminal music player that guides stream setup in the UI.\n\n\
+             Stream address, interface, SAP/PTP options, and playlist choices are configured \
+             interactively and persisted by the player.",
         )
 }
 
@@ -523,45 +441,8 @@ fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
     })
 }
 
-fn music_player_args_from_matches(matches: &ArgMatches) -> Result<MusicPlayerArgs> {
-    let ttl = *matches
-        .get_one::<u8>("ttl")
-        .expect("clap should supply music-player TTL default");
-    if ttl == 0 {
-        return Err(anyhow!("--ttl must be greater than zero"));
-    }
-
-    let payload_type = validate_l24_payload_type(
-        *matches
-            .get_one::<u8>("payload-type")
-            .expect("clap should supply music-player payload type default"),
-        "--payload-type",
-    )?;
-
-    Ok(MusicPlayerArgs {
-        address: matches
-            .get_one::<String>("address")
-            .expect("clap should require music-player address")
-            .clone(),
-        port: *matches
-            .get_one::<u16>("port")
-            .expect("clap should supply music-player port default"),
-        interface: cli_string(matches, "interface"),
-        ptp_domain: *matches
-            .get_one::<u8>("ptp-domain")
-            .expect("clap should supply music-player PTP domain default"),
-        verbose: matches.get_flag("verbose"),
-        ttl,
-        sap: !matches.get_flag("no-sap"),
-        payload_type,
-        session_name: matches
-            .get_one::<String>("session-name")
-            .expect("clap should supply music-player session name default")
-            .clone(),
-        packet_time_ms: *matches
-            .get_one::<u32>("packet-time-ms")
-            .expect("clap should supply music-player packet time default"),
-    })
+fn music_player_args_from_matches(_matches: &ArgMatches) -> Result<MusicPlayerArgs> {
+    Ok(MusicPlayerArgs)
 }
 
 fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
@@ -1193,23 +1074,24 @@ mod tests {
 
     #[test]
     fn parse_streamer_command_from_accepts_music_player_subcommand() {
-        let command = parse_streamer_command_from([
+        let command = parse_streamer_command_from(["aes67-streamer", "music-player"])
+            .expect("music-player mode should parse without CLI stream settings");
+
+        let StreamerCommand::MusicPlayer(_args) = command else {
+            panic!("music-player subcommand should select music-player mode");
+        };
+    }
+
+    #[test]
+    fn parse_streamer_command_from_rejects_music_player_stream_settings() {
+        let result = parse_streamer_command_from([
             "aes67-streamer",
             "music-player",
             "--address",
             "239.69.83.1",
-            "--interface",
-            "127.0.0.1",
-        ])
-        .expect("music-player mode should parse");
+        ]);
 
-        let StreamerCommand::MusicPlayer(args) = command else {
-            panic!("music-player subcommand should select music-player mode");
-        };
-
-        assert_eq!(args.address, "239.69.83.1");
-        assert_eq!(args.port, 5004);
-        assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
+        assert!(result.is_err());
     }
 
     #[test]
