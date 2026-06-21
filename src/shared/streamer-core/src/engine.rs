@@ -233,6 +233,10 @@ impl Aes67Streamer {
         build_sdp(&self.sdp_context, self.clock_identity, &self.config)
     }
 
+    pub fn get_audio_info(&self) -> &audio::AudioInfo {
+        self.audio_source.get_info()
+    }
+
     pub fn write_sdp_file(&self, path: impl AsRef<Path>) -> Result<()> {
         let sdp = self.get_sdp();
         write_sdp_file(path.as_ref(), &sdp)
@@ -626,6 +630,29 @@ mod tests {
                 streamer.err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn streamer_exposes_loaded_audio_info() {
+        let source = crate::source::SilenceSource::new(2, 48_000, 48);
+        let streamer = Aes67Streamer::new_with_audio_source(
+            Box::new(source),
+            "239.192.1.1",
+            5004,
+            Some("127.0.0.1"),
+            StreamConfig {
+                sap: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("streamer should be created");
+
+        let info = streamer.get_audio_info();
+
+        assert_eq!(info.sample_rate, 48_000);
+        assert_eq!(info.channels, 2);
+        assert_eq!(info.duration, Some(Duration::ZERO));
     }
 
     #[tokio::test]
