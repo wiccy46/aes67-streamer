@@ -49,6 +49,8 @@ fn music_player_help_exits_successfully() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("music-player"));
-    assert!(stdout.contains("--interface"));
-    assert!(stdout.contains("--address"));
+    assert!(stdout.contains("guides stream setup in the UI"));
+    assert!(!stdout.contains("--interface"));
+    assert!(!stdout.contains("--address"));
+    assert!(!stdout.contains("--port"));
 }
