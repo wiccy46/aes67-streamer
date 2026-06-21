@@ -11,10 +11,11 @@ semver = "1.0"
 socket2 = { version = "0.5", features = ["all"] }
 
 [dependencies]
-config = { path = "../config" }
-audio = { path = "../audio" }
-network = { path = "../network" }
-ptp = { path = "../ptp" }
+config = { path = "../shared/config" }
+streamer-core = { path = "../shared/streamer-core" }
+audio = { path = "../shared/audio" }
+network = { path = "../shared/network" }
+ptp = { path = "../shared/ptp" }
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
 anyhow = "1.0"

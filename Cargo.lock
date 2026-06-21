@@ -60,6 +60,7 @@ dependencies = [
  "rand",
  "semver",
  "socket2 0.5.10",
+ "streamer-core",
  "tokio",
  "tokio-util",
 ]
@@ -1330,6 +1331,21 @@ dependencies = [
  "log",
  "rand",
  "serde",
+]
+
+[[package]]
+name = "streamer-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio",
+ "hound",
+ "log",
+ "network",
+ "ptp",
+ "rand",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

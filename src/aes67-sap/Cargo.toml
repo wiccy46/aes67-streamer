@@ -7,8 +7,8 @@ description = "AES67 SAP browser"
 
 [dependencies]
 anyhow = "1.0"
-config = { path = "../config" }
+config = { path = "../shared/config" }
 env_logger = "0.11.6"
 log = "0.4.26"
-network = { path = "../network" }
+network = { path = "../shared/network" }
 tokio = { version = "1.0", features = ["full"] }

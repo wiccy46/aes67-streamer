@@ -1,15 +1,16 @@
 use std::process;
 use std::time::Duration;
 
+use config::{StreamerArgs, StreamerCommand};
+
 mod runtime;
-mod streamer;
 use runtime::RuntimeSupervisor;
-use streamer::{Aes67Streamer, StreamConfig};
+use streamer_core::{Aes67Streamer, StreamConfig};
 
 #[tokio::main]
 async fn main() {
-    let args = match config::parse_streamer_args() {
-        Ok(args) => args,
+    let command = match config::parse_streamer_command() {
+        Ok(command) => command,
         Err(e) => {
             if config::is_display_control_error(&e) {
                 print!("{e}");
@@ -20,6 +21,23 @@ async fn main() {
         }
     };
 
+    match command {
+        StreamerCommand::File(args) => run_file_streamer(args).await,
+        StreamerCommand::MusicPlayer(args) => {
+            let default_level = if args.verbose { "debug" } else { "info" };
+            env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or(default_level),
+            )
+            .init();
+
+            log::error!("music-player mode is not implemented yet");
+            eprintln!("Error: music-player mode is not implemented yet");
+            process::exit(1);
+        }
+    }
+}
+
+async fn run_file_streamer(args: StreamerArgs) {
     let default_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
         .init();

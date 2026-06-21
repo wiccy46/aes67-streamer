@@ -1,3 +1,4 @@
+use crate::source::StreamAudioSource;
 use anyhow::{Context, Result};
 use audio::{AudioNode, AudioReader, AudioSample, GainNode};
 use network::{
@@ -17,7 +18,7 @@ const MAX_IPV4_RTP_AUDIO_PAYLOAD_BYTES: usize = 1460;
 
 /// AES67 Audio Streamer
 pub struct Aes67Streamer {
-    audio_reader: AudioReader,
+    audio_source: Box<dyn StreamAudioSource>,
     audio_chain: audio::AudioNodeChain,
     rtp_packetizer: RtpPacketizer,
     multicast_socket: MulticastSocket,
@@ -105,6 +106,41 @@ impl Aes67Streamer {
         validate_stream_audio_format(audio_info, samples_per_packet)
             .context("Unsupported audio format for AES67 stream")?;
 
+        Self::build_with_audio_source(
+            Box::new(audio_reader),
+            multicast_addr,
+            port,
+            interface,
+            config,
+        )
+        .await
+    }
+
+    pub async fn new_with_audio_source(
+        audio_source: Box<dyn StreamAudioSource>,
+        multicast_addr: &str,
+        port: u16,
+        interface: Option<&str>,
+        config: StreamConfig,
+    ) -> Result<Self> {
+        log::info!("Initializing AES67 Streamer...");
+        let samples_per_packet =
+            samples_per_packet(config.target_sample_rate, config.packet_time_ms);
+        validate_stream_audio_format(audio_source.get_info(), samples_per_packet)
+            .context("Unsupported audio format for AES67 stream")?;
+
+        Self::build_with_audio_source(audio_source, multicast_addr, port, interface, config).await
+    }
+
+    async fn build_with_audio_source(
+        audio_source: Box<dyn StreamAudioSource>,
+        multicast_addr: &str,
+        port: u16,
+        interface: Option<&str>,
+        config: StreamConfig,
+    ) -> Result<Self> {
+        let audio_info = audio_source.get_info().clone();
+
         // Create audio processing chain
         let gain_node = GainNode::new_db(config.gain_db);
         let audio_chain = gain_node.into_chain();
@@ -181,7 +217,7 @@ impl Aes67Streamer {
         log::info!("Streaming to {multicast_ip}:{port} via interface {local_ip}");
 
         Ok(Self {
-            audio_reader,
+            audio_source,
             audio_chain,
             rtp_packetizer,
             multicast_socket,
@@ -216,7 +252,7 @@ impl Aes67Streamer {
         let mut timing_drift = TimingDriftStats::default();
         let samples_per_packet =
             samples_per_packet(self.config.target_sample_rate, self.config.packet_time_ms);
-        let channels = self.audio_reader.get_info().channels;
+        let channels = self.audio_source.get_info().channels;
         let mut audio_sample = AudioSample {
             data: Vec::with_capacity(samples_per_packet * channels as usize),
             channels,
@@ -225,7 +261,7 @@ impl Aes67Streamer {
         };
         let rtp_packet_capacity = 12
             + samples_per_packet
-                * self.audio_reader.get_info().channels as usize
+                * self.audio_source.get_info().channels as usize
                 * L24_BYTES_PER_SAMPLE;
         let mut rtp_packet_buffer = Vec::with_capacity(rtp_packet_capacity);
         let stop_reason: &'static str;
@@ -253,7 +289,7 @@ impl Aes67Streamer {
             }
 
             // Read next audio frame
-            if self.audio_reader.read_next_frame_into(&mut audio_sample)? {
+            if self.audio_source.read_next_frame_into(&mut audio_sample)? {
                 // Process audio through chain
                 self.audio_chain
                     .process(&mut audio_sample)
@@ -322,9 +358,9 @@ impl Aes67Streamer {
                 }
             } else {
                 if self.config.loop_playback {
-                    if self.audio_reader.can_read_full_packet() {
+                    if self.audio_source.can_read_full_packet() {
                         log::debug!("End of audio file reached, restarting from beginning");
-                        self.audio_reader.rewind();
+                        self.audio_source.rewind();
                         continue;
                     }
 
@@ -577,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn test_streamer_creation() {
         // This test requires a valid audio file
-        let test_file = "../../tests/piano_freesound.wav";
+        let test_file = "../../../tests/piano_freesound.wav";
 
         if std::path::Path::new(test_file).exists() {
             let config = StreamConfig::default();

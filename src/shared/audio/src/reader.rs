@@ -926,7 +926,7 @@ mod tests {
     #[ignore] // Requires test file
     fn test_audio_reader_with_real_file() {
         // This test can be run with: cargo test -- --ignored
-        let test_file = "../../tests/piano_freesound.wav";
+        let test_file = "../../../tests/piano_freesound.wav";
 
         if std::path::Path::new(test_file).exists() {
             let mut reader = AudioReader::new(test_file).expect("Failed to open test file");

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use crate::streamer::Aes67Streamer;
+use streamer_core::Aes67Streamer;
 
 pub struct RuntimeSupervisor {
     shutdown_token: CancellationToken,
