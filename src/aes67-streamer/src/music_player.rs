@@ -78,7 +78,6 @@ enum PickerKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PickerValue {
-    DefaultInterface,
     InterfaceName(String),
 }
 
@@ -254,21 +253,22 @@ impl MusicPlayerApp {
         settings_created: bool,
         interface_options: Vec<NetworkInterface>,
     ) -> Self {
+        let settings_required = settings_created || settings.stream.interface.is_none();
         Self {
             settings,
             settings_path,
             interface_options,
-            screen: if settings_created {
+            screen: if settings_required {
                 AppScreen::Settings
             } else {
                 AppScreen::Player
             },
-            settings_required: settings_created,
+            settings_required,
             settings_focus: SettingsField::SessionName,
             edit: None,
             picker: None,
             status: if settings_created {
-                "First launch: press s to save settings.".to_string()
+                "First launch: select an interface, then press s.".to_string()
             } else {
                 "Ready".to_string()
             },
@@ -406,12 +406,31 @@ impl MusicPlayerApp {
     }
 
     fn save_and_close_settings(&mut self) -> Result<()> {
+        if let Err(error) = self.validate_settings() {
+            self.status = error.to_string();
+            return Ok(());
+        }
+
         save_settings(&self.settings_path, &self.settings)?;
         self.settings_required = false;
         self.screen = AppScreen::Player;
         self.edit = None;
         self.picker = None;
         self.status = "Settings saved".to_string();
+        Ok(())
+    }
+
+    fn validate_settings(&self) -> Result<()> {
+        if self
+            .settings
+            .stream
+            .interface
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            return Err(anyhow!("Interface is required"));
+        }
+
         Ok(())
     }
 
@@ -445,24 +464,20 @@ impl MusicPlayerApp {
     }
 
     fn interface_picker_options(&self) -> Vec<PickerOption> {
-        let mut options = vec![PickerOption {
-            label: "Default route".to_string(),
-            value: PickerValue::DefaultInterface,
-        }];
-
-        options.extend(self.interface_options.iter().map(|interface| {
-            let loopback = if interface.is_loopback {
-                " loopback"
-            } else {
-                ""
-            };
-            PickerOption {
-                label: format!("{}  {}{}", interface.name, interface.ipv4, loopback),
-                value: PickerValue::InterfaceName(interface.name.clone()),
-            }
-        }));
-
-        options
+        self.interface_options
+            .iter()
+            .map(|interface| {
+                let loopback = if interface.is_loopback {
+                    " loopback"
+                } else {
+                    ""
+                };
+                PickerOption {
+                    label: format!("{}  {}{}", interface.name, interface.ipv4, loopback),
+                    value: PickerValue::InterfaceName(interface.name.clone()),
+                }
+            })
+            .collect()
     }
 
     fn selected_interface_option(&self, options: &[PickerOption]) -> usize {
@@ -473,7 +488,6 @@ impl MusicPlayerApp {
         options
             .iter()
             .position(|option| match &option.value {
-                PickerValue::DefaultInterface => false,
                 PickerValue::InterfaceName(name) => {
                     name == interface
                         || self.interface_options.iter().any(|candidate| {
@@ -513,10 +527,6 @@ impl MusicPlayerApp {
                 };
 
                 match &option.value {
-                    PickerValue::DefaultInterface => {
-                        self.settings.stream.interface = None;
-                        self.status = "Using default route".to_string();
-                    }
                     PickerValue::InterfaceName(name) => {
                         self.settings.stream.interface = Some(name.clone());
                         self.status = format!("Selected interface {name}");
@@ -602,7 +612,7 @@ impl MusicPlayerApp {
 
     fn describe_interface_setting(&self) -> String {
         let Some(interface) = self.settings.stream.interface.as_deref() else {
-            return "Default route".to_string();
+            return "Select interface".to_string();
         };
 
         if let Some(option) = self.interface_options.iter().find(|candidate| {
@@ -1148,7 +1158,9 @@ mod tests {
     #[test]
     fn field_edit_updates_stream_address() {
         let path = temp_settings_file("field-address");
-        let mut app = MusicPlayerApp::new(MusicPlayerSettings::default(), path.clone(), false);
+        let mut settings = MusicPlayerSettings::default();
+        settings.stream.interface = Some("en0".to_string());
+        let mut app = MusicPlayerApp::new(settings, path.clone(), false);
 
         app.apply_field_value(SettingsField::Address, "239.69.83.9")
             .expect("field edit should apply");
@@ -1182,7 +1194,9 @@ mod tests {
     #[test]
     fn existing_settings_launches_on_player_screen() {
         let path = temp_settings_file("existing-settings");
-        save_settings(&path, &MusicPlayerSettings::default()).expect("settings should save");
+        let mut settings = MusicPlayerSettings::default();
+        settings.stream.interface = Some("en0".to_string());
+        save_settings(&path, &settings).expect("settings should save");
 
         let (settings, created) =
             load_or_create_settings_with_state(&path).expect("settings should load");
@@ -1191,6 +1205,22 @@ mod tests {
         assert!(!created);
         assert_eq!(app.screen, AppScreen::Player);
         assert!(!app.settings_required);
+
+        fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn existing_settings_without_interface_reopens_required_settings() {
+        let path = temp_settings_file("existing-settings-missing-interface");
+        save_settings(&path, &MusicPlayerSettings::default()).expect("settings should save");
+
+        let (settings, created) =
+            load_or_create_settings_with_state(&path).expect("settings should load");
+        let app = MusicPlayerApp::new(settings, path.clone(), created);
+
+        assert!(!created);
+        assert_eq!(app.screen, AppScreen::Settings);
+        assert!(app.settings_required);
 
         fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
     }
@@ -1225,6 +1255,10 @@ mod tests {
 
         let picker = app.picker.as_ref().expect("picker should be open");
         assert_eq!(picker.title, "Select Interface");
+        assert!(!picker
+            .options
+            .iter()
+            .any(|option| option.label == "Default route"));
         assert!(picker.options.iter().any(|option| {
             option.label.contains("en0") && option.label.contains("192.168.1.42")
         }));
@@ -1246,8 +1280,6 @@ mod tests {
         app.handle_key(key_code(KeyCode::Enter))
             .expect("interface picker should open");
 
-        app.handle_key(key_code(KeyCode::Down))
-            .expect("picker selection should move");
         app.handle_key(key_code(KeyCode::Enter))
             .expect("picker selection should apply");
 
@@ -1275,7 +1307,7 @@ mod tests {
         let output = render_app_to_string(&app, 100, 30).expect("app should render");
 
         assert!(output.contains("Select Interface"));
-        assert!(output.contains("Default route"));
+        assert!(!output.contains("Default route"));
         assert!(output.contains("en0"));
         assert!(output.contains("192.168.1.42"));
 
@@ -1283,9 +1315,31 @@ mod tests {
     }
 
     #[test]
+    fn settings_cannot_save_without_interface() {
+        let path = temp_settings_file("settings-require-interface");
+        let mut app = MusicPlayerApp::new_with_interfaces(
+            MusicPlayerSettings::default(),
+            path.clone(),
+            true,
+            vec![interface("en0", [192, 168, 1, 42])],
+        );
+
+        app.handle_key(key('s'))
+            .expect("save without interface should not crash");
+
+        assert_eq!(app.screen, AppScreen::Settings);
+        assert!(app.settings_required);
+        assert!(app.status.contains("Interface is required"));
+
+        fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
     fn ratatui_renderer_shows_player_surface() {
         let path = temp_settings_file("render-player");
-        let app = MusicPlayerApp::new(MusicPlayerSettings::default(), path.clone(), false);
+        let mut settings = MusicPlayerSettings::default();
+        settings.stream.interface = Some("en0".to_string());
+        let app = MusicPlayerApp::new(settings, path.clone(), false);
 
         let output = render_app_to_string(&app, 100, 30).expect("app should render");
 
