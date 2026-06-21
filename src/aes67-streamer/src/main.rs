@@ -25,7 +25,7 @@ async fn main() {
     match command {
         StreamerCommand::File(args) => run_file_streamer(args).await,
         StreamerCommand::MusicPlayer(_args) => {
-            if let Err(error) = music_player::run() {
+            if let Err(error) = music_player::run().await {
                 eprintln!("Error: {error:#}");
                 process::exit(1);
             }
