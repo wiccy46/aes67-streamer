@@ -24,3 +24,5 @@ log = "0.4.26"
 rand = "0.8.5"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+ratatui = "0.29"
+crossterm = "0.28"
