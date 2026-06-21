@@ -36,3 +36,19 @@ fn version_file_is_valid_semver() {
     let version = version_from_file();
     Version::parse(&version).expect("VERSION should be valid SemVer");
 }
+
+#[test]
+fn music_player_help_exits_successfully() {
+    let output = Command::new(binary())
+        .arg("music-player")
+        .arg("--help")
+        .output()
+        .expect("binary should run");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("music-player"));
+    assert!(stdout.contains("--interface"));
+    assert!(stdout.contains("--address"));
+}

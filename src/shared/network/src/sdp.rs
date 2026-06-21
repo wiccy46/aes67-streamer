@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn parses_repository_example_sdp() {
-        let session = parse_sdp(include_str!("../../../tests/example.sdp")).unwrap();
+        let session = parse_sdp(include_str!("../../../../tests/example.sdp")).unwrap();
 
         assert_eq!(session.session_name.as_deref(), Some("AES67 Streamer"));
         assert_eq!(session.address, Ipv4Addr::new(239, 192, 1, 1));

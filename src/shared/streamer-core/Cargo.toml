@@ -1,20 +1,19 @@
 [package]
-name = "aes67-player"
+name = "streamer-core"
 version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/wiccy46/aes67-tools"
-description = "AES67 RTP audio receiver and player"
+description = "Reusable AES67 streaming engine for aes67-streamer"
 
 [dependencies]
+audio = { path = "../audio" }
+network = { path = "../network" }
+ptp = { path = "../ptp" }
 anyhow = "1.0"
-config = { path = "../shared/config" }
-cpal = "0.17.3"
-env_logger = "0.11.6"
 log = "0.4.26"
-network = { path = "../shared/network" }
-ringbuf = "0.5"
+rand = "0.8.5"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
 
 [dev-dependencies]
-semver = "1.0"
+hound = "3.5"

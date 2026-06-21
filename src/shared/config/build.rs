@@ -5,7 +5,7 @@ use std::path::PathBuf;
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
-    let version_file = manifest_dir.join("../../VERSION");
+    let version_file = manifest_dir.join("../../../VERSION");
 
     println!("cargo:rerun-if-changed={}", version_file.display());
 

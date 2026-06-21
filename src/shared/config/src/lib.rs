@@ -5,7 +5,8 @@ pub mod configs;
 pub use args::{
     is_display_control_error, parse_args, parse_args_from, parse_player_args,
     parse_player_args_from, parse_sap_args, parse_sap_args_from, parse_streamer_args,
-    parse_streamer_args_from, Args, PlayerArgs, SapArgs, StreamerArgs,
+    parse_streamer_args_from, parse_streamer_command, parse_streamer_command_from, Args,
+    MusicPlayerArgs, PlayerArgs, SapArgs, StreamerArgs, StreamerCommand,
 };
 pub use configs::{
     create_default_config, load_config, AudioConfig, Config, RuntimeConfig, StreamConfig,

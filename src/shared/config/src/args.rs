@@ -27,6 +27,26 @@ pub struct StreamerArgs {
 pub type Args = StreamerArgs;
 
 #[derive(Debug, Clone)]
+pub enum StreamerCommand {
+    File(StreamerArgs),
+    MusicPlayer(MusicPlayerArgs),
+}
+
+#[derive(Debug, Clone)]
+pub struct MusicPlayerArgs {
+    pub address: String,
+    pub port: u16,
+    pub interface: Option<String>,
+    pub ptp_domain: u8,
+    pub verbose: bool,
+    pub ttl: u8,
+    pub sap: bool,
+    pub payload_type: u8,
+    pub session_name: String,
+    pub packet_time_ms: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct PlayerArgs {
     pub sdp: Option<String>,
     pub address: Option<String>,
@@ -69,6 +89,10 @@ pub fn parse_streamer_args() -> Result<StreamerArgs> {
     parse_streamer_args_from(std::env::args_os())
 }
 
+pub fn parse_streamer_command() -> Result<StreamerCommand> {
+    parse_streamer_command_from(std::env::args_os())
+}
+
 pub fn parse_player_args() -> Result<PlayerArgs> {
     parse_player_args_from(std::env::args_os())
 }
@@ -95,6 +119,15 @@ where
     streamer_args_from_matches(&matches)
 }
 
+pub fn parse_streamer_command_from<I, T>(args: I) -> Result<StreamerCommand>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let matches = streamer_cli().try_get_matches_from(args)?;
+    streamer_command_from_matches(&matches)
+}
+
 pub fn parse_player_args_from<I, T>(args: I) -> Result<PlayerArgs>
 where
     I: IntoIterator<Item = T>,
@@ -118,6 +151,8 @@ fn streamer_cli() -> Command {
         .version(env!("AES67_TOOLS_VERSION"))
         .author("Jiajun Yang")
         .about("Cross-platform CLI tool for streaming audio files over RTP networks with AES67 compliance")
+        .args_conflicts_with_subcommands(true)
+        .subcommand(music_player_cli())
         .arg(
             Arg::new("file")
                 .short('f')
@@ -187,6 +222,87 @@ fn streamer_cli() -> Command {
                 .long("verbose")
                 .help("Enable verbose logging [default: false]")
                 .action(clap::ArgAction::SetTrue)
+        )
+}
+
+fn music_player_cli() -> Command {
+    Command::new("music-player")
+        .about("Open a terminal music player that streams a playlist over AES67")
+        .arg(
+            Arg::new("address")
+                .short('a')
+                .long("address")
+                .value_name("IP")
+                .help("Multicast IP address for the AES67 RTP stream")
+                .required(true),
+        )
+        .arg(
+            Arg::new("port")
+                .short('p')
+                .long("port")
+                .value_name("PORT")
+                .help("UDP port number")
+                .default_value("5004")
+                .value_parser(clap::value_parser!(u16)),
+        )
+        .arg(
+            Arg::new("interface")
+                .short('i')
+                .long("interface")
+                .value_name("INTERFACE")
+                .help("Network interface name or IPv4 address [default: 127.0.0.1]"),
+        )
+        .arg(
+            Arg::new("ptp-domain")
+                .long("ptp-domain")
+                .value_name("DOMAIN")
+                .help("PTP domain number (0-255) [default: 0]")
+                .default_value("0")
+                .value_parser(clap::value_parser!(u8)),
+        )
+        .arg(
+            Arg::new("session-name")
+                .long("session-name")
+                .value_name("NAME")
+                .help("SAP/SDP session name for the music player stream")
+                .default_value("AES67 Music Player"),
+        )
+        .arg(
+            Arg::new("packet-time-ms")
+                .long("packet-time-ms")
+                .value_name("MS")
+                .help("RTP packet time in milliseconds [default: 1]")
+                .default_value("1")
+                .value_parser(parse_positive_u32),
+        )
+        .arg(
+            Arg::new("payload-type")
+                .long("payload-type")
+                .value_name("PT")
+                .help("Dynamic RTP payload type for L24 audio [default: 97]")
+                .default_value("97")
+                .value_parser(clap::value_parser!(u8)),
+        )
+        .arg(
+            Arg::new("ttl")
+                .long("ttl")
+                .value_name("HOPS")
+                .help("Multicast TTL for RTP and SAP packets [default: 32]")
+                .default_value("32")
+                .value_parser(clap::value_parser!(u8)),
+        )
+        .arg(
+            Arg::new("no-sap")
+                .long("no-sap")
+                .help("Disable SAP announcement for the music player stream")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Enable verbose logging [default: false]")
+                .action(clap::ArgAction::SetTrue),
         )
 }
 
@@ -339,6 +455,16 @@ fn sap_cli() -> Command {
         )
 }
 
+fn streamer_command_from_matches(matches: &ArgMatches) -> Result<StreamerCommand> {
+    match matches.subcommand() {
+        Some(("music-player", subcommand)) => {
+            music_player_args_from_matches(subcommand).map(StreamerCommand::MusicPlayer)
+        }
+        Some((name, _)) => Err(anyhow!("unknown aes67-streamer command: {name}")),
+        None => streamer_args_from_matches(matches).map(StreamerCommand::File),
+    }
+}
+
 fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
     let config_file = matches.get_one::<String>("config").cloned();
     let config = match config_file.as_deref() {
@@ -394,6 +520,47 @@ fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
         ssrc: merged_ssrc(config.as_ref()),
         session_name: merged_session_name(config.as_ref()),
         packet_time_ms: merged_packet_time_ms(config.as_ref())?,
+    })
+}
+
+fn music_player_args_from_matches(matches: &ArgMatches) -> Result<MusicPlayerArgs> {
+    let ttl = *matches
+        .get_one::<u8>("ttl")
+        .expect("clap should supply music-player TTL default");
+    if ttl == 0 {
+        return Err(anyhow!("--ttl must be greater than zero"));
+    }
+
+    let payload_type = validate_l24_payload_type(
+        *matches
+            .get_one::<u8>("payload-type")
+            .expect("clap should supply music-player payload type default"),
+        "--payload-type",
+    )?;
+
+    Ok(MusicPlayerArgs {
+        address: matches
+            .get_one::<String>("address")
+            .expect("clap should require music-player address")
+            .clone(),
+        port: *matches
+            .get_one::<u16>("port")
+            .expect("clap should supply music-player port default"),
+        interface: cli_string(matches, "interface"),
+        ptp_domain: *matches
+            .get_one::<u8>("ptp-domain")
+            .expect("clap should supply music-player PTP domain default"),
+        verbose: matches.get_flag("verbose"),
+        ttl,
+        sap: !matches.get_flag("no-sap"),
+        payload_type,
+        session_name: matches
+            .get_one::<String>("session-name")
+            .expect("clap should supply music-player session name default")
+            .clone(),
+        packet_time_ms: *matches
+            .get_one::<u32>("packet-time-ms")
+            .expect("clap should supply music-player packet time default"),
     })
 }
 
@@ -1000,6 +1167,49 @@ mod tests {
         assert_eq!(args.file, "test.wav");
         assert_eq!(args.address, "239.192.1.1");
         assert_eq!(args.port, 5004);
+    }
+
+    #[test]
+    fn parse_streamer_command_from_keeps_file_mode_without_subcommand() {
+        let command = parse_streamer_command_from([
+            "aes67-streamer",
+            "--file",
+            "track.wav",
+            "--address",
+            "239.69.83.1",
+            "--port",
+            "5004",
+        ])
+        .expect("existing file mode should still parse");
+
+        let StreamerCommand::File(args) = command else {
+            panic!("root args should remain file mode");
+        };
+
+        assert_eq!(args.file, "track.wav");
+        assert_eq!(args.address, "239.69.83.1");
+        assert_eq!(args.port, 5004);
+    }
+
+    #[test]
+    fn parse_streamer_command_from_accepts_music_player_subcommand() {
+        let command = parse_streamer_command_from([
+            "aes67-streamer",
+            "music-player",
+            "--address",
+            "239.69.83.1",
+            "--interface",
+            "127.0.0.1",
+        ])
+        .expect("music-player mode should parse");
+
+        let StreamerCommand::MusicPlayer(args) = command else {
+            panic!("music-player subcommand should select music-player mode");
+        };
+
+        assert_eq!(args.address, "239.69.83.1");
+        assert_eq!(args.port, 5004);
+        assert_eq!(args.interface.as_deref(), Some("127.0.0.1"));
     }
 
     #[test]

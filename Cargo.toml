@@ -3,10 +3,11 @@ members = [
     "src/aes67-player",
     "src/aes67-sap",
     "src/aes67-streamer",
-    "src/config",
-    "src/audio",
-    "src/network",
-    "src/ptp",
+    "src/shared/audio",
+    "src/shared/config",
+    "src/shared/network",
+    "src/shared/ptp",
+    "src/shared/streamer-core",
 ]
 resolver = "2"
 
