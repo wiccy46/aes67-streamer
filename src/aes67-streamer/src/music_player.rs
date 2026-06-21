@@ -79,6 +79,7 @@ struct PathInput {
     completions: Vec<String>,
     completion_index: usize,
     show_completions: bool,
+    browse_completions: bool,
 }
 
 impl PathInput {
@@ -86,6 +87,7 @@ impl PathInput {
         self.completions.clear();
         self.completion_index = 0;
         self.show_completions = false;
+        self.browse_completions = false;
     }
 }
 
@@ -472,14 +474,14 @@ impl MusicPlayerApp {
             return Ok(());
         };
 
-        let value_was_empty = input.value.trim().is_empty();
         if input.completions.is_empty() {
+            input.browse_completions = is_browse_completion_input(&input.value);
             input.completions = path_completions(&input.value)?;
             input.completion_index = 0;
             input.show_completions = false;
         } else {
             input.completion_index = (input.completion_index + 1) % input.completions.len();
-            input.show_completions = value_was_empty || input.completions.len() > 1;
+            input.show_completions = input.browse_completions || input.completions.len() > 1;
         }
 
         if input.completions.is_empty() {
@@ -488,7 +490,7 @@ impl MusicPlayerApp {
             return Ok(());
         }
 
-        if value_was_empty {
+        if input.browse_completions {
             let count = input.completions.len();
             self.status = if input.show_completions {
                 format!("Showing {count} matches, press Tab to cycle")
@@ -1481,6 +1483,11 @@ fn path_completions(input: &str) -> Result<Vec<String>> {
     path_completions_with_home(input, home_dir().as_deref())
 }
 
+fn is_browse_completion_input(input: &str) -> bool {
+    let input = input.trim();
+    input.is_empty() || input.ends_with(std::path::MAIN_SEPARATOR)
+}
+
 fn path_completions_with_home(input: &str, home: Option<&Path>) -> Result<Vec<String>> {
     let input = input.trim();
     if input.is_empty() {
@@ -2131,6 +2138,39 @@ mod tests {
 
         let input = app.path_input.as_ref().expect("input should remain open");
         assert_eq!(input.value, "");
+        assert!(input.show_completions);
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn folder_path_tab_lists_without_selecting_first_completion() {
+        let (mut app, settings_path) = configured_app("queue-complete-folder-list");
+        let root = settings_path.parent().expect("settings should have parent");
+        let folder = root.join("music");
+        let album = folder.join("Album");
+        let track = folder.join("intro.wav");
+        fs::create_dir_all(&album).expect("album folder should be created");
+        write_test_file(&track);
+
+        app.handle_key(key('a')).expect("path input should open");
+        let folder_input = format!("{}/", folder.to_string_lossy());
+        for ch in folder_input.chars() {
+            app.handle_key(key(ch))
+                .expect("path character should apply");
+        }
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("first tab should prepare folder completions");
+
+        let input = app.path_input.as_ref().expect("input should remain open");
+        assert_eq!(input.value, folder_input);
+        assert!(!input.show_completions);
+
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("second tab should show folder options");
+
+        let input = app.path_input.as_ref().expect("input should remain open");
+        assert_eq!(input.value, folder_input);
         assert!(input.show_completions);
 
         fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
