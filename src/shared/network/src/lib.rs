@@ -15,8 +15,9 @@ pub use sap::{
 };
 pub use sdp::{parse_sdp, parse_sdp_file, Aes67SessionDescription, AudioEncoding};
 pub use socket::{
-    parse_stream_address, resolve_interface_ip, MulticastConfig, MulticastSocket,
-    ReceivedRtpPacket, RtpReceiveSocket, RtpReceiveSocketConfig, SocketStats,
+    list_ipv4_interfaces, parse_stream_address, resolve_interface_ip, MulticastConfig,
+    MulticastSocket, NetworkInterface, ReceivedRtpPacket, RtpReceiveSocket, RtpReceiveSocketConfig,
+    SocketStats,
 };
 
 pub type Result<T> = anyhow::Result<T>;

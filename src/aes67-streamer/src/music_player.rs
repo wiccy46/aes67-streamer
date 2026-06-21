@@ -4,6 +4,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use network::{list_ipv4_interfaces, NetworkInterface};
 use ratatui::backend::{Backend, CrosstermBackend, TestBackend};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -70,14 +71,41 @@ struct SettingEdit {
     value: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerKind {
+    Interface,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PickerValue {
+    DefaultInterface,
+    InterfaceName(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PickerOption {
+    label: String,
+    value: PickerValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SettingsPicker {
+    kind: PickerKind,
+    title: String,
+    options: Vec<PickerOption>,
+    selected: usize,
+}
+
 #[derive(Debug, Clone)]
 struct MusicPlayerApp {
     settings: MusicPlayerSettings,
     settings_path: PathBuf,
+    interface_options: Vec<NetworkInterface>,
     screen: AppScreen,
     settings_required: bool,
     settings_focus: SettingsField,
     edit: Option<SettingEdit>,
+    picker: Option<SettingsPicker>,
     status: String,
     should_quit: bool,
 }
@@ -160,7 +188,7 @@ impl SettingsField {
             Self::SessionName => "Shown in SDP/SAP.",
             Self::Address => "Multicast destination for RTP audio.",
             Self::Port => "RTP UDP port.",
-            Self::Interface => "Local interface IP, or blank for default routing.",
+            Self::Interface => "Enter chooses a local interface; e allows manual name/IP entry.",
             Self::Sap => "Toggle SAP stream discovery announcements.",
             Self::PtpDomain => "PTP domain advertised with the stream.",
             Self::PayloadType => "Dynamic RTP payload type, 96-127.",
@@ -186,11 +214,50 @@ impl SettingsField {
     }
 }
 
+impl SettingsPicker {
+    fn new_interface(options: Vec<PickerOption>, selected: usize) -> Self {
+        let selected = selected.min(options.len().saturating_sub(1));
+        Self {
+            kind: PickerKind::Interface,
+            title: "Select Interface".to_string(),
+            options,
+            selected,
+        }
+    }
+
+    fn selected_option(&self) -> Option<&PickerOption> {
+        self.options.get(self.selected)
+    }
+
+    fn move_next(&mut self) {
+        if !self.options.is_empty() {
+            self.selected = (self.selected + 1) % self.options.len();
+        }
+    }
+
+    fn move_previous(&mut self) {
+        if !self.options.is_empty() {
+            self.selected = (self.selected + self.options.len() - 1) % self.options.len();
+        }
+    }
+}
+
 impl MusicPlayerApp {
     fn new(settings: MusicPlayerSettings, settings_path: PathBuf, settings_created: bool) -> Self {
+        let interface_options = list_ipv4_interfaces().unwrap_or_default();
+        Self::new_with_interfaces(settings, settings_path, settings_created, interface_options)
+    }
+
+    fn new_with_interfaces(
+        settings: MusicPlayerSettings,
+        settings_path: PathBuf,
+        settings_created: bool,
+        interface_options: Vec<NetworkInterface>,
+    ) -> Self {
         Self {
             settings,
             settings_path,
+            interface_options,
             screen: if settings_created {
                 AppScreen::Settings
             } else {
@@ -199,6 +266,7 @@ impl MusicPlayerApp {
             settings_required: settings_created,
             settings_focus: SettingsField::SessionName,
             edit: None,
+            picker: None,
             status: if settings_created {
                 "First launch: press s to save settings.".to_string()
             } else {
@@ -214,10 +282,37 @@ impl MusicPlayerApp {
             return Ok(());
         }
 
+        if self.picker.is_some() {
+            return self.handle_picker_key(key);
+        }
+
         match self.screen {
             AppScreen::Player => self.handle_player_key(key),
             AppScreen::Settings => self.handle_settings_key(key),
         }
+    }
+
+    fn handle_picker_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.picker = None;
+                self.status = "Selection canceled".to_string();
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                if let Some(picker) = &mut self.picker {
+                    picker.move_next();
+                }
+            }
+            KeyCode::Up | KeyCode::BackTab => {
+                if let Some(picker) = &mut self.picker {
+                    picker.move_previous();
+                }
+            }
+            KeyCode::Char('r') => self.refresh_picker()?,
+            KeyCode::Enter => self.apply_picker_selection()?,
+            _ => {}
+        }
+        Ok(())
     }
 
     fn handle_player_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -251,6 +346,7 @@ impl MusicPlayerApp {
                 }
             }
             KeyCode::Char('s') => self.save_and_close_settings()?,
+            KeyCode::Char('e') => self.start_text_edit(),
             KeyCode::Enter => self.start_edit_or_toggle(),
             KeyCode::Down | KeyCode::Tab => self.settings_focus = self.settings_focus.next(),
             KeyCode::Up | KeyCode::BackTab => {
@@ -296,6 +392,7 @@ impl MusicPlayerApp {
         self.settings_required = self.settings_required || required;
         self.settings_focus = SettingsField::SessionName;
         self.edit = None;
+        self.picker = None;
         self.status = "Review stream settings.".to_string();
     }
 
@@ -313,6 +410,7 @@ impl MusicPlayerApp {
         self.settings_required = false;
         self.screen = AppScreen::Player;
         self.edit = None;
+        self.picker = None;
         self.status = "Settings saved".to_string();
         Ok(())
     }
@@ -323,11 +421,111 @@ impl MusicPlayerApp {
             return;
         }
 
+        if self.settings_focus == SettingsField::Interface {
+            self.open_interface_picker();
+            return;
+        }
+
+        self.start_text_edit();
+    }
+
+    fn start_text_edit(&mut self) {
         self.edit = Some(SettingEdit {
             field: self.settings_focus,
             value: self.settings_focus.edit_value(&self.settings.stream),
         });
         self.status = format!("Editing {}", self.settings_focus.label());
+    }
+
+    fn open_interface_picker(&mut self) {
+        let options = self.interface_picker_options();
+        let selected = self.selected_interface_option(&options);
+        self.picker = Some(SettingsPicker::new_interface(options, selected));
+        self.status = "Choose a network interface.".to_string();
+    }
+
+    fn interface_picker_options(&self) -> Vec<PickerOption> {
+        let mut options = vec![PickerOption {
+            label: "Default route".to_string(),
+            value: PickerValue::DefaultInterface,
+        }];
+
+        options.extend(self.interface_options.iter().map(|interface| {
+            let loopback = if interface.is_loopback {
+                " loopback"
+            } else {
+                ""
+            };
+            PickerOption {
+                label: format!("{}  {}{}", interface.name, interface.ipv4, loopback),
+                value: PickerValue::InterfaceName(interface.name.clone()),
+            }
+        }));
+
+        options
+    }
+
+    fn selected_interface_option(&self, options: &[PickerOption]) -> usize {
+        let Some(interface) = self.settings.stream.interface.as_deref() else {
+            return 0;
+        };
+
+        options
+            .iter()
+            .position(|option| match &option.value {
+                PickerValue::DefaultInterface => false,
+                PickerValue::InterfaceName(name) => {
+                    name == interface
+                        || self.interface_options.iter().any(|candidate| {
+                            candidate.name == *name && candidate.ipv4.to_string() == interface
+                        })
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    fn refresh_picker(&mut self) -> Result<()> {
+        let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) else {
+            return Ok(());
+        };
+
+        match kind {
+            PickerKind::Interface => {
+                self.interface_options = list_ipv4_interfaces()?;
+                self.open_interface_picker();
+                self.status = "Interface list refreshed".to_string();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_picker_selection(&mut self) -> Result<()> {
+        let Some(picker) = self.picker.take() else {
+            return Ok(());
+        };
+
+        match picker.kind {
+            PickerKind::Interface => {
+                let Some(option) = picker.selected_option() else {
+                    self.status = "No interface option selected".to_string();
+                    return Ok(());
+                };
+
+                match &option.value {
+                    PickerValue::DefaultInterface => {
+                        self.settings.stream.interface = None;
+                        self.status = "Using default route".to_string();
+                    }
+                    PickerValue::InterfaceName(name) => {
+                        self.settings.stream.interface = Some(name.clone());
+                        self.status = format!("Selected interface {name}");
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn toggle_sap(&mut self) {
@@ -392,6 +590,28 @@ impl MusicPlayerApp {
             }
         }
         Ok(())
+    }
+
+    fn setting_display_value(&self, field: SettingsField) -> String {
+        if field == SettingsField::Interface {
+            return self.describe_interface_setting();
+        }
+
+        field.value(&self.settings.stream)
+    }
+
+    fn describe_interface_setting(&self) -> String {
+        let Some(interface) = self.settings.stream.interface.as_deref() else {
+            return "Default route".to_string();
+        };
+
+        if let Some(option) = self.interface_options.iter().find(|candidate| {
+            candidate.name == interface || candidate.ipv4.to_string() == interface
+        }) {
+            return format!("{}  {}", option.name, option.ipv4);
+        }
+
+        interface.to_string()
     }
 }
 
@@ -465,6 +685,12 @@ fn render_app(frame: &mut Frame<'_>, app: &MusicPlayerApp) {
         let modal_area = centered_rect(80, 78, area);
         frame.render_widget(Clear, modal_area);
         render_settings_modal(frame, app, modal_area);
+
+        if let Some(picker) = &app.picker {
+            let picker_area = centered_rect(64, 54, area);
+            frame.render_widget(Clear, picker_area);
+            render_picker_modal(frame, picker, picker_area);
+        }
     }
 }
 
@@ -591,7 +817,7 @@ fn render_side_panel(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("Interface: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(stream.interface.as_deref().unwrap_or("default route")),
+            Span::raw(app.describe_interface_setting()),
         ]),
         Line::from(vec![
             Span::styled("SAP: ", Style::default().fg(Color::DarkGray)),
@@ -654,7 +880,7 @@ fn render_settings_modal(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
                     .map(|edit| format!("{}_", edit.value))
                     .unwrap_or_default()
             } else {
-                field.value(&app.settings.stream)
+                app.setting_display_value(*field)
             };
 
             ListItem::new(Line::from(vec![
@@ -692,9 +918,9 @@ fn render_settings_modal(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
     let controls = if app.edit.is_some() {
         "enter apply | esc cancel | type to edit"
     } else if app.settings_required {
-        "up/down choose | enter edit | space toggle | s save | q quit"
+        "up/down choose | enter select/edit | e manual | space toggle | s save | q quit"
     } else {
-        "up/down choose | enter edit | space toggle | s save | esc close | q close"
+        "up/down choose | enter select/edit | e manual | space toggle | s save | esc close"
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -702,6 +928,48 @@ fn render_settings_modal(frame: &mut Frame<'_>, app: &MusicPlayerApp, area: Rect
             Style::default().fg(Color::Cyan),
         ))),
         layout[3],
+    );
+}
+
+fn render_picker_modal(frame: &mut Frame<'_>, picker: &SettingsPicker, area: Rect) {
+    let block = Block::default()
+        .title(format!(" {} ", picker.title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = picker
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let selected = index == picker.selected;
+            let marker = if selected { ">" } else { " " };
+            let style = if selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!("{marker} {}", option.label),
+                style,
+            )))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), layout[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "up/down choose | enter select | r refresh | esc cancel",
+            Style::default().fg(Color::Cyan),
+        ))),
+        layout[1],
     );
 }
 
@@ -836,6 +1104,8 @@ fn parse_positive_u32(value: &str, name: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use network::NetworkInterface;
+    use std::net::Ipv4Addr;
 
     fn temp_settings_file(name: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("aes67-music-player-{name}-{}", std::process::id()));
@@ -846,6 +1116,18 @@ mod tests {
 
     fn key(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+    }
+
+    fn key_code(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn interface(name: &str, ipv4: [u8; 4]) -> NetworkInterface {
+        NetworkInterface {
+            name: name.to_string(),
+            ipv4: Ipv4Addr::from(ipv4),
+            is_loopback: ipv4[0] == 127,
+        }
     }
 
     #[test]
@@ -922,6 +1204,80 @@ mod tests {
 
         assert_eq!(app.screen, AppScreen::Settings);
         assert_eq!(app.settings_focus, SettingsField::SessionName);
+
+        fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn interface_field_enter_opens_interface_picker() {
+        let path = temp_settings_file("interface-picker-open");
+        let mut app = MusicPlayerApp::new_with_interfaces(
+            MusicPlayerSettings::default(),
+            path.clone(),
+            false,
+            vec![interface("en0", [192, 168, 1, 42])],
+        );
+        app.open_settings(false);
+        app.settings_focus = SettingsField::Interface;
+
+        app.handle_key(key_code(KeyCode::Enter))
+            .expect("interface picker should open");
+
+        let picker = app.picker.as_ref().expect("picker should be open");
+        assert_eq!(picker.title, "Select Interface");
+        assert!(picker.options.iter().any(|option| {
+            option.label.contains("en0") && option.label.contains("192.168.1.42")
+        }));
+
+        fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn interface_picker_selects_interface_name() {
+        let path = temp_settings_file("interface-picker-select");
+        let mut app = MusicPlayerApp::new_with_interfaces(
+            MusicPlayerSettings::default(),
+            path.clone(),
+            false,
+            vec![interface("en0", [192, 168, 1, 42])],
+        );
+        app.open_settings(false);
+        app.settings_focus = SettingsField::Interface;
+        app.handle_key(key_code(KeyCode::Enter))
+            .expect("interface picker should open");
+
+        app.handle_key(key_code(KeyCode::Down))
+            .expect("picker selection should move");
+        app.handle_key(key_code(KeyCode::Enter))
+            .expect("picker selection should apply");
+
+        assert_eq!(app.settings.stream.interface.as_deref(), Some("en0"));
+        assert!(app.picker.is_none());
+        assert!(app.status.contains("en0"));
+
+        fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn interface_picker_renders_interface_names_and_addresses() {
+        let path = temp_settings_file("interface-picker-render");
+        let mut app = MusicPlayerApp::new_with_interfaces(
+            MusicPlayerSettings::default(),
+            path.clone(),
+            false,
+            vec![interface("en0", [192, 168, 1, 42])],
+        );
+        app.open_settings(false);
+        app.settings_focus = SettingsField::Interface;
+        app.handle_key(key_code(KeyCode::Enter))
+            .expect("interface picker should open");
+
+        let output = render_app_to_string(&app, 100, 30).expect("app should render");
+
+        assert!(output.contains("Select Interface"));
+        assert!(output.contains("Default route"));
+        assert!(output.contains("en0"));
+        assert!(output.contains("192.168.1.42"));
 
         fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
     }
