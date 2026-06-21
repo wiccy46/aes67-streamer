@@ -5,18 +5,21 @@ README is intentionally focused on installing and running the tools.
 
 ## Workspace Overview
 
-This is a Cargo workspace with seven crates:
+This is a Cargo workspace with three tool crates and five shared crates:
 
 - `src/aes67-streamer`: streamer binary, CLI entry point, stream orchestration.
 - `src/aes67-player`: player binary, CLI entry point, receive/playout
   orchestration.
 - `src/aes67-sap`: SAP browser binary, CLI entry point, discovery output.
-- `src/config`: streamer/player/SAP CLI parsing and streamer TOML
+- `src/shared/config`: streamer/player/SAP CLI parsing and streamer TOML
   configuration.
-- `src/audio`: audio decoding, resampling, sample buffering, gain node
+- `src/shared/audio`: audio decoding, resampling, sample buffering, gain node
   processing.
-- `src/network`: RTP packetization/parsing, SDP/SAP, jitter buffer, UDP sockets.
-- `src/ptp`: PTP client, message parsing, clock/timestamp support.
+- `src/shared/network`: RTP packetization/parsing, SDP/SAP, jitter buffer, UDP
+  sockets.
+- `src/shared/ptp`: PTP client, message parsing, clock/timestamp support.
+- `src/shared/streamer-core`: reusable streamer engine, stream source
+  abstraction, RTP/PTP/SAP orchestration.
 
 ## Streamer Flow
 
@@ -264,16 +267,16 @@ workspace, runs tests, and runs the full media loopback E2E script.
 
 ## Files To Know
 
-- Streamer/player CLI parsing: `src/config/src/args.rs`
-- Streamer orchestration: `src/aes67-streamer/src/streamer.rs`
+- Streamer/player/SAP CLI parsing: `src/shared/config/src/args.rs`
+- Streamer orchestration: `src/shared/streamer-core/src/engine.rs`
 - Player orchestration: `src/aes67-player/src/player.rs`
 - Player output: `src/aes67-player/src/output.rs`
-- RTP packetizer/parser: `src/network/src/rtp.rs`
-- SDP parser: `src/network/src/sdp.rs`
-- Jitter buffer: `src/network/src/jitter.rs`
-- UDP socket wrappers: `src/network/src/socket.rs`
-- SAP announcer: `src/network/src/sap.rs`
-- PTP client: `src/ptp/src/client.rs`
+- RTP packetizer/parser: `src/shared/network/src/rtp.rs`
+- SDP parser: `src/shared/network/src/sdp.rs`
+- Jitter buffer: `src/shared/network/src/jitter.rs`
+- UDP socket wrappers: `src/shared/network/src/socket.rs`
+- SAP announcer: `src/shared/network/src/sap.rs`
+- PTP client: `src/shared/ptp/src/client.rs`
 - Release package script: `scripts/package_release.sh`
 - Release workflow: `.github/workflows/release-run.yml`
 - Homebrew formula template: `packaging/homebrew/aes67-tools.rb`
