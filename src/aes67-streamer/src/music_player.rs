@@ -89,6 +89,16 @@ impl PathInput {
         self.show_completions = false;
         self.browse_completions = false;
     }
+
+    fn should_restart_as_browse_completion(&self) -> bool {
+        !self.browse_completions
+            && self.completions.len() == 1
+            && is_browse_completion_input(&self.value)
+            && self
+                .completions
+                .get(self.completion_index)
+                .is_some_and(|completion| completion == &self.value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +384,10 @@ impl MusicPlayerApp {
                 self.status = "Add canceled".to_string();
             }
             KeyCode::Enter => {
+                if self.select_visible_path_completion() {
+                    return Ok(());
+                }
+
                 let input = self
                     .path_input
                     .take()
@@ -381,6 +395,8 @@ impl MusicPlayerApp {
                 self.add_playlist_path(&input.value)?;
             }
             KeyCode::Tab => self.complete_path_input()?,
+            KeyCode::Down => self.move_path_completion_next(),
+            KeyCode::Up => self.move_path_completion_previous(),
             KeyCode::Backspace => {
                 if let Some(input) = &mut self.path_input {
                     input.value.pop();
@@ -396,6 +412,46 @@ impl MusicPlayerApp {
             _ => {}
         }
         Ok(())
+    }
+
+    fn select_visible_path_completion(&mut self) -> bool {
+        let Some(input) = &mut self.path_input else {
+            return false;
+        };
+
+        if !input.show_completions || input.completions.is_empty() {
+            return false;
+        }
+
+        let selected = input.completions[input.completion_index].clone();
+        let label = completion_option_label(&selected);
+        input.value = selected;
+        input.clear_completions();
+        self.status = format!("Selected {label}");
+        true
+    }
+
+    fn move_path_completion_next(&mut self) {
+        self.move_visible_path_completion(1);
+    }
+
+    fn move_path_completion_previous(&mut self) {
+        self.move_visible_path_completion(-1);
+    }
+
+    fn move_visible_path_completion(&mut self, delta: isize) {
+        let Some(input) = &mut self.path_input else {
+            return;
+        };
+
+        if !input.show_completions || input.completions.is_empty() {
+            return;
+        }
+
+        let len = input.completions.len() as isize;
+        input.completion_index = (input.completion_index as isize + delta).rem_euclid(len) as usize;
+        let label = completion_option_label(&input.completions[input.completion_index]);
+        self.status = format!("Selected {label}");
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -474,11 +530,17 @@ impl MusicPlayerApp {
             return Ok(());
         };
 
+        if input.should_restart_as_browse_completion() {
+            input.clear_completions();
+        }
+
         if input.completions.is_empty() {
             input.browse_completions = is_browse_completion_input(&input.value);
             input.completions = path_completions(&input.value)?;
             input.completion_index = 0;
             input.show_completions = false;
+        } else if input.browse_completions && !input.show_completions {
+            input.show_completions = true;
         } else {
             input.completion_index = (input.completion_index + 1) % input.completions.len();
             input.show_completions = input.browse_completions || input.completions.len() > 1;
@@ -1215,8 +1277,12 @@ fn render_path_input_modal(frame: &mut Frame<'_>, input: &PathInput, status: &st
         layout[status_index],
     );
     frame.render_widget(
-        Paragraph::new("tab complete | enter add | esc cancel")
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(if show_completions {
+            "up/down choose | enter select | tab cycle | esc cancel"
+        } else {
+            "tab complete | enter add | esc cancel"
+        })
+        .style(Style::default().fg(Color::DarkGray)),
         layout[status_index + 1],
     );
 }
@@ -1520,6 +1586,9 @@ fn completion_values_in_parent(
         let Some(file_name) = file_name.to_str() else {
             continue;
         };
+        if file_name.starts_with('.') {
+            continue;
+        }
         if !file_name
             .to_ascii_lowercase()
             .starts_with(&prefix.to_ascii_lowercase())
@@ -2172,6 +2241,193 @@ mod tests {
         let input = app.path_input.as_ref().expect("input should remain open");
         assert_eq!(input.value, folder_input);
         assert!(input.show_completions);
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn folder_path_single_match_still_shows_option_on_second_tab() {
+        let (mut app, settings_path) = configured_app("queue-complete-folder-single");
+        let root = settings_path.parent().expect("settings should have parent");
+        let folder = root.join("music");
+        let album = folder.join("Album");
+        fs::create_dir_all(&album).expect("album folder should be created");
+
+        app.handle_key(key('a')).expect("path input should open");
+        let folder_input = format!("{}/", folder.to_string_lossy());
+        for ch in folder_input.chars() {
+            app.handle_key(key(ch))
+                .expect("path character should apply");
+        }
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("first tab should prepare folder completions");
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("second tab should show the single folder option");
+
+        let input = app.path_input.as_ref().expect("input should remain open");
+        assert_eq!(input.value, folder_input);
+        assert!(input.show_completions);
+        assert_eq!(input.completions.len(), 1);
+        assert!(app.status.contains("Showing 1 matches"));
+        assert!(!app.status.contains("Completed path"));
+
+        let output = render_app_to_string(&app, 100, 30).expect("app should render");
+        assert!(output.contains("Album/"));
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn folder_path_options_ignore_hidden_entries() {
+        let settings_path = temp_settings_file("queue-complete-hidden");
+        let root = settings_path.parent().expect("settings should have parent");
+        let folder = root.join("music");
+        let hidden_folder = folder.join(".Trash");
+        let visible_folder = folder.join("Album");
+        let hidden_file = folder.join(".draft.wav");
+        let visible_file = folder.join("intro.wav");
+        fs::create_dir_all(&hidden_folder).expect("hidden folder should be created");
+        fs::create_dir_all(&visible_folder).expect("visible folder should be created");
+        write_test_file(&hidden_file);
+        write_test_file(&visible_file);
+
+        let completions = path_completions(&format!("{}/", folder.to_string_lossy()))
+            .expect("folder completions should load");
+
+        assert!(completions.iter().any(|path| path.ends_with("Album/")));
+        assert!(completions.iter().any(|path| path.ends_with("intro.wav")));
+        assert!(!completions
+            .iter()
+            .any(|path| completion_option_label(path).starts_with('.')));
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn completed_folder_path_can_be_browsed_with_next_tabs() {
+        let (mut app, settings_path) = configured_app("queue-complete-folder-then-browse");
+        let root = settings_path.parent().expect("settings should have parent");
+        let music = root.join("Music");
+        let album = music.join("Album");
+        fs::create_dir_all(&album).expect("album folder should be created");
+
+        app.handle_key(key('a')).expect("path input should open");
+        for ch in root.join("Mu").to_string_lossy().chars() {
+            app.handle_key(key(ch))
+                .expect("path character should apply");
+        }
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("first tab should complete to the folder path");
+
+        let folder_value = format!("{}/", music.to_string_lossy());
+        assert_eq!(
+            app.path_input
+                .as_ref()
+                .expect("input should remain open")
+                .value,
+            folder_value
+        );
+        assert!(app.status.contains("Completed path"));
+
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("next tab should prepare child completions");
+        let input = app.path_input.as_ref().expect("input should remain open");
+        assert_eq!(input.value, folder_value);
+        assert!(!input.show_completions);
+        assert!(input
+            .completions
+            .iter()
+            .any(|path| path.ends_with("Album/")));
+        assert!(!app.status.contains("Completed path"));
+
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("next tab should show child options");
+        let input = app.path_input.as_ref().expect("input should remain open");
+        assert_eq!(input.value, folder_value);
+        assert!(input.show_completions);
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn arrow_keys_move_visible_path_completion_selection() {
+        let (mut app, settings_path) = configured_app("queue-complete-arrow");
+        let root = settings_path.parent().expect("settings should have parent");
+        let folder = root.join("music");
+        fs::create_dir_all(folder.join("Album")).expect("album folder should be created");
+        fs::create_dir_all(folder.join("Mixes")).expect("mixes folder should be created");
+
+        app.handle_key(key('a')).expect("path input should open");
+        let folder_input = format!("{}/", folder.to_string_lossy());
+        for ch in folder_input.chars() {
+            app.handle_key(key(ch))
+                .expect("path character should apply");
+        }
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("first tab should prepare folder completions");
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("second tab should show folder options");
+
+        assert_eq!(
+            app.path_input
+                .as_ref()
+                .expect("input should remain open")
+                .completion_index,
+            0
+        );
+
+        app.handle_key(key_code(KeyCode::Down))
+            .expect("down should move option selection");
+        assert_eq!(
+            app.path_input
+                .as_ref()
+                .expect("input should remain open")
+                .completion_index,
+            1
+        );
+
+        app.handle_key(key_code(KeyCode::Up))
+            .expect("up should move option selection");
+        assert_eq!(
+            app.path_input
+                .as_ref()
+                .expect("input should remain open")
+                .completion_index,
+            0
+        );
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn enter_selects_visible_path_completion() {
+        let (mut app, settings_path) = configured_app("queue-complete-enter");
+        let root = settings_path.parent().expect("settings should have parent");
+        let folder = root.join("music");
+        let album = folder.join("Album");
+        let mixes = folder.join("Mixes");
+        fs::create_dir_all(&album).expect("album folder should be created");
+        fs::create_dir_all(&mixes).expect("mixes folder should be created");
+
+        app.handle_key(key('a')).expect("path input should open");
+        let folder_input = format!("{}/", folder.to_string_lossy());
+        for ch in folder_input.chars() {
+            app.handle_key(key(ch))
+                .expect("path character should apply");
+        }
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("first tab should prepare folder completions");
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("second tab should show folder options");
+        app.handle_key(key_code(KeyCode::Down))
+            .expect("down should move option selection");
+        app.handle_key(key_code(KeyCode::Enter))
+            .expect("enter should select the highlighted option");
+
+        let input = app.path_input.as_ref().expect("input should remain open");
+        assert_eq!(input.value, format!("{}/", mixes.to_string_lossy()));
+        assert!(input.completions.is_empty());
+        assert!(!input.show_completions);
 
         fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
     }
