@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -378,6 +378,10 @@ impl MusicPlayerApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind == KeyEventKind::Release {
+            return Ok(());
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
             return Ok(());
@@ -2217,6 +2221,10 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn key_release(code: KeyCode) -> KeyEvent {
+        KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Release)
+    }
+
     fn interface(name: &str, ipv4: [u8; 4]) -> NetworkInterface {
         NetworkInterface {
             name: name.to_string(),
@@ -3071,6 +3079,32 @@ mod tests {
             }))
         );
         assert_eq!(app.take_playback_command(), None);
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn space_release_does_not_cancel_started_playback() {
+        let (mut app, settings_path) = configured_app("playback-space-release");
+        app.settings.playlist.files = vec!["one.wav".to_string()];
+
+        app.handle_key(key(' '))
+            .expect("space press should request playback start");
+        app.handle_key(key_release(KeyCode::Char(' ')))
+            .expect("space release should be ignored");
+
+        assert_eq!(
+            app.playback_state,
+            PlaybackState::Starting { track_index: 0 }
+        );
+        assert_eq!(
+            app.take_playback_command(),
+            Some(PlaybackCommand::Start(PlaybackStartRequest {
+                track_index: 0,
+                path: "one.wav".to_string(),
+                stream: app.settings.stream.clone(),
+            }))
+        );
 
         fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
     }
