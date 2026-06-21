@@ -472,18 +472,29 @@ impl MusicPlayerApp {
             return Ok(());
         };
 
+        let value_was_empty = input.value.trim().is_empty();
         if input.completions.is_empty() {
             input.completions = path_completions(&input.value)?;
             input.completion_index = 0;
             input.show_completions = false;
         } else {
             input.completion_index = (input.completion_index + 1) % input.completions.len();
-            input.show_completions = input.completions.len() > 1;
+            input.show_completions = value_was_empty || input.completions.len() > 1;
         }
 
         if input.completions.is_empty() {
             input.show_completions = false;
             self.status = "No matching files or folders".to_string();
+            return Ok(());
+        }
+
+        if value_was_empty {
+            let count = input.completions.len();
+            self.status = if input.show_completions {
+                format!("Showing {count} matches, press Tab to cycle")
+            } else {
+                format!("{count} matches, press Tab again to show options")
+            };
             return Ok(());
         }
 
@@ -1473,9 +1484,7 @@ fn path_completions(input: &str) -> Result<Vec<String>> {
 fn path_completions_with_home(input: &str, home: Option<&Path>) -> Result<Vec<String>> {
     let input = input.trim();
     if input.is_empty() {
-        return Ok(home
-            .map(|home| vec![completion_value(home, true, None)])
-            .unwrap_or_default());
+        return completion_values_in_parent(Path::new("."), Some(""), "");
     }
 
     let Some(context) = completion_context(input, home) else {
@@ -1486,8 +1495,16 @@ fn path_completions_with_home(input: &str, home: Option<&Path>) -> Result<Vec<St
         return Ok(Vec::new());
     }
 
+    completion_values_in_parent(&parent, context.display_parent.as_deref(), &context.prefix)
+}
+
+fn completion_values_in_parent(
+    parent: &Path,
+    display_parent: Option<&str>,
+    prefix: &str,
+) -> Result<Vec<String>> {
     let mut completions = Vec::new();
-    for entry in fs::read_dir(&parent)
+    for entry in fs::read_dir(parent)
         .with_context(|| format!("failed to read folder {}", parent.display()))?
     {
         let entry =
@@ -1498,24 +1515,16 @@ fn path_completions_with_home(input: &str, home: Option<&Path>) -> Result<Vec<St
         };
         if !file_name
             .to_ascii_lowercase()
-            .starts_with(&context.prefix.to_ascii_lowercase())
+            .starts_with(&prefix.to_ascii_lowercase())
         {
             continue;
         }
 
         let path = parent.join(file_name);
         if path.is_dir() {
-            completions.push(completion_value(
-                &path,
-                true,
-                context.display_parent.as_deref(),
-            ));
+            completions.push(completion_value(&path, true, display_parent));
         } else if path.is_file() && is_supported_audio_file(&path) {
-            completions.push(completion_value(
-                &path,
-                false,
-                context.display_parent.as_deref(),
-            ));
+            completions.push(completion_value(&path, false, display_parent));
         }
     }
     completions.sort();
@@ -2101,6 +2110,28 @@ mod tests {
             .expect("home completion should succeed");
 
         assert_eq!(completions, vec!["~/Music/"]);
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn empty_path_tab_lists_without_selecting_first_completion() {
+        let (mut app, settings_path) = configured_app("queue-complete-empty");
+
+        app.handle_key(key('a')).expect("path input should open");
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("first tab should prepare completions");
+
+        let input = app.path_input.as_ref().expect("input should remain open");
+        assert_eq!(input.value, "");
+        assert!(!input.show_completions);
+
+        app.handle_key(key_code(KeyCode::Tab))
+            .expect("second tab should show options");
+
+        let input = app.path_input.as_ref().expect("input should remain open");
+        assert_eq!(input.value, "");
+        assert!(input.show_completions);
 
         fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
     }
