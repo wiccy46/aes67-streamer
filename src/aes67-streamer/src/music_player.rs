@@ -176,6 +176,7 @@ struct MusicPlayerApp {
     interface_options: Vec<NetworkInterface>,
     screen: AppScreen,
     settings_required: bool,
+    settings_before_edit: Option<StreamSettings>,
     settings_focus: SettingsField,
     queue_selected: usize,
     path_input: Option<PathInput>,
@@ -357,6 +358,7 @@ impl MusicPlayerApp {
                 AppScreen::Player
             },
             settings_required,
+            settings_before_edit: None,
             settings_focus: SettingsField::SessionName,
             queue_selected: 0,
             path_input: None,
@@ -721,8 +723,7 @@ impl MusicPlayerApp {
                 if self.settings_required {
                     self.should_quit = true;
                 } else {
-                    self.screen = AppScreen::Player;
-                    self.status = "Settings unchanged".to_string();
+                    self.discard_settings();
                 }
             }
             KeyCode::Char('s') => self.save_and_close_settings()?,
@@ -768,6 +769,9 @@ impl MusicPlayerApp {
     }
 
     fn open_settings(&mut self, required: bool) {
+        if self.screen != AppScreen::Settings {
+            self.settings_before_edit = Some(self.settings.stream.clone());
+        }
         self.screen = AppScreen::Settings;
         self.settings_required = self.settings_required || required;
         self.settings_focus = SettingsField::SessionName;
@@ -834,9 +838,18 @@ impl MusicPlayerApp {
         if self.settings_required {
             self.status = "Save settings to continue, or press q to quit.".to_string();
         } else {
-            self.screen = AppScreen::Player;
-            self.status = "Settings unchanged".to_string();
+            self.discard_settings();
         }
+    }
+
+    fn discard_settings(&mut self) {
+        if let Some(settings) = self.settings_before_edit.take() {
+            self.settings.stream = settings;
+        }
+        self.screen = AppScreen::Player;
+        self.edit = None;
+        self.picker = None;
+        self.status = "Settings unchanged".to_string();
     }
 
     fn save_and_close_settings(&mut self) -> Result<()> {
@@ -847,6 +860,7 @@ impl MusicPlayerApp {
 
         save_settings(&self.settings_path, &self.settings)?;
         self.settings_required = false;
+        self.settings_before_edit = None;
         self.screen = AppScreen::Player;
         self.edit = None;
         self.picker = None;
@@ -2385,6 +2399,47 @@ mod tests {
         assert_eq!(app.settings_focus, SettingsField::SessionName);
 
         fs::remove_dir_all(path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn closing_optional_settings_discards_applied_stream_changes() {
+        let (mut app, settings_path) = configured_app("settings-discard");
+        let original_stream = app.settings.stream.clone();
+
+        app.open_settings(false);
+        app.apply_field_value(SettingsField::Address, "239.69.83.99")
+            .expect("field edit should apply while settings are open");
+        app.apply_field_value(SettingsField::SessionName, "Unsaved session")
+            .expect("field edit should apply while settings are open");
+        app.handle_key(key_code(KeyCode::Esc))
+            .expect("escape should close optional settings");
+
+        assert_eq!(app.screen, AppScreen::Player);
+        assert_eq!(app.settings.stream, original_stream);
+        assert_eq!(app.status, "Settings unchanged");
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
+    }
+
+    #[test]
+    fn saving_settings_commits_applied_stream_changes() {
+        let (mut app, settings_path) = configured_app("settings-save");
+
+        app.open_settings(false);
+        app.apply_field_value(SettingsField::Address, "239.69.83.99")
+            .expect("field edit should apply while settings are open");
+        app.save_and_close_settings()
+            .expect("settings should save successfully");
+
+        assert_eq!(app.screen, AppScreen::Player);
+        assert_eq!(app.settings.stream.address, "239.69.83.99");
+        assert!(
+            fs::read_to_string(&settings_path)
+                .expect("settings should be readable")
+                .contains("239.69.83.99")
+        );
+
+        fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
     }
 
     #[test]

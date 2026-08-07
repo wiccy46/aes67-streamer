@@ -88,6 +88,22 @@ To stop after a bounded duration:
 aes67-streamer --file audio.wav --address 239.69.83.1 --duration-seconds 30
 ```
 
+## Interactive Music Player
+
+Use the terminal music player to build a queue and stream tracks with the same
+AES67 streamer engine:
+
+```bash
+aes67-streamer music-player
+```
+
+On first launch, choose a stream address and local interface, then press `s`
+to save. In the player, press `a` to add an audio file or a folder, use the
+arrow keys to select a queue item, and press Space to start or stop streaming.
+The player stores its stream settings and queue in `music-player.toml` under
+the platform configuration directory. While editing Settings, `s` saves the
+changes and Esc (or `q`) discards them.
+
 ## Receive Audio and Playback on Output Device
 
 List output devices:
