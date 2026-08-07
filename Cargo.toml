@@ -3,6 +3,7 @@ members = [
     "src/aes67-player",
     "src/aes67-sap",
     "src/aes67-streamer",
+    "src/aes67-tester",
     "src/shared/audio",
     "src/shared/config",
     "src/shared/network",

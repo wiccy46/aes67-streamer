@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+- Add `aes67-tester`, a paired-stream 48 kHz/8-channel diagnostic tool. It
+  transmits a 100 Hz tone on every channel and continuously reports RTP
+  sequence gaps, timestamp and audio sample discontinuities, return-signal
+  presence, and 100 Hz phase delay modulo one tone period (10 ms). This is not
+  an absolute latency measurement.
+
 ## [0.1.3]
 
 - Add `aes67-sap` tool. This is a sap listener that prints out sap annoucements on the network 

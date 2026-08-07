@@ -21,6 +21,7 @@ pub struct Aes67Streamer {
     audio_source: Box<dyn StreamAudioSource>,
     audio_chain: audio::AudioNodeChain,
     rtp_packetizer: RtpPacketizer,
+    rtp_base_timestamp: u32,
     multicast_socket: MulticastSocket,
     ptp_client: PtpClient,
     sap_announcer: Option<SapAnnouncer>,
@@ -212,6 +213,7 @@ impl Aes67Streamer {
             rtp_packetizer.set_base_timestamp(ptp_timestamp);
             log::info!("RTP base timestamp set from PTP: {ptp_timestamp}");
         }
+        let rtp_base_timestamp = rtp_packetizer.get_base_timestamp();
 
         log::info!("AES67 Streamer initialized successfully");
         log::info!("Streaming to {multicast_ip}:{port} via interface {local_ip}");
@@ -220,6 +222,7 @@ impl Aes67Streamer {
             audio_source,
             audio_chain,
             rtp_packetizer,
+            rtp_base_timestamp,
             multicast_socket,
             ptp_client,
             sap_announcer,
@@ -235,6 +238,15 @@ impl Aes67Streamer {
 
     pub fn get_audio_info(&self) -> &audio::AudioInfo {
         self.audio_source.get_info()
+    }
+
+    /// Get the RTP timestamp assigned to the first sample in this stream.
+    ///
+    /// Diagnostic tools can compare this with a returned stream that shares the
+    /// same PTP media-clock timeline. The timestamp alone is not sufficient for
+    /// an absolute latency result when the test signal is periodic.
+    pub fn get_rtp_base_timestamp(&self) -> u32 {
+        self.rtp_base_timestamp
     }
 
     pub fn write_sdp_file(&self, path: impl AsRef<Path>) -> Result<()> {

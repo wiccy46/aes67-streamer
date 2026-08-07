@@ -214,6 +214,11 @@ impl RtpPacketizer {
         self.base_timestamp = timestamp;
     }
 
+    /// Get the RTP timestamp used for the first packet payload frame.
+    pub fn get_base_timestamp(&self) -> u32 {
+        self.base_timestamp
+    }
+
     /// Create RTP packet from audio sample with explicit timestamp
     pub fn create_packet_with_timestamp(
         &mut self,
