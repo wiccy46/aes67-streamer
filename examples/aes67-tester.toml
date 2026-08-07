@@ -1,0 +1,41 @@
+# The tester transmits a 100 Hz L24 sine to all eight channels and monitors
+# this separately configured return stream. Route the transmitter through the
+# AES67 equipment being qualified before it reaches the receiver. Do not reuse
+# the same address and port unless you intentionally want a local self-check.
+
+[transmitter]
+address = "239.69.83.10"
+port = 5004
+interface = "192.168.1.100"
+payload_type = 97
+ptp_domain = 0
+ttl = 32
+sap = false
+session_name = "AES67 Tester 100 Hz"
+
+[receiver]
+address = "239.69.83.11"
+port = 5004
+interface = "192.168.1.100"
+payload_type = 97
+# sender = "192.168.1.50"
+# ssrc = 305419896 # optional expected RTP SSRC for the return stream
+
+[signal]
+# The frequency, sample rate, packet time, and channel count are fixed:
+# 100 Hz, 48 kHz, 1 ms, and 8 channels. The threshold is multiplier times the
+# greatest adjacent-sample difference possible for this sine. The minimum
+# amplitude is measured on decoded return samples for each channel.
+amplitude = 0.5
+minimum_detectable_amplitude = 0.05
+discontinuity_multiplier = 1.25
+
+[runtime]
+# Omit duration_seconds to run until interrupted.
+duration_seconds = 60
+report_interval_seconds = 1
+verbose = false
+
+# `phase_latency_mod_10ms` is not absolute latency: a 100 Hz tone repeats
+# every 10 ms. Use a non-periodic marker and shared PTP timing for an absolute
+# end-to-end latency measurement.

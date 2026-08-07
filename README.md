@@ -11,6 +11,8 @@ Command-line tools for sending and receiving AES67-oriented RTP audio streams.
   audio output device.
 - `aes67-sap` browses AES67 streams announced with SAP and can write discovered
   SDP payloads to files.
+- `aes67-tester` sends a 100 Hz diagnostic tone on eight channels and monitors
+  a configured AES67 return stream for continuity and phase delay.
 
 The current release target is one stream with 1-8 channels on macOS and Linux.
 
@@ -28,6 +30,7 @@ This installs all public binaries:
 aes67-streamer --version
 aes67-player --version
 aes67-sap --version
+aes67-tester --version
 ```
 
 ### GitHub Release Archive
@@ -147,6 +150,35 @@ The player logs a final summary when it exits. Clean playback should report zero
 for RTP silence frames, jitter lost/late/dropped-full packets, jitter timestamp
 discontinuities, output silence frames, and output dropped samples.
 
+## Test an AES67 Return Path
+
+`aes67-tester` sends the same 100 Hz L24 sine wave on all eight channels at
+48 kHz, then monitors a separately configured return stream. Use it when the
+route under test takes the tester's transmit stream through the AES67 equipment
+and emits a return stream back to the tester.
+
+```bash
+aes67-tester --config aes67-tester.toml --duration-seconds 60
+```
+
+Start with [examples/aes67-tester.toml](examples/aes67-tester.toml), set the
+two stream addresses/ports and local interfaces, then set `receiver.sender` or
+`receiver.ssrc` when the return multicast group can contain other RTP streams.
+The transmit and return endpoints should normally be different. If they are the
+same and no sender filter is set, the tester warns because it can merely observe
+its own transmitted packets instead of the route under test.
+
+The live and final summaries report RTP sequence gaps, reordered packets,
+timestamp discontinuities, sample-step discontinuities per channel, and tone
+windows below the configured input threshold. Any sequence gap, timestamp or
+sample discontinuity, or missing tone causes a non-zero exit status.
+
+The reported `phase_latency_mod_10ms` is a 100 Hz phase delay only. A pure
+100 Hz tone repeats every 10 ms, so this tool cannot determine absolute
+end-to-end latency: for example, 1 ms and 11 ms have the same result. Use a
+non-periodic marker plus a shared, verified PTP timing reference when an
+absolute latency measurement is required.
+
 ## Browse SAP Announcements
 
 Browse AES67 streams announced on the local SAP multicast group:
@@ -213,6 +245,46 @@ address, and interface from `streamer.toml`, but streams on port `6000`:
 aes67-streamer --config streamer.toml --port 6000
 ```
 
+## Tester Configuration File
+
+The tester uses one TOML file to make its transmit and return streams explicit:
+
+```toml
+[transmitter]
+address = "239.69.83.10"
+port = 5004
+interface = "192.168.1.100"
+payload_type = 97
+ptp_domain = 0
+ttl = 32
+sap = false
+
+[receiver]
+address = "239.69.83.11"
+port = 5004
+interface = "192.168.1.100"
+payload_type = 97
+sender = "192.168.1.50" # optional, but recommended on shared groups
+# ssrc = 305419896       # optional expected RTP SSRC for the return stream
+
+[signal]
+amplitude = 0.5
+minimum_detectable_amplitude = 0.05
+discontinuity_multiplier = 1.25
+
+[runtime]
+duration_seconds = 60
+report_interval_seconds = 1
+verbose = false
+```
+
+The signal format is deliberately fixed: 100 Hz, 48 kHz, eight channels, L24,
+and 1 ms (48-frame) packets. `minimum_detectable_amplitude` is the decoded PCM
+amplitude expected on every return channel; lower it only if the known-good
+return path attenuates the diagnostic tone. The discontinuity threshold is the
+maximum normal adjacent-sample change for the configured tone amplitude,
+multiplied by `discontinuity_multiplier`.
+
 ## CLI Reference
 
 ### `aes67-streamer`
@@ -254,6 +326,14 @@ aes67-streamer --config streamer.toml --port 6000
 | `--interface` / `-i` | Local interface name or IPv4 address used for SAP multicast | Required |
 | `--once` | Exit after the first discovered AES67 SAP stream | Continuous browse |
 | `--sdp-output-dir` | Write discovered SDP payloads to this directory | None |
+| `--verbose` / `-v` | Enable verbose logging | `false` |
+
+### `aes67-tester`
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--config` / `-c` | Paired transmit/return stream TOML configuration | Required |
+| `--duration-seconds` | Stop after this duration; overrides `runtime.duration_seconds` | Unlimited |
 | `--verbose` / `-v` | Enable verbose logging | `false` |
 
 ## AES67 Defaults
@@ -330,14 +410,18 @@ sender/player release:
 - AES67-style RTP media: 48 kHz, 24-bit L24 payloads over RTP.
 - AES67-style RTP receive: single-stream L24 receive, jitter buffering,
   SDP/basic-CLI configuration, and CPAL output.
+- AES67 route qualification: fixed-format 100 Hz, eight-channel transmit with
+  real-time return-stream continuity checks and 100 Hz phase delay modulo
+  10 ms.
 - RFC 3550 RTP sequence numbers, timestamps, payload type, and SSRC.
 - IEEE 1588-2008 PTPv2 message handling and local master fallback.
 - SAP/SDP announcement and discovery through the dedicated `aes67-sap` browser.
 
 The first release does not claim hard real-time scheduling, hardware clock
-discipline, kernel-bypass networking, multiple simultaneous streams, or full ST
-2110 system compliance. Player playout uses the local audio device clock in this
-release; PTP-locked playout is future work.
+discipline, kernel-bypass networking, multiple simultaneous streams, full ST
+2110 system compliance, or absolute latency measurement from the tester's pure
+100 Hz signal. Player playout uses the local audio device clock in this release;
+PTP-locked playout is future work.
 
 ## More Information
 

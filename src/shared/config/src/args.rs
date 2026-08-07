@@ -62,6 +62,13 @@ pub struct SapArgs {
     pub port: u16,
 }
 
+#[derive(Debug, Clone)]
+pub struct TesterArgs {
+    pub config_file: String,
+    pub duration_seconds: Option<f64>,
+    pub verbose: bool,
+}
+
 pub fn parse_args() -> Result<StreamerArgs> {
     parse_streamer_args()
 }
@@ -88,6 +95,10 @@ pub fn parse_player_args() -> Result<PlayerArgs> {
 
 pub fn parse_sap_args() -> Result<SapArgs> {
     parse_sap_args_from(std::env::args_os())
+}
+
+pub fn parse_tester_args() -> Result<TesterArgs> {
+    parse_tester_args_from(std::env::args_os())
 }
 
 pub fn is_display_control_error(error: &anyhow::Error) -> bool {
@@ -133,6 +144,15 @@ where
 {
     let matches = sap_cli().try_get_matches_from(args)?;
     sap_args_from_matches(&matches)
+}
+
+pub fn parse_tester_args_from<I, T>(args: I) -> Result<TesterArgs>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let matches = tester_cli().try_get_matches_from(args)?;
+    tester_args_from_matches(&matches)
 }
 
 fn streamer_cli() -> Command {
@@ -373,6 +393,35 @@ fn sap_cli() -> Command {
         )
 }
 
+fn tester_cli() -> Command {
+    Command::new("aes67-tester")
+        .version(env!("AES67_TOOLS_VERSION"))
+        .author("Jiajun Yang")
+        .about("Transmit and monitor an AES67 100 Hz diagnostic tone")
+        .arg(
+            Arg::new("config")
+                .short('c')
+                .long("config")
+                .value_name("FILE")
+                .help("Paired transmitter and receiver TOML configuration")
+                .required(true),
+        )
+        .arg(
+            Arg::new("duration-seconds")
+                .long("duration-seconds")
+                .value_name("SECONDS")
+                .help("Stop after this many seconds, overriding runtime.duration_seconds")
+                .value_parser(parse_positive_duration_seconds),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Enable verbose logging")
+                .action(clap::ArgAction::SetTrue),
+        )
+}
+
 fn streamer_command_from_matches(matches: &ArgMatches) -> Result<StreamerCommand> {
     match matches.subcommand() {
         Some(("music-player", subcommand)) => {
@@ -443,6 +492,17 @@ fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
 
 fn music_player_args_from_matches(_matches: &ArgMatches) -> Result<MusicPlayerArgs> {
     Ok(MusicPlayerArgs)
+}
+
+fn tester_args_from_matches(matches: &ArgMatches) -> Result<TesterArgs> {
+    Ok(TesterArgs {
+        config_file: matches
+            .get_one::<String>("config")
+            .expect("clap should require --config")
+            .clone(),
+        duration_seconds: matches.get_one::<f64>("duration-seconds").copied(),
+        verbose: matches.get_flag("verbose"),
+    })
 }
 
 fn player_args_from_matches(matches: &ArgMatches) -> Result<PlayerArgs> {
@@ -1375,5 +1435,39 @@ mod tests {
 
         assert_eq!(args.listen_address, "127.0.0.1");
         assert_eq!(args.port, 19000);
+    }
+
+    #[test]
+    fn tester_cli_requires_a_config_file() {
+        assert!(parse_tester_args_from(["aes67-tester"]).is_err());
+    }
+
+    #[test]
+    fn tester_cli_parses_runtime_overrides() {
+        let args = parse_tester_args_from([
+            "aes67-tester",
+            "--config",
+            "tests/aes67-tester.toml",
+            "--duration-seconds",
+            "1.5",
+            "--verbose",
+        ])
+        .expect("tester args should parse");
+
+        assert_eq!(args.config_file, "tests/aes67-tester.toml");
+        assert_eq!(args.duration_seconds, Some(1.5));
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn tester_cli_rejects_non_positive_duration() {
+        assert!(parse_tester_args_from([
+            "aes67-tester",
+            "--config",
+            "tests/aes67-tester.toml",
+            "--duration-seconds",
+            "0",
+        ])
+        .is_err());
     }
 }

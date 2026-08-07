@@ -26,7 +26,9 @@ fn package_release_dry_run_reports_package_layout() {
     assert!(stdout.contains("bin/aes67-streamer"));
     assert!(stdout.contains("bin/aes67-player"));
     assert!(stdout.contains("bin/aes67-sap"));
+    assert!(stdout.contains("bin/aes67-tester"));
     assert!(stdout.contains("examples/streamer.toml"));
+    assert!(stdout.contains("examples/aes67-tester.toml"));
     assert!(stdout.contains("examples/example.sdp"));
     assert!(stdout.contains(".tar.gz"));
     assert!(stdout.contains(".sha256"));
@@ -42,6 +44,7 @@ fn package_release_creates_tarball_with_expected_layout() {
     write_executable(&bin_dir.join("aes67-streamer"));
     write_executable(&bin_dir.join("aes67-player"));
     write_executable(&bin_dir.join("aes67-sap"));
+    write_executable(&bin_dir.join("aes67-tester"));
 
     let output = Command::new("bash")
         .arg(repo_root().join("scripts/package_release.sh"))
@@ -88,10 +91,12 @@ fn package_release_creates_tarball_with_expected_layout() {
         "bin/aes67-streamer",
         "bin/aes67-player",
         "bin/aes67-sap",
+        "bin/aes67-tester",
         "README.md",
         "LICENSE",
         "VERSION",
         "examples/streamer.toml",
+        "examples/aes67-tester.toml",
         "examples/example.sdp",
     ] {
         let expected = format!("{package_name}/{path}");
