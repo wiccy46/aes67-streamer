@@ -2433,11 +2433,9 @@ mod tests {
 
         assert_eq!(app.screen, AppScreen::Player);
         assert_eq!(app.settings.stream.address, "239.69.83.99");
-        assert!(
-            fs::read_to_string(&settings_path)
-                .expect("settings should be readable")
-                .contains("239.69.83.99")
-        );
+        assert!(fs::read_to_string(&settings_path)
+            .expect("settings should be readable")
+            .contains("239.69.83.99"));
 
         fs::remove_dir_all(settings_path.parent().expect("settings should have parent")).ok();
     }
