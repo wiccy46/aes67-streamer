@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use audio::AudioSample;
 
 const RTP_FIXED_HEADER_LEN: usize = 12;
