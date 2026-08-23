@@ -18,40 +18,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "aes67-player"
+name = "aes67"
 version = "0.1.0"
 dependencies = [
+ "aes67-engine",
  "anyhow",
  "config",
- "cpal",
  "env_logger",
- "log",
- "network",
- "ringbuf",
+ "hound",
  "semver",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "aes67-sap"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "config",
- "env_logger",
- "log",
- "network",
+ "socket2 0.5.10",
  "tokio",
 ]
 
 [[package]]
-name = "aes67-streamer"
+name = "aes67-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "audio",
  "config",
+ "cpal",
  "crossterm",
  "env_logger",
  "hound",
@@ -60,19 +47,18 @@ dependencies = [
  "ptp",
  "rand",
  "ratatui",
- "semver",
+ "ringbuf",
  "serde",
- "socket2 0.5.10",
- "streamer-core",
  "tokio",
  "tokio-util",
  "toml",
 ]
 
 [[package]]
-name = "aes67-tester"
+name = "aes67-route-test"
 version = "0.1.0"
 dependencies = [
+ "aes67-engine",
  "anyhow",
  "audio",
  "config",
@@ -80,7 +66,6 @@ dependencies = [
  "log",
  "network",
  "serde",
- "streamer-core",
  "tokio",
  "tokio-util",
  "toml",
@@ -1607,21 +1592,6 @@ dependencies = [
  "log",
  "rand",
  "serde",
-]
-
-[[package]]
-name = "streamer-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "audio",
- "hound",
- "log",
- "network",
- "ptp",
- "rand",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

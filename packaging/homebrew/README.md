@@ -37,5 +37,5 @@ Manual local formula test flow:
    brew test ./packaging/homebrew/aes67-tools.rb
    ```
 
-The formula installs `aes67-streamer`, `aes67-player`, and `aes67-sap` into
-Homebrew's `bin` directory and installs examples under `pkgshare`.
+The formula installs the single `aes67` command into Homebrew's `bin`
+directory and examples under `pkgshare`.

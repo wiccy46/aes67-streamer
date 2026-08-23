@@ -1,0 +1,27 @@
+[package]
+name = "aes67-engine"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/wiccy46/aes67-tools"
+description = "Send, receive, and discovery workflows for AES67 Tools"
+
+[dependencies]
+anyhow = "1.0"
+audio = { path = "../audio" }
+config = { path = "../config" }
+cpal = "0.17.3"
+crossterm = "0.28"
+env_logger = "0.11.6"
+log = "0.4.26"
+network = { path = "../network" }
+ptp = { path = "../ptp" }
+rand = "0.8.5"
+ratatui = "0.29"
+ringbuf = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
+toml = "0.8"
+
+[dev-dependencies]
+hound = "3.5"

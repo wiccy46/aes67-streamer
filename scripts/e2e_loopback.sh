@@ -8,7 +8,7 @@ ARTIFACT_DIR="${AES67_E2E_ARTIFACT_DIR:-target/e2e-loopback}"
 INPUT_WAV="$ARTIFACT_DIR/input-48k-stereo.wav"
 SDP_FILE="$ARTIFACT_DIR/stream.sdp"
 RECORDED_WAV="$ARTIFACT_DIR/recorded.wav"
-STREAMER_LOG="$ARTIFACT_DIR/streamer.log"
+SEND_LOG="$ARTIFACT_DIR/sender.log"
 FFMPEG_LOG="$ARTIFACT_DIR/ffmpeg-receiver.log"
 VOLUME_LOG="$ARTIFACT_DIR/volume.log"
 
@@ -37,8 +37,8 @@ require_command() {
 
 fail_with_logs() {
     echo "$1" >&2
-    echo "--- streamer log ---" >&2
-    tail -n 80 "$STREAMER_LOG" 2>/dev/null >&2 || true
+    echo "--- sender log ---" >&2
+    tail -n 80 "$SEND_LOG" 2>/dev/null >&2 || true
     echo "--- ffmpeg receiver log ---" >&2
     tail -n 120 "$FFMPEG_LOG" 2>/dev/null >&2 || true
     echo "--- volume log ---" >&2
@@ -52,10 +52,10 @@ require_command ffprobe
 require_command awk
 
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$INPUT_WAV" "$SDP_FILE" "$RECORDED_WAV" "$STREAMER_LOG" "$FFMPEG_LOG" "$VOLUME_LOG"
+rm -f "$INPUT_WAV" "$SDP_FILE" "$RECORDED_WAV" "$SEND_LOG" "$FFMPEG_LOG" "$VOLUME_LOG"
 
-echo "Building aes67-streamer..."
-cargo build -p aes67-streamer
+echo "Building aes67..."
+cargo build -p aes67
 
 echo "Generating deterministic test WAV..."
 # Generate known-good 48 kHz stereo PCM so the receiver validation can assert
@@ -66,12 +66,12 @@ ffmpeg -nostdin -y -v error \
     -c:a pcm_s24le \
     "$INPUT_WAV"
 
-# ffmpeg receives RTP from SDP, so keep this in sync with the streamer's
+# ffmpeg receives RTP from SDP, so keep this in sync with the sender's
 # payload type, packet time, sample rate, channel count, address, and port.
 cat > "$SDP_FILE" <<SDP
 v=0
 o=- 123456 123456 IN IP4 ${INTERFACE}
-s=AES67 Streamer E2E
+s=AES67 Sender E2E
 c=IN IP4 ${ADDRESS}
 t=0 0
 m=audio ${PORT} RTP/AVP ${PAYLOAD_TYPE}
@@ -81,9 +81,9 @@ a=recvonly
 SDP
 
 echo "Starting ffmpeg RTP receiver on ${ADDRESS}:${PORT}..."
-# Start the receiver before the streamer to avoid dropping the first RTP burst.
+# Start the receiver before the sender to avoid dropping the first RTP burst.
 # localaddr is required for multicast loopback so ffmpeg joins/listens on the
-# same interface that the streamer uses.
+# same interface that the sender uses.
 ffmpeg -nostdin -y -v warning \
     -protocol_whitelist file,udp,rtp \
     -localaddr "$INTERFACE" \
@@ -95,15 +95,15 @@ receiver_pid=$!
 
 sleep 1
 
-echo "Running aes67-streamer for ${DURATION_SECONDS}s..."
+echo "Running aes67 send file for ${DURATION_SECONDS}s..."
 # Run a bounded stream so this script is deterministic in CI and local smoke
 # tests without requiring manual signal handling.
-RUST_LOG=info target/debug/aes67-streamer \
+RUST_LOG=info target/debug/aes67 send file \
     --file "$INPUT_WAV" \
     --address "$ADDRESS" \
     --port "$PORT" \
     --interface "$INTERFACE" \
-    --duration-seconds "$DURATION_SECONDS" >"$STREAMER_LOG" 2>&1 || fail_with_logs "Streamer failed"
+    --duration-seconds "$DURATION_SECONDS" >"$SEND_LOG" 2>&1 || fail_with_logs "Sender failed"
 
 deadline=$((SECONDS + 10))
 while kill -0 "$receiver_pid" 2>/dev/null; do

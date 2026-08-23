@@ -27,15 +27,6 @@ pub struct StreamerArgs {
 pub type Args = StreamerArgs;
 
 #[derive(Debug, Clone)]
-pub enum StreamerCommand {
-    File(StreamerArgs),
-    MusicPlayer(MusicPlayerArgs),
-}
-
-#[derive(Debug, Clone)]
-pub struct MusicPlayerArgs;
-
-#[derive(Debug, Clone)]
 pub struct PlayerArgs {
     pub sdp: Option<String>,
     pub address: Option<String>,
@@ -85,10 +76,6 @@ pub fn parse_streamer_args() -> Result<StreamerArgs> {
     parse_streamer_args_from(std::env::args_os())
 }
 
-pub fn parse_streamer_command() -> Result<StreamerCommand> {
-    parse_streamer_command_from(std::env::args_os())
-}
-
 pub fn parse_player_args() -> Result<PlayerArgs> {
     parse_player_args_from(std::env::args_os())
 }
@@ -119,13 +106,16 @@ where
     streamer_args_from_matches(&matches)
 }
 
-pub fn parse_streamer_command_from<I, T>(args: I) -> Result<StreamerCommand>
+/// Parses arguments for the canonical `aes67 send file` command.
+pub fn parse_send_file_args_from<I, T>(args: I) -> Result<StreamerArgs>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let matches = streamer_cli().try_get_matches_from(args)?;
-    streamer_command_from_matches(&matches)
+    let matches = streamer_cli()
+        .name("aes67 send file")
+        .try_get_matches_from(args)?;
+    streamer_args_from_matches(&matches)
 }
 
 pub fn parse_player_args_from<I, T>(args: I) -> Result<PlayerArgs>
@@ -137,12 +127,36 @@ where
     player_args_from_matches(&matches)
 }
 
+/// Parses arguments for the canonical `aes67 receive listen` command.
+pub fn parse_receive_listen_args_from<I, T>(args: I) -> Result<PlayerArgs>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let matches = player_cli()
+        .name("aes67 receive listen")
+        .try_get_matches_from(args)?;
+    player_args_from_matches(&matches)
+}
+
 pub fn parse_sap_args_from<I, T>(args: I) -> Result<SapArgs>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
     let matches = sap_cli().try_get_matches_from(args)?;
+    sap_args_from_matches(&matches)
+}
+
+/// Parses arguments for the canonical `aes67 receive discover` command.
+pub fn parse_receive_discover_args_from<I, T>(args: I) -> Result<SapArgs>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let matches = sap_cli()
+        .name("aes67 receive discover")
+        .try_get_matches_from(args)?;
     sap_args_from_matches(&matches)
 }
 
@@ -156,12 +170,10 @@ where
 }
 
 fn streamer_cli() -> Command {
-    Command::new("aes67-streamer")
+    Command::new("aes67 send file")
         .version(env!("AES67_TOOLS_VERSION"))
         .author("Jiajun Yang")
         .about("Cross-platform CLI tool for streaming audio files over RTP networks with AES67 compliance")
-        .args_conflicts_with_subcommands(true)
-        .subcommand(music_player_cli())
         .arg(
             Arg::new("file")
                 .short('f')
@@ -234,18 +246,8 @@ fn streamer_cli() -> Command {
         )
 }
 
-fn music_player_cli() -> Command {
-    Command::new("music-player")
-        .about("Open a terminal music player that guides stream setup in the UI")
-        .long_about(
-            "Open a terminal music player that guides stream setup in the UI.\n\n\
-             Stream address, interface, SAP/PTP options, and playlist choices are configured \
-             interactively and persisted by the player.",
-        )
-}
-
 fn player_cli() -> Command {
-    Command::new("aes67-player")
+    Command::new("aes67 receive listen")
         .version(env!("AES67_TOOLS_VERSION"))
         .author("Jiajun Yang")
         .about("CLI tool for receiving and playing AES67 RTP audio streams")
@@ -310,7 +312,7 @@ fn player_cli() -> Command {
                 .short('o')
                 .long("output-device")
                 .value_name("DEVICE")
-                .help("CPAL output device index from --list-devices or device name"),
+                .help("CPAL output device index from `aes67 receive devices` or device name"),
         )
         .arg(
             Arg::new("list-devices")
@@ -343,7 +345,7 @@ fn player_cli() -> Command {
 }
 
 fn sap_cli() -> Command {
-    Command::new("aes67-sap")
+    Command::new("aes67 receive discover")
         .version(env!("AES67_TOOLS_VERSION"))
         .author("Jiajun Yang")
         .about("Browse AES67 streams announced with SAP")
@@ -394,7 +396,7 @@ fn sap_cli() -> Command {
 }
 
 fn tester_cli() -> Command {
-    Command::new("aes67-tester")
+    Command::new("aes67-route-test")
         .version(env!("AES67_TOOLS_VERSION"))
         .author("Jiajun Yang")
         .about("Transmit and monitor an AES67 100 Hz diagnostic tone")
@@ -420,16 +422,6 @@ fn tester_cli() -> Command {
                 .help("Enable verbose logging")
                 .action(clap::ArgAction::SetTrue),
         )
-}
-
-fn streamer_command_from_matches(matches: &ArgMatches) -> Result<StreamerCommand> {
-    match matches.subcommand() {
-        Some(("music-player", subcommand)) => {
-            music_player_args_from_matches(subcommand).map(StreamerCommand::MusicPlayer)
-        }
-        Some((name, _)) => Err(anyhow!("unknown aes67-streamer command: {name}")),
-        None => streamer_args_from_matches(matches).map(StreamerCommand::File),
-    }
 }
 
 fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
@@ -488,10 +480,6 @@ fn streamer_args_from_matches(matches: &ArgMatches) -> Result<StreamerArgs> {
         session_name: merged_session_name(config.as_ref()),
         packet_time_ms: merged_packet_time_ms(config.as_ref())?,
     })
-}
-
-fn music_player_args_from_matches(_matches: &ArgMatches) -> Result<MusicPlayerArgs> {
-    Ok(MusicPlayerArgs)
 }
 
 fn tester_args_from_matches(matches: &ArgMatches) -> Result<TesterArgs> {
@@ -760,7 +748,7 @@ mod tests {
             .as_nanos();
         let sequence = TEMP_CONFIG_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "aes67-streamer-config-test-{}-{id}-{sequence}.toml",
+            "aes67 send file-config-test-{}-{id}-{sequence}.toml",
             std::process::id()
         ));
         fs::write(&path, contents).expect("temp config should be writable");
@@ -799,7 +787,7 @@ mod tests {
     #[test]
     fn test_duration_seconds_parsed() {
         let args = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--file",
             "test.wav",
             "--address",
@@ -816,7 +804,7 @@ mod tests {
     #[test]
     fn test_duration_seconds_must_be_positive() {
         let result = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--file",
             "test.wav",
             "--address",
@@ -845,7 +833,7 @@ mod tests {
         );
 
         let args = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--config",
             path.to_str().expect("temp path should be utf-8"),
         ])
@@ -879,7 +867,7 @@ mod tests {
         );
 
         let args = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--config",
             path.to_str().expect("temp path should be utf-8"),
             "--file",
@@ -907,7 +895,7 @@ mod tests {
 
     #[test]
     fn missing_file_after_merge_is_an_error() {
-        let result = parse_args_from(["aes67-streamer", "--address", "239.192.1.1"]);
+        let result = parse_args_from(["aes67 send file", "--address", "239.192.1.1"]);
 
         assert!(result.is_err());
     }
@@ -915,13 +903,13 @@ mod tests {
     #[test]
     fn invalid_config_path_is_an_error_even_with_cli_values() {
         let missing_path = std::env::temp_dir().join(format!(
-            "aes67-streamer-config-test-missing-{}.toml",
+            "aes67 send file-config-test-missing-{}.toml",
             std::process::id()
         ));
         fs::remove_file(&missing_path).ok();
 
         let result = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--config",
             missing_path
                 .to_str()
@@ -938,7 +926,7 @@ mod tests {
     #[test]
     fn loop_playback_cli_flag_enables_looping() {
         let args = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--file",
             "test.wav",
             "--address",
@@ -969,7 +957,7 @@ mod tests {
         );
 
         let args = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--config",
             path.to_str().expect("temp path should be utf-8"),
         ])
@@ -1014,7 +1002,7 @@ mod tests {
         );
 
         let args = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--config",
             path.to_str().expect("temp path should be utf-8"),
         ])
@@ -1060,7 +1048,7 @@ mod tests {
         assert_eq!(config.stream.payload_type, Some(128));
 
         let result = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--config",
             path.to_str().expect("temp path should be utf-8"),
         ]);
@@ -1084,7 +1072,7 @@ mod tests {
         );
 
         let result = parse_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--config",
             path.to_str().expect("temp path should be utf-8"),
         ]);
@@ -1097,7 +1085,7 @@ mod tests {
     #[test]
     fn parse_streamer_args_from_keeps_existing_streamer_cli_behavior() {
         let args = parse_streamer_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--file",
             "test.wav",
             "--address",
@@ -1111,53 +1099,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_streamer_command_from_keeps_file_mode_without_subcommand() {
-        let command = parse_streamer_command_from([
-            "aes67-streamer",
-            "--file",
-            "track.wav",
-            "--address",
-            "239.69.83.1",
-            "--port",
-            "5004",
-        ])
-        .expect("existing file mode should still parse");
-
-        let StreamerCommand::File(args) = command else {
-            panic!("root args should remain file mode");
-        };
-
-        assert_eq!(args.file, "track.wav");
-        assert_eq!(args.address, "239.69.83.1");
-        assert_eq!(args.port, 5004);
-    }
-
-    #[test]
-    fn parse_streamer_command_from_accepts_music_player_subcommand() {
-        let command = parse_streamer_command_from(["aes67-streamer", "music-player"])
-            .expect("music-player mode should parse without CLI stream settings");
-
-        let StreamerCommand::MusicPlayer(_args) = command else {
-            panic!("music-player subcommand should select music-player mode");
-        };
-    }
-
-    #[test]
-    fn parse_streamer_command_from_rejects_music_player_stream_settings() {
-        let result = parse_streamer_command_from([
-            "aes67-streamer",
-            "music-player",
-            "--address",
-            "239.69.83.1",
-        ]);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn streamer_cli_accepts_sdp_output_path() {
         let args = parse_streamer_args_from([
-            "aes67-streamer",
+            "aes67 send file",
             "--file",
             "test.wav",
             "--address",
@@ -1173,7 +1117,7 @@ mod tests {
     #[test]
     fn player_basic_cli_supplies_receive_format_defaults() {
         let args = parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1204,7 +1148,7 @@ mod tests {
     #[test]
     fn player_basic_cli_accepts_explicit_receive_format() {
         let args = parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1229,7 +1173,7 @@ mod tests {
     #[test]
     fn player_basic_cli_rejects_static_payload_type_for_l24() {
         let result = parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1243,20 +1187,22 @@ mod tests {
 
     #[test]
     fn player_cli_requires_sdp_or_basic_address_and_port() {
-        assert!(parse_player_args_from(["aes67-player"]).is_err());
-        assert!(parse_player_args_from(["aes67-player", "--address", "239.192.1.1"]).is_err());
-        assert!(parse_player_args_from(["aes67-player", "--port", "5004"]).is_err());
+        assert!(parse_player_args_from(["aes67 receive listen"]).is_err());
+        assert!(
+            parse_player_args_from(["aes67 receive listen", "--address", "239.192.1.1"]).is_err()
+        );
+        assert!(parse_player_args_from(["aes67 receive listen", "--port", "5004"]).is_err());
     }
 
     #[test]
     fn player_cli_list_devices_does_not_require_stream_args() {
-        let long_args = parse_player_args_from(["aes67-player", "--list-devices"])
+        let long_args = parse_player_args_from(["aes67 receive listen", "--list-devices"])
             .expect("device listing should not require stream args");
         assert!(long_args.list_devices);
         assert_eq!(long_args.address, None);
         assert_eq!(long_args.port, None);
 
-        let short_args = parse_player_args_from(["aes67-player", "-L"])
+        let short_args = parse_player_args_from(["aes67 receive listen", "-L"])
             .expect("short device listing should not require stream args");
         assert!(short_args.list_devices);
     }
@@ -1264,7 +1210,7 @@ mod tests {
     #[test]
     fn player_sdp_mode_keeps_runtime_args() {
         let args = parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--sdp",
             "tests/example.sdp",
             "--interface",
@@ -1290,16 +1236,28 @@ mod tests {
     fn player_sdp_mode_rejects_stream_format_overrides() {
         for args in [
             [
-                "aes67-player",
+                "aes67 receive listen",
                 "--sdp",
                 "stream.sdp",
                 "--address",
                 "239.1.1.1",
             ],
-            ["aes67-player", "--sdp", "stream.sdp", "--port", "5004"],
-            ["aes67-player", "--sdp", "stream.sdp", "--channels", "2"],
             [
-                "aes67-player",
+                "aes67 receive listen",
+                "--sdp",
+                "stream.sdp",
+                "--port",
+                "5004",
+            ],
+            [
+                "aes67 receive listen",
+                "--sdp",
+                "stream.sdp",
+                "--channels",
+                "2",
+            ],
+            [
+                "aes67 receive listen",
                 "--sdp",
                 "stream.sdp",
                 "--payload-type",
@@ -1313,7 +1271,7 @@ mod tests {
     #[test]
     fn player_cli_validates_receive_format() {
         assert!(parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1323,7 +1281,7 @@ mod tests {
         ])
         .is_err());
         assert!(parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1333,7 +1291,7 @@ mod tests {
         ])
         .is_err());
         assert!(parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1343,7 +1301,7 @@ mod tests {
         ])
         .is_err());
         assert!(parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1357,7 +1315,7 @@ mod tests {
     #[test]
     fn player_cli_accepts_hidden_test_null_output() {
         let args = parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1372,7 +1330,7 @@ mod tests {
     #[test]
     fn player_cli_does_not_expose_output_backend_choice() {
         assert!(parse_player_args_from([
-            "aes67-player",
+            "aes67 receive listen",
             "--address",
             "239.192.1.1",
             "--port",
@@ -1385,12 +1343,12 @@ mod tests {
 
     #[test]
     fn sap_cli_requires_interface() {
-        assert!(parse_sap_args_from(["aes67-sap"]).is_err());
+        assert!(parse_sap_args_from(["aes67 receive discover"]).is_err());
     }
 
     #[test]
     fn sap_cli_defaults_to_continuous_multicast_browse() {
-        let args = parse_sap_args_from(["aes67-sap", "--interface", "127.0.0.1"])
+        let args = parse_sap_args_from(["aes67 receive discover", "--interface", "127.0.0.1"])
             .expect("SAP browser args should parse");
 
         assert_eq!(args.interface, "127.0.0.1");
@@ -1404,7 +1362,7 @@ mod tests {
     #[test]
     fn sap_cli_accepts_once_sdp_output_dir_and_verbose() {
         let args = parse_sap_args_from([
-            "aes67-sap",
+            "aes67 receive discover",
             "--interface",
             "en0",
             "--once",
@@ -1423,7 +1381,7 @@ mod tests {
     #[test]
     fn sap_cli_accepts_hidden_listen_override_for_tests() {
         let args = parse_sap_args_from([
-            "aes67-sap",
+            "aes67 receive discover",
             "--interface",
             "127.0.0.1",
             "--test-address",
@@ -1439,22 +1397,22 @@ mod tests {
 
     #[test]
     fn tester_cli_requires_a_config_file() {
-        assert!(parse_tester_args_from(["aes67-tester"]).is_err());
+        assert!(parse_tester_args_from(["aes67-route-test"]).is_err());
     }
 
     #[test]
     fn tester_cli_parses_runtime_overrides() {
         let args = parse_tester_args_from([
-            "aes67-tester",
+            "aes67-route-test",
             "--config",
-            "tests/aes67-tester.toml",
+            "tests/route-test.toml",
             "--duration-seconds",
             "1.5",
             "--verbose",
         ])
         .expect("tester args should parse");
 
-        assert_eq!(args.config_file, "tests/aes67-tester.toml");
+        assert_eq!(args.config_file, "tests/route-test.toml");
         assert_eq!(args.duration_seconds, Some(1.5));
         assert!(args.verbose);
     }
@@ -1462,9 +1420,9 @@ mod tests {
     #[test]
     fn tester_cli_rejects_non_positive_duration() {
         assert!(parse_tester_args_from([
-            "aes67-tester",
+            "aes67-route-test",
             "--config",
-            "tests/aes67-tester.toml",
+            "tests/route-test.toml",
             "--duration-seconds",
             "0",
         ])

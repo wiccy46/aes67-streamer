@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -288,7 +288,7 @@ mod tests {
     fn parses_repository_example_sdp() {
         let session = parse_sdp(include_str!("../../../../tests/example.sdp")).unwrap();
 
-        assert_eq!(session.session_name.as_deref(), Some("AES67 Streamer"));
+        assert_eq!(session.session_name.as_deref(), Some("AES67 Send"));
         assert_eq!(session.address, Ipv4Addr::new(239, 192, 1, 1));
         assert_eq!(session.ttl, Some(32));
         assert_eq!(session.port, 5004);
@@ -370,30 +370,38 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_format_values() {
-        assert!(parse_sdp(
-            "c=IN IP4 239.192.1.1/32\n\
+        assert!(
+            parse_sdp(
+                "c=IN IP4 239.192.1.1/32\n\
                  m=audio 5004 RTP/AVP 97\n\
                  a=rtpmap:97 L16/48000/2\n"
-        )
-        .is_err());
-        assert!(parse_sdp(
-            "c=IN IP4 239.192.1.1/32\n\
+            )
+            .is_err()
+        );
+        assert!(
+            parse_sdp(
+                "c=IN IP4 239.192.1.1/32\n\
                  m=audio 5004 RTP/AVP 97\n\
                  a=rtpmap:97 L24/44100/2\n"
-        )
-        .is_err());
-        assert!(parse_sdp(
-            "c=IN IP4 239.192.1.1/32\n\
+            )
+            .is_err()
+        );
+        assert!(
+            parse_sdp(
+                "c=IN IP4 239.192.1.1/32\n\
                  m=audio 5004 RTP/AVP 97\n\
                  a=rtpmap:97 L24/48000/9\n"
-        )
-        .is_err());
-        assert!(parse_sdp(
-            "c=IN IP4 239.192.1.1/32\n\
+            )
+            .is_err()
+        );
+        assert!(
+            parse_sdp(
+                "c=IN IP4 239.192.1.1/32\n\
                  m=audio 5004 RTP/AVP 97\n\
                  a=rtpmap:97 L24/48000/2\n\
                  a=ptime:0.5\n"
-        )
-        .is_err());
+            )
+            .is_err()
+        );
     }
 }

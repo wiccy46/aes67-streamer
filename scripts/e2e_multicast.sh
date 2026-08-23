@@ -10,7 +10,7 @@ This script is intentionally not part of CI because multicast routing and
 interface behavior depends on the host and network.
 
 Environment:
-  AES67_E2E_INTERFACE         Required local interface IPv4 address for ffmpeg localaddr and streamer --interface
+  AES67_E2E_INTERFACE         Required local interface IPv4 address for ffmpeg localaddr and sender --interface
   AES67_E2E_ADDRESS           Multicast group, default 239.69.67.67
   AES67_E2E_PORT              RTP port, default 55004
   AES67_E2E_DURATION_SECONDS  Stream and receive duration, default 2
@@ -43,7 +43,7 @@ ARTIFACT_DIR="${AES67_E2E_ARTIFACT_DIR:-target/e2e-multicast}"
 INPUT_WAV="$ARTIFACT_DIR/input-48k-stereo.wav"
 SDP_FILE="$ARTIFACT_DIR/stream.sdp"
 RECORDED_WAV="$ARTIFACT_DIR/recorded.wav"
-STREAMER_LOG="$ARTIFACT_DIR/streamer.log"
+SEND_LOG="$ARTIFACT_DIR/sender.log"
 FFMPEG_LOG="$ARTIFACT_DIR/ffmpeg-receiver.log"
 VOLUME_LOG="$ARTIFACT_DIR/volume.log"
 
@@ -90,8 +90,8 @@ validate_ipv4() {
 
 fail_with_logs() {
     echo "$1" >&2
-    echo "--- streamer log ---" >&2
-    tail -n 80 "$STREAMER_LOG" 2>/dev/null >&2 || true
+    echo "--- sender log ---" >&2
+    tail -n 80 "$SEND_LOG" 2>/dev/null >&2 || true
     echo "--- ffmpeg receiver log ---" >&2
     tail -n 120 "$FFMPEG_LOG" 2>/dev/null >&2 || true
     echo "--- volume log ---" >&2
@@ -133,10 +133,10 @@ require_command ffprobe
 require_command awk
 
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$INPUT_WAV" "$SDP_FILE" "$RECORDED_WAV" "$STREAMER_LOG" "$FFMPEG_LOG" "$VOLUME_LOG"
+rm -f "$INPUT_WAV" "$SDP_FILE" "$RECORDED_WAV" "$SEND_LOG" "$FFMPEG_LOG" "$VOLUME_LOG"
 
-echo "Building aes67-streamer..."
-cargo build -p aes67-streamer
+echo "Building aes67..."
+cargo build -p aes67
 
 echo "Generating deterministic test WAV..."
 ffmpeg -nostdin -y -v error \
@@ -151,7 +151,7 @@ ffmpeg -nostdin -y -v error \
 cat > "$SDP_FILE" <<SDP
 v=0
 o=- 123456 123456 IN IP4 ${INTERFACE}
-s=AES67 Streamer Multicast E2E
+s=AES67 Sender Multicast E2E
 c=IN IP4 ${ADDRESS}/32
 t=0 0
 m=audio ${PORT} RTP/AVP ${PAYLOAD_TYPE}
@@ -172,13 +172,13 @@ receiver_pid=$!
 
 sleep 1
 
-echo "Running aes67-streamer multicast send for ${DURATION_SECONDS}s..."
-RUST_LOG=info target/debug/aes67-streamer \
+echo "Running aes67 send file for ${DURATION_SECONDS}s..."
+RUST_LOG=info target/debug/aes67 send file \
     --file "$INPUT_WAV" \
     --address "$ADDRESS" \
     --port "$PORT" \
     --interface "$INTERFACE" \
-    --duration-seconds "$DURATION_SECONDS" >"$STREAMER_LOG" 2>&1 || fail_with_logs "Streamer failed"
+    --duration-seconds "$DURATION_SECONDS" >"$SEND_LOG" 2>&1 || fail_with_logs "Sender failed"
 
 deadline=$((SECONDS + 10))
 while kill -0 "$receiver_pid" 2>/dev/null; do

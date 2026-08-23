@@ -4,15 +4,12 @@
 [![AES67 Compliant](https://img.shields.io/badge/AES67-oriented-blue)](https://www.aes.org/publications/standards/search.cfm?docID=96)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-Command-line tools for sending and receiving AES67-oriented RTP audio streams.
+One application for sending, receiving, and discovering AES67-oriented RTP
+audio streams:
 
-- `aes67-streamer` streams audio files as 48 kHz, 24-bit L24 RTP.
-- `aes67-player` receives AES67 RTP streams and plays them through the local
-  audio output device.
-- `aes67-sap` browses AES67 streams announced with SAP and can write discovered
-  SDP payloads to files.
-- `aes67-tester` sends a 100 Hz diagnostic tone on eight channels and monitors
-  a configured AES67 return stream for continuity and phase delay.
+- `aes67 send` puts an audio file or queue on the network.
+- `aes67 receive` discovers a stream, receives it, and listens through local
+  audio output.
 
 The current release target is one stream with 1-8 channels on macOS and Linux.
 
@@ -24,13 +21,10 @@ The current release target is one stream with 1-8 channels on macOS and Linux.
 brew install wiccy46/aes67/aes67-tools
 ```
 
-This installs all public binaries:
+This installs the `aes67` command:
 
 ```bash
-aes67-streamer --version
-aes67-player --version
-aes67-sap --version
-aes67-tester --version
+aes67 --version
 ```
 
 ### GitHub Release Archive
@@ -50,7 +44,7 @@ git clone https://github.com/wiccy46/aes67-tools.git
 cd aes67-tools
 cargo build --release
 ```
-On Linux, building the player requires ALSA development headers. On
+On Linux, building the receiver requires ALSA development headers. On
 Ubuntu/Debian:
 
 ```bash
@@ -68,7 +62,7 @@ sudo dnf install alsa-lib-devel pkgconf-pkg-config
 Stream an audio file to a multicast address:
 
 ```bash
-aes67-streamer \
+aes67 send file \
   --file audio.wav \
   --address 239.69.83.1 \
   --port 5004 \
@@ -76,50 +70,50 @@ aes67-streamer \
   --sdp-output stream.sdp
 ```
 
-The streamer decodes WAV, FLAC, MP3, and AIFF files, resamples to 48 kHz, and
+The sender decodes WAV, FLAC, MP3, and AIFF files, resamples to 48 kHz, and
 sends L24 RTP packets. It can also announce the generated SDP over SAP.
 
 To repeat the source file continuously:
 
 ```bash
-aes67-streamer --file audio.wav --address 239.69.83.1 --loop
+aes67 send file --file audio.wav --address 239.69.83.1 --loop
 ```
 
 To stop after a bounded duration:
 
 ```bash
-aes67-streamer --file audio.wav --address 239.69.83.1 --duration-seconds 30
+aes67 send file --file audio.wav --address 239.69.83.1 --duration-seconds 30
 ```
 
-## Interactive Music Player
+## Send a Queue Interactively
 
-Use the terminal music player to build a queue and stream tracks with the same
-AES67 streamer engine:
+Use the terminal queue sender to build a queue and stream tracks with the same
+AES67 sender engine:
 
 ```bash
-aes67-streamer music-player
+aes67 send queue
 ```
 
 On first launch, choose a stream address and local interface, then press `s`
-to save. In the player, press `a` to add an audio file or a folder, use the
+to save. In the queued sender, press `a` to add an audio file or a folder, use
+the
 arrow keys to select a queue item, and press Space to start or stop streaming.
-The player stores its stream settings and queue in `music-player.toml` under
+The queued sender stores its stream settings and queue in `send-queue.toml` under
 the platform configuration directory. While editing Settings, `s` saves the
 changes and Esc (or `q`) discards them.
 
-## Receive Audio and Playback on Output Device
+## Receive and Listen on a Local Output Device
 
 List output devices:
 
 ```bash
-aes67-player --list-devices
-aes67-player -L
+aes67 receive devices
 ```
 
 Receive with basic address and port arguments:
 
 ```bash
-aes67-player \
+aes67 receive listen \
   --address 239.69.83.1 \
   --port 5004 \
   --interface 192.168.1.100
@@ -128,63 +122,34 @@ aes67-player \
 Receive from an SDP file:
 
 ```bash
-aes67-player \
+aes67 receive listen \
   --sdp stream.sdp \
   --interface 192.168.1.100
 ```
 
-Select an output device by index or name from `--list-devices`:
+Select an output device by index or name from `aes67 receive devices`:
 
 ```bash
-aes67-player --sdp stream.sdp --output-device 0
-aes67-player --sdp stream.sdp -o "Built-in Audio"
+aes67 receive listen --sdp stream.sdp --output-device 0
+aes67 receive listen --sdp stream.sdp -o "Built-in Audio"
 ```
 
 Set initial playout latency:
 
 ```bash
-aes67-player --sdp stream.sdp --latency-ms 75
+aes67 receive listen --sdp stream.sdp --latency-ms 75
 ```
 
-The player logs a final summary when it exits. Clean playback should report zero
+The receiver logs a final summary when it exits. Clean playback should report zero
 for RTP silence frames, jitter lost/late/dropped-full packets, jitter timestamp
 discontinuities, output silence frames, and output dropped samples.
 
-## Test an AES67 Return Path
-
-`aes67-tester` sends the same 100 Hz L24 sine wave on all eight channels at
-48 kHz, then monitors a separately configured return stream. Use it when the
-route under test takes the tester's transmit stream through the AES67 equipment
-and emits a return stream back to the tester.
-
-```bash
-aes67-tester --config aes67-tester.toml --duration-seconds 60
-```
-
-Start with [examples/aes67-tester.toml](examples/aes67-tester.toml), set the
-two stream addresses/ports and local interfaces, then set `receiver.sender` or
-`receiver.ssrc` when the return multicast group can contain other RTP streams.
-The transmit and return endpoints should normally be different. If they are the
-same and no sender filter is set, the tester warns because it can merely observe
-its own transmitted packets instead of the route under test.
-
-The live and final summaries report RTP sequence gaps, reordered packets,
-timestamp discontinuities, sample-step discontinuities per channel, and tone
-windows below the configured input threshold. Any sequence gap, timestamp or
-sample discontinuity, or missing tone causes a non-zero exit status.
-
-The reported `phase_latency_mod_10ms` is a 100 Hz phase delay only. A pure
-100 Hz tone repeats every 10 ms, so this tool cannot determine absolute
-end-to-end latency: for example, 1 ms and 11 ms have the same result. Use a
-non-periodic marker plus a shared, verified PTP timing reference when an
-absolute latency measurement is required.
-
-## Browse SAP Announcements
+## Discover SAP Announcements
 
 Browse AES67 streams announced on the local SAP multicast group:
 
 ```bash
-aes67-sap --interface 192.168.1.100
+aes67 receive discover --interface 192.168.1.100
 ```
 
 The browser prints one line when a stream is discovered, changed, removed, or
@@ -194,25 +159,25 @@ for updated, and `-` for removed or expired.
 To exit after the first discovered AES67 SAP stream:
 
 ```bash
-aes67-sap --interface 192.168.1.100 --once
+aes67 receive discover --interface 192.168.1.100 --once
 ```
 
-To save discovered SDP payloads for `aes67-player`:
+To save discovered SDP payloads for `aes67 receive listen`:
 
 ```bash
-aes67-sap --interface 192.168.1.100 --sdp-output-dir discovered-sdp
-aes67-player --sdp discovered-sdp/sap-192.168.1.50-1234.sdp --interface 192.168.1.100
+aes67 receive discover --interface 192.168.1.100 --sdp-output-dir discovered-sdp
+aes67 receive listen --sdp discovered-sdp/sap-192.168.1.50-1234.sdp --interface 192.168.1.100
 ```
 
-## Streamer Configuration File
+## Send File Configuration
 
-The streamer can load runtime settings from TOML:
+The file sender can load runtime settings from TOML:
 
 ```bash
-aes67-streamer --config streamer.toml
+aes67 send file --config send-file.toml
 ```
 
-Example `streamer.toml`:
+Example `send-file.toml`:
 
 ```toml
 [audio]
@@ -239,55 +204,14 @@ verbose = false
 ```
 
 CLI flags override config file values. For example, this uses the file,
-address, and interface from `streamer.toml`, but streams on port `6000`:
+address, and interface from `send-file.toml`, but streams on port `6000`:
 
 ```bash
-aes67-streamer --config streamer.toml --port 6000
-```
-
-## Tester Configuration File
-
-The tester uses one TOML file to make its transmit and return streams explicit:
-
-```toml
-[transmitter]
-address = "239.69.83.10"
-port = 5004
-interface = "192.168.1.100"
-payload_type = 97
-ptp_domain = 0
-ttl = 32
-sap = false
-
-[receiver]
-address = "239.69.83.11"
-port = 5004
-interface = "192.168.1.100"
-payload_type = 97
-sender = "192.168.1.50" # optional, but recommended on shared groups
-# ssrc = 305419896       # optional expected RTP SSRC for the return stream
-
-[signal]
-amplitude = 0.5
-minimum_detectable_amplitude = 0.05
-discontinuity_multiplier = 1.25
-
-[runtime]
-duration_seconds = 60
-report_interval_seconds = 1
-verbose = false
-```
-
-The signal format is deliberately fixed: 100 Hz, 48 kHz, eight channels, L24,
-and 1 ms (48-frame) packets. `minimum_detectable_amplitude` is the decoded PCM
-amplitude expected on every return channel; lower it only if the known-good
-return path attenuates the diagnostic tone. The discontinuity threshold is the
-maximum normal adjacent-sample change for the configured tone amplitude,
-multiplied by `discontinuity_multiplier`.
+aes67 send file --config send-file.toml --port 6000
 
 ## CLI Reference
 
-### `aes67-streamer`
+### `aes67 send file`
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -302,7 +226,7 @@ multiplied by `discontinuity_multiplier`.
 | `--loop` | Repeat the audio file instead of stopping at end-of-file | `false` |
 | `--verbose` | Enable verbose logging | `false` |
 
-### `aes67-player`
+### `aes67 receive listen`
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -314,26 +238,17 @@ multiplied by `discontinuity_multiplier`.
 | `--channels` | Channel count for basic receive mode | `2` |
 | `--payload-type` | RTP payload type for basic receive mode | `97` |
 | `--latency-ms` | Initial playout latency | `50` |
-| `--output-device` / `-o` | Output device index or name from `--list-devices` | Default output device |
-| `--list-devices` / `-L` | List output devices and exit | - |
+| `--output-device` / `-o` | Output device index or name from `aes67 receive devices` | Default output device |
 | `--duration-seconds` | Stop receiving after a bounded duration | Unlimited |
 | `--verbose` / `-v` | Enable verbose logging | `false` |
 
-### `aes67-sap`
+### `aes67 receive discover`
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--interface` / `-i` | Local interface name or IPv4 address used for SAP multicast | Required |
 | `--once` | Exit after the first discovered AES67 SAP stream | Continuous browse |
 | `--sdp-output-dir` | Write discovered SDP payloads to this directory | None |
-| `--verbose` / `-v` | Enable verbose logging | `false` |
-
-### `aes67-tester`
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--config` / `-c` | Paired transmit/return stream TOML configuration | Required |
-| `--duration-seconds` | Stop after this duration; overrides `runtime.duration_seconds` | Unlimited |
 | `--verbose` / `-v` | Enable verbose logging | `false` |
 
 ## AES67 Defaults
@@ -348,11 +263,11 @@ multiplied by `discontinuity_multiplier`.
 - PTP DSCP: 46 / EF.
 - SAP DSCP: 24 / CS3.
 
-The streamer generates SDP from the loaded file and stream settings, logs it at
+The sender generates SDP from the loaded file and stream settings, logs it at
 startup, can write it to a file with `--sdp-output` or `stream.sdp_output`, and
 announces it over SAP by default. The SAP browser can discover those
-announcements and write SDP files that the player can join with
-`aes67-player --sdp stream.sdp`.
+announcements and write SDP files that the receiver can join with
+`aes67 receive listen --sdp stream.sdp`.
 
 ## Troubleshooting
 
@@ -384,7 +299,7 @@ tcpdump -i eth0 port 319
 
 ### PTP Permission Error On Linux
 
-The streamer PTP client uses the standard PTP UDP ports `319` and `320`.
+The sender PTP client uses the standard PTP UDP ports `319` and `320`.
 Binding ports below `1024` normally requires elevated privileges on Linux. RTP
 streaming may still run, but PTP can log:
 
@@ -395,8 +310,8 @@ PTP loop error: Permission denied (os error 13)
 For a release build, grant the binary the required network capabilities:
 
 ```bash
-cargo build --release -p aes67-streamer
-sudo setcap cap_net_bind_service,cap_net_admin+ep target/release/aes67-streamer
+cargo build --release -p aes67
+sudo setcap cap_net_bind_service,cap_net_admin+ep target/release/aes67
 ```
 
 `cap_net_bind_service` allows binding the PTP ports. `cap_net_admin` may be
@@ -405,22 +320,18 @@ needed for DSCP/TOS socket options. Reapply capabilities after rebuilding.
 ## Current Scope
 
 This project targets the core pieces required for a first single-stream AES67
-sender/player release:
+Send/Receive release:
 
 - AES67-style RTP media: 48 kHz, 24-bit L24 payloads over RTP.
 - AES67-style RTP receive: single-stream L24 receive, jitter buffering,
   SDP/basic-CLI configuration, and CPAL output.
-- AES67 route qualification: fixed-format 100 Hz, eight-channel transmit with
-  real-time return-stream continuity checks and 100 Hz phase delay modulo
-  10 ms.
 - RFC 3550 RTP sequence numbers, timestamps, payload type, and SSRC.
 - IEEE 1588-2008 PTPv2 message handling and local master fallback.
-- SAP/SDP announcement and discovery through the dedicated `aes67-sap` browser.
+- SAP/SDP announcement and discovery through `aes67 receive discover`.
 
 The first release does not claim hard real-time scheduling, hardware clock
 discipline, kernel-bypass networking, multiple simultaneous streams, full ST
-2110 system compliance, or absolute latency measurement from the tester's pure
-100 Hz signal. Player playout uses the local audio device clock in this release;
+2110 system compliance, or PTP-locked device playout. Receiver playout uses the local audio device clock in this release;
 PTP-locked playout is future work.
 
 ## More Information
