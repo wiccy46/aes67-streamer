@@ -180,6 +180,11 @@ impl Aes67Player {
         Ok(())
     }
 
+    /// Return a copyable SDP description of the RTP stream this player joins.
+    pub fn get_receiver_sdp(&self) -> String {
+        self.session.to_receiver_sdp()
+    }
+
     fn playout_next_packet(&mut self, decode_buffer: &mut Vec<f32>) -> Result<bool> {
         let Some(packet) = self.jitter.pop_next() else {
             return Ok(false);
