@@ -56,6 +56,8 @@ async fn main() {
         }
     };
 
+    print_sdp(&player.get_receiver_sdp());
+
     let supervisor = RuntimeSupervisor::new();
     if let Err(e) = supervisor.run_player(&mut player).await {
         log::error!("AES67 playback failed: {e:#}");
@@ -63,4 +65,16 @@ async fn main() {
     }
 
     log::info!("AES67 player completed successfully");
+}
+
+fn print_sdp(sdp: &str) {
+    use std::io::Write;
+
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(sdp.as_bytes())
+        .expect("player SDP should write to standard output");
+    stdout
+        .flush()
+        .expect("player SDP should flush to standard output");
 }

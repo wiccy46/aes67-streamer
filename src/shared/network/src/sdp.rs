@@ -27,6 +27,51 @@ impl Aes67SessionDescription {
     pub fn get_frames_per_packet(&self) -> u32 {
         self.sample_rate * self.packet_time_ms / 1000
     }
+
+    /// Render this session as a copyable SDP description for an RTP receiver.
+    ///
+    /// The origin is deliberately unspecified because this process only joins
+    /// the stream; the connection address, format, and timing are taken from
+    /// the active receive session.
+    pub fn to_receiver_sdp(&self) -> String {
+        let connection = match self.ttl {
+            Some(ttl) => format!("{}/{}", self.address, ttl),
+            None => self.address.to_string(),
+        };
+        let session_name = self
+            .session_name
+            .as_deref()
+            .unwrap_or("AES67 Receive Stream");
+        let ts_refclk = self
+            .ts_refclk
+            .as_deref()
+            .map(|value| format!("a=ts-refclk:{value}\r\n"))
+            .unwrap_or_default();
+        let mediaclk = self
+            .mediaclk
+            .as_deref()
+            .map(|value| format!("a=mediaclk:{value}\r\n"))
+            .unwrap_or_default();
+
+        format!(
+            "v=0\r\n\
+             o=- 0 0 IN IP4 0.0.0.0\r\n\
+             s={session_name}\r\n\
+             c=IN IP4 {connection}\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP {}\r\n\
+             a=rtpmap:{} L24/{}/{}\r\n\
+             a=ptime:{}\r\n\
+             {ts_refclk}{mediaclk}\
+             a=recvonly\r\n",
+            self.port,
+            self.payload_type,
+            self.payload_type,
+            self.sample_rate,
+            self.channels,
+            self.packet_time_ms,
+        )
+    }
 }
 
 pub fn parse_sdp_file(path: impl AsRef<Path>) -> Result<Aes67SessionDescription> {

@@ -80,6 +80,8 @@ async fn run_file_streamer(args: StreamerArgs) {
         }
     };
 
+    print_sdp(&streamer.get_sdp());
+
     if let Some(path) = args.sdp_output.as_deref() {
         if let Err(e) = streamer.write_sdp_file(path) {
             log::error!("Failed to write SDP file: {e:#}");
@@ -95,4 +97,16 @@ async fn run_file_streamer(args: StreamerArgs) {
     }
 
     log::info!("AES67 streaming completed successfully")
+}
+
+fn print_sdp(sdp: &str) {
+    use std::io::Write;
+
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(sdp.as_bytes())
+        .expect("stream SDP should write to standard output");
+    stdout
+        .flush()
+        .expect("stream SDP should flush to standard output");
 }
