@@ -5,25 +5,26 @@ README is intentionally focused on installing and running the tools.
 
 ## Workspace Overview
 
-This is a Cargo workspace with three tool crates and five shared crates:
+This is a Cargo workspace with one shipped application, one diagnostic tool,
+and shared libraries:
 
-- `src/aes67-streamer`: streamer binary, CLI entry point, stream orchestration.
-- `src/aes67-player`: player binary, CLI entry point, receive/playout
-  orchestration.
-- `src/aes67-sap`: SAP browser binary, CLI entry point, discovery output.
-- `src/shared/config`: streamer/player/SAP CLI parsing and streamer TOML
+- `src/aes67`: the only shipped command-line application. It exposes Send and
+  Receive directly through `aes67-engine`.
+- `src/shared/aes67-engine`: Send (file and queue) and Receive (discovery,
+  listen, device listing) workflows shared by present and future interfaces.
+- `src/tools/aes67-route-test`: developer/installer route diagnostic; not a product line
+  or packaged command.
+- `src/shared/config`: Send, Receive, discovery, and route-diagnostic CLI parsing and Send TOML
   configuration.
 - `src/shared/audio`: audio decoding, resampling, sample buffering, gain node
   processing.
 - `src/shared/network`: RTP packetization/parsing, SDP/SAP, jitter buffer, UDP
   sockets.
 - `src/shared/ptp`: PTP client, message parsing, clock/timestamp support.
-- `src/shared/streamer-core`: reusable streamer engine, stream source
-  abstraction, RTP/PTP/SAP orchestration.
 
-## Streamer Flow
+## Send Flow
 
-1. Parse streamer CLI arguments in `config`.
+1. Parse Send File CLI arguments in `config`.
 2. Load TOML config if provided.
 3. Decode and resample audio to the AES67 target format.
 4. Process audio through the node chain.
@@ -31,9 +32,9 @@ This is a Cargo workspace with three tool crates and five shared crates:
 6. Send over UDP with configured packet timing.
 7. Run PTP and SAP background tasks while streaming.
 
-## Player Flow
+## Receive Flow
 
-1. Parse player CLI arguments in `config`.
+1. Parse Receive Listen CLI arguments in `config`.
 2. Build receive session from SDP or basic CLI address/port arguments.
 3. Receive RTP over UDP.
 4. Reorder packets through the jitter buffer.
@@ -41,15 +42,27 @@ This is a Cargo workspace with three tool crates and five shared crates:
 6. Play through CPAL output or null output in tests.
 7. Log final playback summary and warnings for smoothness issues.
 
-## SAP Browser Flow
+## Receive Discovery Flow
 
-1. Parse SAP browser CLI arguments in `config`.
+1. Parse Receive Discover CLI arguments in `config`.
 2. Resolve the selected interface name or IPv4 address.
 3. Bind the SAP browser socket to `239.255.255.255:9875`.
 4. Parse SAP datagrams into reusable `network::sap` message types.
 5. Parse `application/sdp` payloads into AES67 session descriptions.
 6. Track added, updated, removed, and expired streams.
 7. Print browse-style event lines and optionally write discovered SDP files.
+
+## Canonical Command Flow
+
+The documented user interface is the `aes67` hierarchy:
+
+```text
+aes67 send file|queue
+aes67 receive discover|listen|devices
+```
+
+The release artifact contains only `aes67`; the front door calls engine
+workflows in-process, with no companion executable requirement.
 
 ## Development Setup
 
@@ -85,10 +98,10 @@ Focused checks:
 
 ```bash
 cargo test -p config
-cargo test -p aes67-streamer --test e2e
-cargo test -p aes67-player --test e2e
-cargo test -p aes67-player --test cli_failure_tests
-cargo test -p aes67-sap
+cargo test -p aes67 --test send_e2e
+cargo test -p aes67 --test receive_e2e
+cargo test -p aes67 --test receive_cli_failure
+cargo test -p aes67 --test discovery_e2e
 cargo test -p network sdp
 cargo test -p network sap
 cargo test -p network jitter
@@ -107,13 +120,13 @@ touched files unless doing an intentional formatting-only change.
 
 ## Full Media Loopback E2E
 
-`scripts/e2e_loopback.sh` is the streamer media loopback entry point. It:
+`scripts/e2e_loopback.sh` is the Send media loopback entry point. It:
 
-1. Builds `aes67-streamer`.
+1. Builds `aes67`.
 2. Generates a deterministic 48 kHz stereo WAV with `ffmpeg`.
 3. Writes an SDP file for RTP L24/48000/2.
 4. Starts `ffmpeg` as a receiver.
-5. Runs the streamer for a bounded duration.
+5. Runs `aes67 send file` for a bounded duration.
 6. Validates the recorded WAV with `ffprobe` and volume detection.
 
 Useful overrides:
@@ -133,9 +146,8 @@ The public binary version follows SemVer and is recorded in the root `VERSION`
 file.
 
 `VERSION` is the only source of truth for public release versions. The
-`config` crate build script reads it and injects the value used by
-`aes67-streamer --version`, `aes67-player --version`, and
-`aes67-sap --version`.
+`config` crate build script reads it for internal command parsers. The `aes67`
+build script injects the same root version into the shipped command.
 
 The release workflow validates that `VERSION` is valid SemVer and that
 `CHANGELOG.md` contains a matching section.
@@ -228,13 +240,11 @@ bash scripts/update_homebrew_formula.sh \
 
 The tarball contains:
 
-- `bin/aes67-streamer`
-- `bin/aes67-player`
-- `bin/aes67-sap`
+- `bin/aes67`
 - `README.md`
 - `LICENSE`
 - `VERSION`
-- `examples/streamer.toml`
+- `examples/send-file.toml`
 - `examples/example.sdp`
 
 The package script writes archives and checksums under:
@@ -267,10 +277,12 @@ workspace, runs tests, and runs the full media loopback E2E script.
 
 ## Files To Know
 
-- Streamer/player/SAP CLI parsing: `src/shared/config/src/args.rs`
-- Streamer orchestration: `src/shared/streamer-core/src/engine.rs`
-- Player orchestration: `src/aes67-player/src/player.rs`
-- Player output: `src/aes67-player/src/output.rs`
+- Canonical product CLI: `src/aes67/src/main.rs`
+- Send/Receive product workflows: `src/shared/aes67-engine/src/`
+- Send/Receive/discovery CLI parsing: `src/shared/config/src/args.rs`
+- Send orchestration: `src/shared/aes67-engine/src/sender/engine.rs`
+- Receive orchestration: `src/shared/aes67-engine/src/receiver/session.rs`
+- Local output adapter: `src/shared/aes67-engine/src/receiver/output.rs`
 - RTP packetizer/parser: `src/shared/network/src/rtp.rs`
 - SDP parser: `src/shared/network/src/sdp.rs`
 - Jitter buffer: `src/shared/network/src/jitter.rs`

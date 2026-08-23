@@ -1,14 +1,12 @@
 [workspace]
 members = [
-    "src/aes67-player",
-    "src/aes67-sap",
-    "src/aes67-streamer",
-    "src/aes67-tester",
+    "src/aes67",
+    "src/tools/aes67-route-test",
     "src/shared/audio",
+    "src/shared/aes67-engine",
     "src/shared/config",
     "src/shared/network",
     "src/shared/ptp",
-    "src/shared/streamer-core",
 ]
 resolver = "2"
 

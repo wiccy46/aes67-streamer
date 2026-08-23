@@ -13,7 +13,7 @@
 //! origin sources, encrypted payloads, and compressed payloads are rejected with
 //! explicit errors so callers can log or ignore them safely.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -705,11 +705,7 @@ fn sap_message_hash(sdp_payload: &str, origin_source: Ipv4Addr) -> u16 {
     }
 
     let folded = ((hash >> 16) as u16) ^ (hash as u16);
-    if folded == 0 {
-        1
-    } else {
-        folded
-    }
+    if folded == 0 { 1 } else { folded }
 }
 
 #[cfg(test)]

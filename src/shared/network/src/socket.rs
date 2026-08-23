@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
@@ -656,9 +656,11 @@ mod tests {
                 .any(|interface| interface.ipv4 == Ipv4Addr::new(127, 0, 0, 1)),
             "expected at least one loopback IPv4 interface, got {interfaces:?}"
         );
-        assert!(interfaces
-            .iter()
-            .all(|interface| !interface.name.trim().is_empty()));
+        assert!(
+            interfaces
+                .iter()
+                .all(|interface| !interface.name.trim().is_empty())
+        );
     }
 
     #[test]

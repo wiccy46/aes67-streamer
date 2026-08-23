@@ -3,7 +3,7 @@
 ## Release Decision
 
 The first public release keeps packet scheduling portable and best-effort. The
-streamer uses Tokio timing and reports measured packet lateness at the end of a
+sender uses Tokio timing and reports measured packet lateness at the end of a
 run. It does not claim hard real-time scheduling or sub-millisecond delivery
 guarantees.
 
@@ -24,7 +24,7 @@ bash scripts/e2e_loopback.sh
 bash scripts/soak_loopback.sh
 ```
 
-Review the final streamer statistics:
+Review the final sender statistics:
 
 - Packet count should match the configured duration and packet time closely.
 - Packet rate should stay near the expected rate:

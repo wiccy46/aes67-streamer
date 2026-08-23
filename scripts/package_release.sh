@@ -5,7 +5,7 @@ usage() {
     cat <<'USAGE'
 Usage: bash scripts/package_release.sh [--dry-run]
 
-Builds and packages aes67-streamer, aes67-player, aes67-sap, and aes67-tester release binaries.
+Builds and packages the aes67 application.
 
 Environment overrides:
   AES67_RELEASE_OUTPUT_DIR     Output directory, default target/release-packages
@@ -85,15 +85,11 @@ Release package configuration
   Checksum:    $CHECKSUM
   Binary dir:  $BINARY_DIR
   Contents:
-    bin/aes67-streamer
-    bin/aes67-player
-    bin/aes67-sap
-    bin/aes67-tester
+    bin/aes67
     README.md
     LICENSE
     VERSION
-    examples/streamer.toml
-    examples/aes67-tester.toml
+    examples/send-file.toml
     examples/example.sdp
 CONFIG
 }
@@ -104,36 +100,27 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 if [[ "${AES67_RELEASE_SKIP_BUILD:-0}" != "1" ]]; then
-    cargo_args=(build --release -p aes67-streamer -p aes67-player -p aes67-sap -p aes67-tester)
+    cargo_args=(build --release -p aes67)
     if [[ -n "${AES67_RELEASE_TARGET:-}" ]]; then
         cargo_args+=(--target "$TARGET")
     fi
     cargo "${cargo_args[@]}"
 fi
 
-STREAMER_BIN="$BINARY_DIR/aes67-streamer"
-PLAYER_BIN="$BINARY_DIR/aes67-player"
-SAP_BIN="$BINARY_DIR/aes67-sap"
-TESTER_BIN="$BINARY_DIR/aes67-tester"
-[[ -x "$STREAMER_BIN" ]] || fail "Missing executable release binary: $STREAMER_BIN"
-[[ -x "$PLAYER_BIN" ]] || fail "Missing executable release binary: $PLAYER_BIN"
-[[ -x "$SAP_BIN" ]] || fail "Missing executable release binary: $SAP_BIN"
-[[ -x "$TESTER_BIN" ]] || fail "Missing executable release binary: $TESTER_BIN"
+AES67_BIN="$BINARY_DIR/aes67"
+[[ -x "$AES67_BIN" ]] || fail "Missing executable release binary: $AES67_BIN"
 
 mkdir -p "$OUTPUT_DIR" "$STAGING_ROOT"
 rm -rf "$PACKAGE_DIR" "$ARCHIVE" "$CHECKSUM"
 mkdir -p "$PACKAGE_DIR/bin" "$PACKAGE_DIR/examples"
 
-cp "$STREAMER_BIN" "$PACKAGE_DIR/bin/aes67-streamer"
-cp "$PLAYER_BIN" "$PACKAGE_DIR/bin/aes67-player"
-cp "$SAP_BIN" "$PACKAGE_DIR/bin/aes67-sap"
-cp "$TESTER_BIN" "$PACKAGE_DIR/bin/aes67-tester"
+cp "$AES67_BIN" "$PACKAGE_DIR/bin/aes67"
 cp "$ROOT_DIR/README.md" "$PACKAGE_DIR/README.md"
 cp "$ROOT_DIR/LICENSE" "$PACKAGE_DIR/LICENSE"
 cp "$ROOT_DIR/VERSION" "$PACKAGE_DIR/VERSION"
 cp "$ROOT_DIR/tests/example.sdp" "$PACKAGE_DIR/examples/example.sdp"
 
-cat > "$PACKAGE_DIR/examples/streamer.toml" <<'TOML'
+cat > "$PACKAGE_DIR/examples/send-file.toml" <<'TOML'
 [audio]
 file = "audio.wav"
 loop = false
@@ -156,8 +143,6 @@ ptp_domain = 0
 [runtime]
 verbose = false
 TOML
-
-cp "$ROOT_DIR/examples/aes67-tester.toml" "$PACKAGE_DIR/examples/aes67-tester.toml"
 
 tar -C "$STAGING_ROOT" -czf "$ARCHIVE" "$PACKAGE_NAME"
 

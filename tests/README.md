@@ -1,157 +1,69 @@
-# Tests for AES67 Streamer
+# AES67 Tools Tests
 
-## Running locally
+The only product command under test is `aes67`:
 
 ```bash
 cargo test --workspace
 bash scripts/e2e_loopback.sh
 ```
 
-## Test Tiers
-
 | Tier | Command | Purpose | CI |
 | --- | --- | --- | --- |
-| Unit and integration | `cargo test --workspace` | Fast Rust coverage for audio, config, RTP, PTP, SAP browsing, socket behavior, and script dry-run validation | Yes |
-| Media loopback | `bash scripts/e2e_loopback.sh` | Full streamer-to-ffmpeg RTP loopback with decoded WAV validation | Yes |
-| Multicast validation | `AES67_E2E_INTERFACE=<local-ip> bash scripts/e2e_multicast.sh` | Opt-in multicast group join and receive validation on a real interface | No |
-| Player null-output E2E | `cargo test -p aes67-player --test e2e` | Streamer-to-player RTP validation without requiring an audio device | Yes |
-| Player null-output soak | `bash scripts/player_soak_loopback.sh` | Longer streamer-to-player RTP receive soak without requiring an audio device | No |
-| Player CPAL loopback | `bash scripts/player_cpal_loopback.sh` | Streamer-to-player validation using real CPAL audio output | No |
-| Soak validation | `bash scripts/soak_loopback.sh` | Longer local release-candidate run using the media loopback path | No |
-| Receiver compatibility | `tests/receiver-compatibility.md` | Manual/pro-tool matrix for VLC, RAVENNA Stream Monitor, Dante AES67 mode, and Wireshark | No |
+| Unit and integration | `cargo test --workspace` | Audio, network, PTP, configuration, Send, Receive, discovery, and scripts | Yes |
+| Send media loopback | `bash scripts/e2e_loopback.sh` | `aes67 send file` to ffmpeg RTP loopback with decoded WAV validation | Yes |
+| Receive null-output E2E | `cargo test -p aes67 --test receive_e2e` | Send-to-Receive RTP validation without an audio device | Yes |
+| Receive null-output soak | `bash scripts/receive_soak_loopback.sh` | Longer receive, jitter, decode, and counter validation | No |
+| Receive CPAL loopback | `bash scripts/receive_cpal_loopback.sh` | Send-to-Receive validation using real CPAL audio output | No |
+| Multicast validation | `AES67_E2E_INTERFACE=<local-ip> bash scripts/e2e_multicast.sh` | Opt-in multicast interoperability on a selected interface | No |
 
-## Full Media Loopback E2E
+## Receive validation
 
-`scripts/e2e_loopback.sh` is the local and CI entry point for end-to-end media testing. It:
-
-- Builds `aes67-streamer`.
-- Generates a short 48 kHz stereo WAV fixture.
-- Starts `ffmpeg` as an RTP receiver from an SDP file.
-- Runs the streamer for a bounded duration on loopback.
-- Validates the recorded WAV with `ffprobe`.
-
-Requirements:
-
-- `ffmpeg`
-- `ffprobe`
-- Local UDP loopback networking
-
-## AES67 Player Validation
-
-The player receives AES67 RTP and plays through CPAL. For deterministic CI-style
-validation, the player E2E test uses an internal null output sink and verifies
-the RTP decode, jitter-buffer, packet-timing, and output-summary counters:
+The Receive workflow supports basic arguments and SDP files:
 
 ```bash
-cargo test -p aes67-player --test e2e
-```
-
-The player supports both basic receive arguments and SDP files:
-
-```bash
-cargo run -p aes67-player -- \
+cargo run -p aes67 -- receive listen \
   --address 239.192.1.1 \
   --port 5004 \
   --interface 127.0.0.1
 
-cargo run -p aes67-player -- \
+cargo run -p aes67 -- receive listen \
   --sdp tests/example.sdp \
   --interface 127.0.0.1
+
+cargo run -p aes67 -- receive devices
 ```
 
-To inspect and select audio devices:
+For real playback checks:
 
 ```bash
-cargo run -p aes67-player -- -L
-cargo run -p aes67-player -- --sdp tests/example.sdp -o 0
+bash scripts/receive_cpal_loopback.sh
+AES67_RECEIVE_OUTPUT_DEVICE=<index-or-name> bash scripts/receive_cpal_loopback.sh
 ```
 
-On Linux, CPAL's ALSA backend requires the ALSA development package at build
-time. On Fedora:
+The CPAL loopback rejects known null/discard devices by default. Use
+`AES67_RECEIVE_ALLOW_UNCLOCKED_OUTPUT=1` only for a diagnostic startup check.
+
+For longer CI-safe validation:
 
 ```bash
-sudo dnf install alsa-lib-devel
+bash scripts/receive_soak_loopback.sh
+AES67_RECEIVE_SOAK_DURATION_SECONDS=300 bash scripts/receive_soak_loopback.sh
 ```
 
-For real playback validation, run the CPAL loopback script:
+## Discovery validation
+
+SAP discovery has parser, registry, socket, and process-level coverage:
 
 ```bash
-bash scripts/player_cpal_loopback.sh
+cargo test -p aes67 --test discovery_e2e
 ```
 
-Use `AES67_PLAYER_OUTPUT_DEVICE` to select a device by index or name from `-L`:
-
-```bash
-AES67_PLAYER_OUTPUT_DEVICE=<index-or-name> bash scripts/player_cpal_loopback.sh
-```
-
-Use a real clocked playback device for smoothness validation. ALSA's `null` /
-discard device is useful for checking CPAL startup, but it can consume samples
-faster than wall-clock time and should not be treated as a dropout-free playback
-test. The loopback script rejects known null/discard devices by default; set
-`AES67_PLAYER_ALLOW_UNCLOCKED_OUTPUT=1` only when intentionally running a
-diagnostic startup check.
-
-The player logs a final summary. Clean playback should report zero for RTP
-silence frames, jitter lost/late/dropped-full packets, timestamp
-discontinuities, output silence frames, and output dropped samples. Any warning
-line from the player should be treated as a dropout or smoothness issue to
-investigate before release.
-
-For longer CI-safe receive validation, run the player soak loopback:
-
-```bash
-bash scripts/player_soak_loopback.sh
-```
-
-The default duration is 60 seconds. To change it:
-
-```bash
-AES67_PLAYER_SOAK_DURATION_SECONDS=300 bash scripts/player_soak_loopback.sh
-```
-
-## AES67 SAP Browser Validation
-
-The SAP browser has parser, registry, socket, and process-level coverage. The
-process E2E test launches `aes67-sap --once`, sends a real SAP UDP datagram on
-loopback, verifies the browse output, and checks that `--sdp-output-dir` writes
-the announced SDP:
-
-```bash
-cargo test -p aes67-sap
-```
-
-## Optional Multicast E2E
-
-`scripts/e2e_multicast.sh` validates that ffmpeg can join the selected multicast
-group and record the RTP stream. It requires an explicit local interface IPv4:
+## Optional multicast and long-running checks
 
 ```bash
 AES67_E2E_INTERFACE=192.168.1.100 bash scripts/e2e_multicast.sh
-```
-
-Use `--dry-run` to verify the selected address, port, interface, and artifact
-directory without starting the streamer:
-
-```bash
-AES67_E2E_INTERFACE=192.168.1.100 bash scripts/e2e_multicast.sh --dry-run
-```
-
-## Soak Validation
-
-`scripts/soak_loopback.sh` runs the media loopback path for a longer duration.
-The default is 300 seconds:
-
-```bash
 bash scripts/soak_loopback.sh
 ```
 
-To change the duration:
-
-```bash
-AES67_SOAK_DURATION_SECONDS=900 bash scripts/soak_loopback.sh
-```
-
-## CI
-
-GitHub Actions on `ubuntu-latest` runs `cargo test --workspace` and `bash scripts/e2e_loopback.sh`.
+Use `--dry-run` with either script to validate its selected configuration
+without sending media.
