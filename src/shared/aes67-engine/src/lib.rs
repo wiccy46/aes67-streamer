@@ -5,4 +5,5 @@
 
 pub mod discovery;
 pub mod receiver;
+pub mod routing;
 pub mod sender;
