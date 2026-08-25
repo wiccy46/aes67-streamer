@@ -57,3 +57,37 @@ export interface StreamRequest {
   port: number;
   gainDb: number | null;
 }
+
+export interface RuntimeRequest {
+  interface: string;
+  ptpDomain: number;
+}
+
+export type RoutingRuntimeLifecycle = "stopped" | "starting" | "running" | "failed";
+export type StreamRuntimeLifecycle = "starting" | "live" | "stopped" | "failed";
+
+export interface StreamRuntimeStats {
+  stream_id: StreamId;
+  lifecycle: StreamRuntimeLifecycle;
+  packets_sent: number;
+  bytes_sent: number;
+  packets_per_second: number;
+  megabits_per_second: number;
+  peak_dbfs: number;
+  rms_dbfs: number;
+  late_packets: number;
+  sdp: string;
+}
+
+export interface RoutingRuntimeSnapshot {
+  lifecycle: RoutingRuntimeLifecycle;
+  interface: string | null;
+  uptime_seconds: number;
+  ptp: {
+    state: string;
+    offset_ns: number;
+    master_identity: string | null;
+  };
+  streams: StreamRuntimeStats[];
+  error: string | null;
+}

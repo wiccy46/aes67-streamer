@@ -5,6 +5,10 @@ async function getRoutingSnapshot() {
   return browser.tauri.execute(({ core }) => core.invoke("get_routing_snapshot"));
 }
 
+async function getRuntimeSnapshot() {
+  return browser.tauri.execute(({ core }) => core.invoke("get_runtime_snapshot"));
+}
+
 async function waitForSnapshot(predicate, timeoutMsg) {
   let current;
   await browser.waitUntil(
@@ -46,6 +50,7 @@ async function setNumberInput(selector, value) {
       input.focus();
       valueSetter?.call(input, String(nextValue));
       input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
       input.blur();
     },
     selector,
@@ -119,5 +124,36 @@ describe("AES67 native routing workspace", () => {
       "Rust did not remove the route deleted by the UI",
     );
     assert.equal(removed.routes.length, 2);
+
+    await clickSelector('[data-testid="stream-1-sdp"]');
+    await waitForSelector('[data-testid="sdp-dialog"]');
+    const sdp = await browser.execute(
+      () => document.querySelector('[data-testid="sdp-dialog"] pre')?.textContent ?? "",
+    );
+    assert.match(sdp, /m=audio 5004 RTP\/AVP 97/);
+    assert.match(sdp, /a=rtpmap:97 L24\/48000\/2/);
+    await clickSelector('[aria-label="Close SDP"]');
+
+    await clickSelector('[data-testid="start-all"]');
+    let liveRuntime;
+    await browser.waitUntil(
+      async () => {
+        liveRuntime = await getRuntimeSnapshot();
+        return (
+          liveRuntime.lifecycle === "running" &&
+          liveRuntime.streams.length === 2 &&
+          liveRuntime.streams.every((stream) => stream.packets_sent > 0)
+        );
+      },
+      { timeout: 15_000, timeoutMsg: "Rust runtime did not send packets for all routed streams" },
+    );
+    assert.ok(liveRuntime.streams.every((stream) => stream.lifecycle === "live"));
+    assert.ok(liveRuntime.streams.every((stream) => stream.sdp.includes("a=sendonly")));
+
+    await clickSelector('[data-testid="start-all"]');
+    await browser.waitUntil(
+      async () => (await getRuntimeSnapshot()).lifecycle === "stopped",
+      { timeoutMsg: "Rust runtime did not stop all streams" },
+    );
   });
 });

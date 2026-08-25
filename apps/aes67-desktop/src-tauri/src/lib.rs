@@ -2,19 +2,26 @@ use aes67_engine::routing::{
     RoutingError, RoutingModel, RoutingSnapshot, SourceConfig, SourceId, SourceInput, StreamConfig,
     StreamId,
 };
+use aes67_engine::routing_runtime::{
+    preview_stream_sdp, RoutingRuntime, RoutingRuntimeConfig, RoutingRuntimeLifecycle,
+    RoutingRuntimeSnapshot,
+};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 
 struct DesktopState {
     routing: Mutex<RoutingModel>,
+    runtime: RoutingRuntime,
 }
 
 impl DesktopState {
     fn new() -> Self {
         Self {
             routing: Mutex::new(initial_routing_model()),
+            runtime: RoutingRuntime::new(),
         }
     }
 }
@@ -93,7 +100,25 @@ fn get_desktop_info() -> DesktopInfo {
     DesktopInfo {
         product_name: "aes67",
         version: env!("AES67_TOOLS_VERSION"),
-        live_routing_available: false,
+        live_routing_available: true,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeRequest {
+    interface: String,
+    #[serde(default)]
+    ptp_domain: u8,
+}
+
+impl RuntimeRequest {
+    fn into_config(self) -> RoutingRuntimeConfig {
+        RoutingRuntimeConfig {
+            interface: self.interface,
+            ptp_domain: self.ptp_domain,
+            sap: true,
+        }
     }
 }
 
@@ -199,10 +224,63 @@ fn remove_route(
     })
 }
 
+#[tauri::command]
+fn get_runtime_snapshot(state: State<'_, DesktopState>) -> RoutingRuntimeSnapshot {
+    state.runtime.get_snapshot()
+}
+
+#[tauri::command]
+async fn start_all(
+    request: RuntimeRequest,
+    state: State<'_, DesktopState>,
+) -> Result<RoutingRuntimeSnapshot, String> {
+    let routing = {
+        let routing = state
+            .routing
+            .lock()
+            .map_err(|_| "routing state lock was poisoned".to_string())?;
+        routing.get_snapshot()
+    };
+    state
+        .runtime
+        .start(routing, request.into_config())
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+async fn stop_all(state: State<'_, DesktopState>) -> Result<RoutingRuntimeSnapshot, String> {
+    Ok(state.runtime.stop().await)
+}
+
+#[tauri::command]
+fn get_stream_sdp(
+    stream_id: StreamId,
+    request: RuntimeRequest,
+    state: State<'_, DesktopState>,
+) -> Result<String, String> {
+    if let Some(sdp) = state.runtime.get_stream_sdp(stream_id) {
+        return Ok(sdp);
+    }
+    let routing = state
+        .routing
+        .lock()
+        .map_err(|_| "routing state lock was poisoned".to_string())?
+        .get_snapshot();
+    preview_stream_sdp(&routing, stream_id, &request.into_config())
+        .map_err(|error| format!("{error:#}"))
+}
+
 fn with_routing<T>(
     state: &State<'_, DesktopState>,
     operation: impl FnOnce(&mut RoutingModel) -> Result<T, RoutingError>,
 ) -> Result<T, String> {
+    if matches!(
+        state.runtime.get_snapshot().lifecycle,
+        RoutingRuntimeLifecycle::Starting | RoutingRuntimeLifecycle::Running
+    ) {
+        return Err("stop all streams before editing the routing graph".to_string());
+    }
     let mut routing = state
         .routing
         .lock()
@@ -215,11 +293,15 @@ fn initial_routing_model() -> RoutingModel {
 
     #[cfg(debug_assertions)]
     {
+        let demo_audio = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tests/piano_freesound.wav")
+            .to_string_lossy()
+            .into_owned();
         let studio = routing
             .create_source(SourceConfig {
                 name: "Studio A".to_string(),
-                input: SourceInput::LiveInput {
-                    device: "Live input · 48 kHz".to_string(),
+                input: SourceInput::File {
+                    path: demo_audio.clone(),
                 },
             })
             .expect("valid demo source");
@@ -227,16 +309,14 @@ fn initial_routing_model() -> RoutingModel {
             .create_source(SourceConfig {
                 name: "Music bed".to_string(),
                 input: SourceInput::File {
-                    path: "music-bed.wav · stereo".to_string(),
+                    path: demo_audio.clone(),
                 },
             })
             .expect("valid demo source");
         routing
             .create_source(SourceConfig {
                 name: "Voiceover".to_string(),
-                input: SourceInput::LiveInput {
-                    device: "USB 04 · mono".to_string(),
-                },
+                input: SourceInput::File { path: demo_audio },
             })
             .expect("valid demo source");
 
@@ -300,6 +380,10 @@ pub fn run() {
             remove_stream,
             assign_source,
             remove_route,
+            get_runtime_snapshot,
+            start_all,
+            stop_all,
+            get_stream_sdp,
         ])
         .run(tauri::generate_context!())
         .expect("error while running aes67 desktop application");

@@ -17,24 +17,38 @@ import "@xyflow/react/dist/style.css";
 import {
   Broadcast,
   CheckCircle,
+  Copy,
   FileAudio,
+  FileCode,
   PlugsConnected,
   Plus,
   Radio,
   Stop,
   Waveform,
+  X,
 } from "@phosphor-icons/react";
 import {
   assignSource,
   createSource,
   createStream,
   getDesktopInfo,
+  getRuntimeSnapshot,
   getRoutingSnapshot,
+  getStreamSdp,
   isDesktopHost,
   removeRoute,
+  startAll,
+  stopAll,
   updateStream,
 } from "./desktop";
-import type { DesktopInfo, RoutingSnapshot, SourceInput, StreamConfig } from "./types";
+import type {
+  DesktopInfo,
+  RoutingRuntimeSnapshot,
+  RoutingSnapshot,
+  SourceInput,
+  StreamConfig,
+  StreamRuntimeStats,
+} from "./types";
 
 const routeStyle = {
   stroke: "#ff9d00",
@@ -52,7 +66,10 @@ type StreamNodeData = {
   detail: string;
   format: string;
   gainDb: number | null;
+  runtime?: StreamRuntimeStats;
   onGainCommit?: (gainDb: number | null) => void;
+  onSdpRequest?: (nodeId: string, action: "view" | "copy") => void;
+  onOpenMenu?: (nodeId: string, x: number, y: number) => void;
 };
 
 type SourceFlowNode = Node<SourceNodeData, "source">;
@@ -164,8 +181,26 @@ function StreamModule({ data, id }: NodeProps<StreamFlowNode>) {
     }
   }
 
+  const lifecycle = data.runtime?.lifecycle ?? "stopped";
+  const stateLabel =
+    lifecycle === "live"
+      ? "Live"
+      : lifecycle === "starting"
+        ? "Starting"
+        : lifecycle === "failed"
+          ? "Error"
+          : "Configured";
+
   return (
-    <article className="module-node module-node--stream" data-testid={id}>
+    <article
+      className={`module-node module-node--stream module-node--${lifecycle}`}
+      data-testid={id}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        data.onOpenMenu?.(id, event.clientX, event.clientY);
+      }}
+    >
       <Handle
         id="input"
         data-testid={`${id}-input`}
@@ -178,9 +213,9 @@ function StreamModule({ data, id }: NodeProps<StreamFlowNode>) {
           <Broadcast size={15} weight="fill" aria-hidden="true" />
           AES67 stream
         </span>
-        <span className="module-node__ready">
+        <span className={`module-node__ready is-${lifecycle}`}>
           <CheckCircle size={15} weight="fill" aria-hidden="true" />
-          Configured
+          {stateLabel}
         </span>
       </div>
       <h2>{data.name}</h2>
@@ -209,6 +244,29 @@ function StreamModule({ data, id }: NodeProps<StreamFlowNode>) {
             <span>dB</span>
           </span>
         </label>
+        <button
+          className="sdp-action nodrag"
+          type="button"
+          data-testid={`${id}-sdp`}
+          onClick={() => data.onSdpRequest?.(id, "view")}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          SDP
+        </button>
+      </div>
+      <div className="stream-metrics" aria-label={`${data.name} stream metrics`}>
+        <span>
+          <small>Packets</small>
+          <strong>{formatPacketCount(data.runtime?.packets_sent)}</strong>
+        </span>
+        <span>
+          <small>Rate</small>
+          <strong>{formatRate(data.runtime?.megabits_per_second)}</strong>
+        </span>
+        <span>
+          <small>Peak</small>
+          <strong>{formatPeak(data.runtime?.peak_dbfs)}</strong>
+        </span>
       </div>
       <div className="module-node__port-label">Input</div>
     </article>
@@ -238,6 +296,27 @@ function normalizeGain(value: string): number | null {
   return Math.min(gainDb, MAX_GAIN_DB);
 }
 
+function formatPacketCount(value?: number): string {
+  if (value === undefined) {
+    return "—";
+  }
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}m`;
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(1)}k`;
+  }
+  return String(value);
+}
+
+function formatRate(value?: number): string {
+  return value === undefined ? "—" : `${value.toFixed(2)} Mb/s`;
+}
+
+function formatPeak(value?: number): string {
+  return value === undefined ? "—" : value <= -120 ? "−∞" : `${value.toFixed(1)} dB`;
+}
+
 function buildEdge(source: string, target: string): Edge {
   return {
     id: `${source}-${target}`,
@@ -253,12 +332,15 @@ function buildEdge(source: string, target: string): Edge {
 
 function getModulePosition(items: AppNode[], type: "source" | "stream") {
   const moduleCount = items.filter((item) => item.type === type).length;
-  return { x: type === "source" ? 110 : 780, y: 104 + moduleCount * 224 };
+  return { x: type === "source" ? 110 : 780, y: 104 + moduleCount * 248 };
 }
 
 function getSourcePresentation(input: SourceInput): Pick<SourceNodeData, "kind" | "detail"> {
   if ("File" in input) {
-    return { kind: "Audio file", detail: input.File.path };
+    return {
+      kind: "Audio file",
+      detail: input.File.path.split(/[\\/]/).at(-1) ?? input.File.path,
+    };
   }
   return { kind: "Live input", detail: input.LiveInput.device };
 }
@@ -275,18 +357,91 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function buildPreviewSdp(name: string, destination: string, interfaceName: string): string {
+  const [address = "239.69.83.1", port = "5004"] = destination.split(":");
+  return [
+    "v=0",
+    `o=- 1 1 IN IP4 ${interfaceName}`,
+    `s=${name}`,
+    `c=IN IP4 ${address}/32`,
+    "t=0 0",
+    `m=audio ${port} RTP/AVP 97`,
+    "a=rtpmap:97 L24/48000/2",
+    "a=ptime:1",
+    "a=mediaclk:direct=0",
+    "a=sendonly",
+    "",
+  ].join("\r\n");
+}
+
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // The fallback supports webviews that do not grant Clipboard API access.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) {
+    throw new Error("clipboard access is unavailable");
+  }
+}
+
+const stoppedRuntime: RoutingRuntimeSnapshot = {
+  lifecycle: "stopped",
+  interface: null,
+  uptime_seconds: 0,
+  ptp: { state: "stopped", offset_ns: 0, master_identity: null },
+  streams: [],
+  error: null,
+};
+
+type StreamMenuState = {
+  nodeId: string;
+  name: string;
+  x: number;
+  y: number;
+};
+
+type SdpDialogState = {
+  name: string;
+  sdp: string;
+};
+
 export function App() {
   const desktopHost = isDesktopHost();
   const [nodes, setNodes, onNodesChange] = useNodesState<AppNode>(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [desktopInfo, setDesktopInfo] = useState<DesktopInfo | null>(null);
-  const [isLive, setIsLive] = useState(false);
-  const [notice, setNotice] = useState("Drag an output handle onto a stream input to create a route.");
+  const [runtime, setRuntime] = useState<RoutingRuntimeSnapshot>(stoppedRuntime);
+  const [browserLive, setBrowserLive] = useState(false);
+  const [interfaceName, setInterfaceName] = useState("127.0.0.1");
+  const [streamMenu, setStreamMenu] = useState<StreamMenuState | null>(null);
+  const [sdpDialog, setSdpDialog] = useState<SdpDialogState | null>(null);
+  const [notice, setNotice] = useState(
+    "Drag an output handle onto a stream input to create a route.",
+  );
   const sourceSequence = useRef(4);
   const streamSequence = useRef(4);
+  const runtimeRef = useRef(runtime);
   const streamGainCommitRef = useRef(
     (_streamId: number, _config: StreamConfig, _gainDb: number | null) => {},
   );
+  const streamSdpRequestRef = useRef((_nodeId: string, _action: "view" | "copy") => {});
+  const isLive = desktopHost ? runtime.lifecycle === "running" : browserLive;
+  const isStarting = desktopHost && runtime.lifecycle === "starting";
+
+  runtimeRef.current = runtime;
 
   const applySnapshot = useCallback(
     (snapshot: RoutingSnapshot) => {
@@ -307,18 +462,26 @@ export function App() {
         });
         const streamNodes: StreamFlowNode[] = snapshot.streams.map((stream, index) => {
           const id = `stream-${stream.id}`;
+          const runtimeStats = runtimeRef.current.streams.find(
+            (stats) => stats.stream_id === stream.id,
+          );
           return {
             id,
             type: "stream",
-            position: existingPositions.get(id) ?? { x: 780, y: 104 + index * 224 },
+            position: existingPositions.get(id) ?? { x: 780, y: 104 + index * 248 },
             deletable: false,
             data: {
               name: stream.config.name,
               detail: `${stream.config.address}:${stream.config.port}`,
               format: "48 kHz · source channels",
               gainDb: stream.config.gain_db,
+              runtime: runtimeStats,
               onGainCommit: (gainDb) =>
                 streamGainCommitRef.current(stream.id, stream.config, gainDb),
+              onSdpRequest: (nodeId, action) =>
+                streamSdpRequestRef.current(nodeId, action),
+              onOpenMenu: (nodeId, x, y) =>
+                setStreamMenu({ nodeId, name: stream.config.name, x, y }),
             },
           };
         });
@@ -356,19 +519,90 @@ export function App() {
   };
 
   useEffect(() => {
+    setNodes((currentNodes) =>
+      currentNodes.map((node) => {
+        if (node.type !== "stream") {
+          return node;
+        }
+        const streamId = parseEngineId(node.id, "stream");
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            runtime:
+              streamId === null
+                ? node.data.runtime
+                : runtime.streams.find((stats) => stats.stream_id === streamId),
+            onSdpRequest: (nodeId, action) =>
+              streamSdpRequestRef.current(nodeId, action),
+            onOpenMenu: (nodeId, x, y) =>
+              setStreamMenu({ nodeId, name: node.data.name, x, y }),
+          },
+        };
+      }),
+    );
+  }, [runtime, setNodes]);
+
+  streamSdpRequestRef.current = (nodeId, action) => {
+    const node = nodes.find((candidate) => candidate.id === nodeId);
+    if (!node || node.type !== "stream") {
+      setNotice("Could not find that stream.");
+      return;
+    }
+
+    setStreamMenu(null);
+    setNotice(action === "copy" ? "Preparing SDP to copy…" : "Preparing SDP…");
+    const streamId = parseEngineId(nodeId, "stream");
+    const sdpPromise =
+      desktopHost && streamId !== null
+        ? getStreamSdp(streamId, { interface: interfaceName, ptpDomain: 0 })
+        : Promise.resolve(buildPreviewSdp(node.data.name, node.data.detail, interfaceName));
+
+    void sdpPromise
+      .then(async (sdp) => {
+        if (action === "copy") {
+          await copyText(sdp);
+          setNotice(`${node.data.name} SDP copied.`);
+        } else {
+          setSdpDialog({ name: node.data.name, sdp });
+          setNotice(`${node.data.name} SDP is ready.`);
+        }
+      })
+      .catch((error) => setNotice(`Could not get SDP: ${formatError(error)}`));
+  };
+
+  useEffect(() => {
     if (!desktopHost) {
       return;
     }
 
     let cancelled = false;
-    Promise.all([getDesktopInfo(), getRoutingSnapshot()])
-      .then(([info, snapshot]) => {
+    let pollTimer: number | undefined;
+
+    const pollRuntime = () => {
+      void getRuntimeSnapshot()
+        .then((snapshot) => {
+          if (!cancelled) {
+            setRuntime(snapshot);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            pollTimer = window.setTimeout(pollRuntime, 500);
+          }
+        });
+    };
+
+    Promise.all([getDesktopInfo(), getRoutingSnapshot(), getRuntimeSnapshot()])
+      .then(([info, snapshot, runtimeSnapshot]) => {
         if (cancelled) {
           return;
         }
         setDesktopInfo(info);
+        setRuntime(runtimeSnapshot);
         applySnapshot(snapshot);
         setNotice(`Engine model connected · revision ${snapshot.revision}`);
+        pollTimer = window.setTimeout(pollRuntime, 500);
       })
       .catch((error) => {
         if (!cancelled) {
@@ -378,6 +612,9 @@ export function App() {
 
     return () => {
       cancelled = true;
+      if (pollTimer !== undefined) {
+        window.clearTimeout(pollTimer);
+      }
     };
   }, [applySnapshot, desktopHost]);
 
@@ -532,17 +769,40 @@ export function App() {
     setNotice("Stream added. Connect one source now, or leave it unassigned.");
   }
 
-  function toggleLive() {
+  async function toggleLive() {
     if (!edges.length) {
       setNotice("Create at least one source-to-stream route before starting.");
       return;
     }
-    if (desktopHost && desktopInfo && !desktopInfo.liveRoutingAvailable) {
-      setNotice("Routing is saved. Live transport unlocks after shared PTP runtime integration.");
+
+    if (!desktopHost) {
+      setBrowserLive((current) => !current);
+      setNotice(
+        browserLive ? "All routes are standing by." : `${edges.length} preview routes are live.`,
+      );
       return;
     }
-    setIsLive((current) => !current);
-    setNotice(isLive ? "All routes are standing by." : `${edges.length} routes are now live.`);
+
+    try {
+      if (runtime.lifecycle === "running") {
+        setNotice("Stopping all streams…");
+        const snapshot = await stopAll();
+        setRuntime(snapshot);
+        setNotice("All streams stopped.");
+      } else {
+        setNotice("Starting PTP and routed streams…");
+        setRuntime((current) => ({ ...current, lifecycle: "starting", error: null }));
+        const snapshot = await startAll({ interface: interfaceName, ptpDomain: 0 });
+        setRuntime(snapshot);
+        setNotice(`${snapshot.streams.length} streams are sending RTP.`);
+      }
+    } catch (error) {
+      const snapshot = await getRuntimeSnapshot().catch(() => null);
+      if (snapshot) {
+        setRuntime(snapshot);
+      }
+      setNotice(`Could not ${isLive ? "stop" : "start"} streams: ${formatError(error)}`);
+    }
   }
 
   return (
@@ -572,7 +832,13 @@ export function App() {
         </nav>
         <div className={`header-state ${isLive ? "is-live" : ""}`}>
           <span />
-          {isLive ? "Live" : "Standby"}
+          {isStarting
+            ? "Starting"
+            : isLive
+              ? `Live · PTP ${runtime.ptp.state}`
+              : runtime.lifecycle === "failed"
+                ? "Runtime error"
+                : "Standby"}
         </div>
       </header>
 
@@ -587,6 +853,17 @@ export function App() {
           </div>
 
           <div className="routing-actions">
+            <label className="interface-control">
+              <span>Interface</span>
+              <input
+                type="text"
+                value={interfaceName}
+                disabled={isLive || isStarting}
+                data-testid="send-interface"
+                onChange={(event) => setInterfaceName(event.target.value)}
+                aria-label="Send network interface or IPv4 address"
+              />
+            </label>
             <button
               className="toolbar-button"
               type="button"
@@ -609,14 +886,15 @@ export function App() {
               className={`live-action ${isLive ? "is-live" : ""}`}
               type="button"
               data-testid="start-all"
-              onClick={toggleLive}
+              disabled={isStarting}
+              onClick={() => void toggleLive()}
             >
               {isLive ? (
                 <Stop size={18} weight="fill" aria-hidden="true" />
               ) : (
                 <Waveform size={20} weight="bold" aria-hidden="true" />
               )}
-              {isLive ? "Stop all" : "Start all"}
+              {isStarting ? "Starting…" : isLive ? "Stop all" : "Start all"}
             </button>
           </div>
         </div>
@@ -634,9 +912,10 @@ export function App() {
               setNotice(`${node.data.name} can be moved anywhere on the canvas.`)
             }
             onEdgeClick={() => setNotice("Selected route. Press Delete or Backspace to remove it.")}
-            onPaneClick={() =>
-              setNotice("Drag from any source output to assign or reassign a stream input.")
-            }
+            onPaneClick={() => {
+              setStreamMenu(null);
+              setNotice("Drag from any source output to assign or reassign a stream input.");
+            }}
             isValidConnection={isValidConnection}
             deleteKeyCode={["Backspace", "Delete"]}
             defaultEdgeOptions={{ animated: true, style: routeStyle, type: "smoothstep" }}
@@ -672,6 +951,72 @@ export function App() {
           </div>
         </div>
       </section>
+
+      {streamMenu ? (
+        <div
+          className="stream-menu"
+          style={{ left: streamMenu.x, top: streamMenu.y }}
+          role="menu"
+          data-testid="stream-context-menu"
+        >
+          <div className="stream-menu__title">{streamMenu.name}</div>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => streamSdpRequestRef.current(streamMenu.nodeId, "view")}
+          >
+            <FileCode size={16} aria-hidden="true" />
+            View SDP
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="copy-stream-sdp"
+            onClick={() => streamSdpRequestRef.current(streamMenu.nodeId, "copy")}
+          >
+            <Copy size={16} aria-hidden="true" />
+            Copy SDP
+          </button>
+        </div>
+      ) : null}
+
+      {sdpDialog ? (
+        <div className="sdp-backdrop" role="presentation" onMouseDown={() => setSdpDialog(null)}>
+          <section
+            className="sdp-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sdp-title"
+            data-testid="sdp-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header>
+              <div>
+                <span>Session description</span>
+                <h2 id="sdp-title">{sdpDialog.name}</h2>
+              </div>
+              <button type="button" aria-label="Close SDP" onClick={() => setSdpDialog(null)}>
+                <X size={18} aria-hidden="true" />
+              </button>
+            </header>
+            <pre>{sdpDialog.sdp}</pre>
+            <footer>
+              <span>Generated from the authoritative stream configuration.</span>
+              <button
+                type="button"
+                onClick={() =>
+                  void copyText(sdpDialog.sdp)
+                    .then(() => setNotice(`${sdpDialog.name} SDP copied.`))
+                    .catch((error) => setNotice(`Could not copy SDP: ${formatError(error)}`))
+                }
+              >
+                <Copy size={16} aria-hidden="true" />
+                Copy SDP
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

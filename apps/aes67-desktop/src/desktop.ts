@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   DesktopInfo,
+  RoutingRuntimeSnapshot,
   RoutingSnapshot,
+  RuntimeRequest,
   SourceId,
   SourceRequest,
   StreamId,
@@ -49,4 +51,20 @@ export function assignSource(sourceId: SourceId, streamId: StreamId): Promise<Ro
 
 export function removeRoute(streamId: StreamId): Promise<RoutingSnapshot> {
   return invoke<RoutingSnapshot>("remove_route", { streamId });
+}
+
+export function getRuntimeSnapshot(): Promise<RoutingRuntimeSnapshot> {
+  return invoke<RoutingRuntimeSnapshot>("get_runtime_snapshot");
+}
+
+export function startAll(request: RuntimeRequest): Promise<RoutingRuntimeSnapshot> {
+  return invoke<RoutingRuntimeSnapshot>("start_all", { request });
+}
+
+export function stopAll(): Promise<RoutingRuntimeSnapshot> {
+  return invoke<RoutingRuntimeSnapshot>("stop_all");
+}
+
+export function getStreamSdp(streamId: StreamId, request: RuntimeRequest): Promise<string> {
+  return invoke<string>("get_stream_sdp", { streamId, request });
 }
