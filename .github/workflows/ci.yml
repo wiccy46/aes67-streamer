@@ -30,3 +30,43 @@ jobs:
 
     - name: Run full media loopback E2E
       run: bash scripts/e2e_loopback.sh
+
+  desktop-e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 24
+        cache: npm
+        cache-dependency-path: apps/aes67-desktop/package-lock.json
+
+    - name: Install desktop system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libasound2-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          libwebkit2gtk-4.1-dev \
+          pkg-config \
+          xvfb
+
+    - name: Cache desktop Cargo build
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: apps/aes67-desktop/src-tauri
+
+    - name: Install desktop dependencies
+      run: npm ci
+      working-directory: apps/aes67-desktop
+
+    - name: Run native desktop E2E
+      run: xvfb-run -a npm run test:e2e
+      working-directory: apps/aes67-desktop
