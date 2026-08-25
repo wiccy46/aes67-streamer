@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   DesktopInfo,
+  LocalInterface,
   RoutingRuntimeSnapshot,
   RoutingSnapshot,
   RuntimeRequest,
@@ -16,6 +17,10 @@ export function isDesktopHost(): boolean {
 
 export function getDesktopInfo(): Promise<DesktopInfo> {
   return invoke<DesktopInfo>("get_desktop_info");
+}
+
+export function getLocalInterfaces(): Promise<LocalInterface[]> {
+  return invoke<LocalInterface[]>("get_local_interfaces");
 }
 
 export function getRoutingSnapshot(): Promise<RoutingSnapshot> {

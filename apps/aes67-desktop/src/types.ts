@@ -45,6 +45,12 @@ export interface DesktopInfo {
   liveRoutingAvailable: boolean;
 }
 
+export interface LocalInterface {
+  name: string;
+  address: string;
+  is_loopback: boolean;
+}
+
 export interface SourceRequest {
   name: string;
   inputKind: "file" | "liveInput";

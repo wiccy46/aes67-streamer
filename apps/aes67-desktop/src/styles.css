@@ -174,23 +174,25 @@ button:focus-visible {
   text-transform: uppercase;
 }
 
-.interface-control input {
-  width: 132px;
+.interface-control select {
+  width: 190px;
   height: 32px;
-  padding: 0 9px;
+  padding: 0 8px;
   color: #dce1e5;
   border: 1px solid rgba(207, 216, 224, 0.28);
   border-radius: 4px;
   outline: none;
   background: rgba(5, 10, 15, 0.76);
+  color-scheme: dark;
   font: 500 11px/1 "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  cursor: pointer;
 }
 
-.interface-control input:focus {
+.interface-control select:focus {
   border-color: #ff9d00;
 }
 
-.interface-control input:disabled {
+.interface-control select:disabled {
   color: #727d87;
   cursor: not-allowed;
 }
