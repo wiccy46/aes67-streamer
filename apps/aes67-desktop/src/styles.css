@@ -299,6 +299,46 @@ button:focus-visible {
   border-color: rgba(241, 246, 249, 0.64);
 }
 
+.block-remove {
+  position: absolute;
+  z-index: 3;
+  top: -10px;
+  right: -10px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  color: #a4adb7;
+  border: 1px solid rgba(199, 209, 218, 0.4);
+  border-radius: 5px;
+  background: #111922;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.32);
+  cursor: pointer;
+}
+
+.block-remove svg {
+  color: currentColor;
+}
+
+.block-remove:hover:not(:disabled) {
+  color: #ffe2df;
+  border-color: #e36b65;
+  background: #923d39;
+}
+
+.block-remove:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.block-remove:disabled {
+  color: #5f6973;
+  border-color: rgba(126, 138, 149, 0.2);
+  background: #10161d;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
 .module-node--source {
   border-left: 3px solid #ff9d00;
 }
@@ -667,88 +707,6 @@ button:focus-visible {
   color: #83e266;
 }
 
-.selection-actions {
-  position: absolute;
-  z-index: 6;
-  top: 18px;
-  left: 50%;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  width: min(520px, calc(100% - 48px));
-  min-height: 58px;
-  padding: 8px 9px 8px 15px;
-  transform: translateX(-50%);
-  border: 1px solid rgba(255, 179, 51, 0.58);
-  border-radius: 7px;
-  background: rgba(15, 22, 30, 0.96);
-  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.32);
-}
-
-.selection-actions__summary {
-  display: grid;
-  min-width: 0;
-  margin-right: auto;
-  gap: 2px;
-}
-
-.selection-actions__summary span {
-  color: #ffb43f;
-  font-size: 9px;
-  font-weight: 750;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
-.selection-actions__summary strong {
-  overflow: hidden;
-  color: #eef1ed;
-  font-size: 13px;
-  font-weight: 610;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.selection-actions__shortcut {
-  flex: none;
-  color: #818c98;
-  font: 500 10px/1 "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
-}
-
-.selection-actions button {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-height: 38px;
-  padding: 0 12px;
-  color: #ffaaa3;
-  border: 1px solid rgba(236, 106, 100, 0.55);
-  border-radius: 5px;
-  background: rgba(118, 39, 38, 0.22);
-  font-size: 12px;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.selection-actions button:hover:not(:disabled) {
-  color: #ffe3df;
-  border-color: #ec6a64;
-  background: rgba(150, 49, 47, 0.38);
-}
-
-.selection-actions button:active:not(:disabled) {
-  transform: translateY(1px);
-}
-
-.selection-actions button:disabled {
-  color: #766f70;
-  border-color: rgba(146, 126, 127, 0.24);
-  background: rgba(62, 46, 48, 0.18);
-  cursor: not-allowed;
-}
-
 .stream-menu {
   position: fixed;
   z-index: 30;
@@ -1097,13 +1055,4 @@ button:focus-visible {
     display: none;
   }
 
-  .selection-actions {
-    top: 12px;
-    width: calc(100% - 28px);
-    gap: 8px;
-  }
-
-  .selection-actions__shortcut {
-    display: none;
-  }
 }
