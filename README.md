@@ -57,6 +57,45 @@ On Fedora:
 sudo dnf install alsa-lib-devel pkgconf-pkg-config
 ```
 
+## Desktop GUI
+
+The desktop application uses Tauri 2 with a React and TypeScript frontend. Its
+routing canvas reads and updates the same typed `aes67-engine` routing model as
+the terminal products.
+
+```bash
+cd apps/aes67-desktop
+npm install
+npm run desktop:dev
+```
+
+For faster frontend-only iteration, run `npm run dev` and open the local URL.
+Browser mode uses representative in-memory data because Tauri commands are not
+available outside the desktop host.
+
+The current desktop milestone supports source, stream, route, and per-stream
+output-gain configuration. Every stream starts at unity gain (`0 dB`); values
+below `-120 dB` are represented as mute (`-inf`). A single source may feed
+multiple streams with a different gain on each route destination. `Start all`
+runs file-backed routes through one shared PTP runtime, decodes each source once
+per packet, and sends independent RTP/SAP outputs. Stream modules show live
+packet, bitrate, and peak-level statistics, and expose view/copy actions for
+their generated SDP. Live-input capture and production source/device editors
+remain follow-up work.
+
+Run the native desktop acceptance suite with:
+
+```bash
+cd apps/aes67-desktop
+npm run test:e2e
+```
+
+This builds a dedicated test binary, launches the real Tauri webview, and uses
+WebDriverIO to exercise the Rust command bridge. The embedded WebDriver plugins
+are enabled only by the test build's `e2e` Cargo feature and are excluded from
+normal application builds. The control and realtime telemetry boundary is
+defined in `apps/aes67-desktop/IPC_PROTOCOL.md`.
+
 ## Stream Audio
 
 Stream an audio file to a multicast address:
