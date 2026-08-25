@@ -294,8 +294,10 @@ engine commands and subscribes to the same snapshots/events as the GUI.
   in Tauri, with an explicit browser-only preview fallback.
 - Complete: file-backed multi-stream Start/Stop, shared PTP and source fan-out,
   per-stream gain/RTP/SAP, generated SDP, and operational runtime statistics.
-- Next: configuration drawers, native file/device selection, live-input
-  capture, engine events, and high-rate per-channel meter subscriptions.
+- Complete: native audio-file import and replacement directly from Source
+  modules.
+- Next: configuration drawers, native device selection, live-input capture,
+  engine events, and high-rate per-channel meter subscriptions.
 
 ## Remaining cleanup
 

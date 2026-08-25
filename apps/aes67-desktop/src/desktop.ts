@@ -26,6 +26,13 @@ export function createSource(request: SourceRequest): Promise<RoutingSnapshot> {
   return invoke<RoutingSnapshot>("create_source", { request });
 }
 
+export function updateSource(
+  sourceId: SourceId,
+  request: SourceRequest,
+): Promise<RoutingSnapshot> {
+  return invoke<RoutingSnapshot>("update_source", { sourceId, request });
+}
+
 export function removeSource(sourceId: SourceId): Promise<RoutingSnapshot> {
   return invoke<RoutingSnapshot>("remove_source", { sourceId });
 }
