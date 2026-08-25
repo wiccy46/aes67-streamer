@@ -15,6 +15,13 @@ Commands are request/response operations. Every mutation returns a typed error
 or the authoritative revisioned snapshot; the frontend never assumes a local
 edit succeeded before Rust confirms it.
 
+The initial sender runtime uses `start_all`, `stop_all`, and
+`get_runtime_snapshot`. Its snapshot is intentionally low-rate operational
+state: lifecycle, PTP status, uptime, packet/byte totals, packet/bit rate,
+late-packet count, peak/RMS, and the effective SDP for each Stream. The desktop
+polls it at 2 Hz. This verifies transport health without treating polling as the
+future realtime-meter protocol.
+
 Events are suitable for small, infrequent broadcast notifications. They must
 not carry audio meters or packet-by-packet data. A workflow that requires
 ordered delivery should use a channel even when its data rate is low.
