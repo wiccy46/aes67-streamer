@@ -317,13 +317,18 @@ fn validate_stream_config(config: &StreamConfig) -> Result<(), RoutingError> {
 }
 
 fn validate_name(name: &str, kind: &str) -> Result<(), RoutingError> {
-    if name.trim().is_empty() {
+    if name.trim().is_empty() || name.contains(['\r', '\n']) {
+        let message = if name.trim().is_empty() {
+            "name must not be empty"
+        } else {
+            "name must not contain line breaks"
+        };
         return match kind {
             "source" => Err(RoutingError::InvalidSource {
-                message: "name must not be empty".to_string(),
+                message: message.to_string(),
             }),
             _ => Err(RoutingError::InvalidStream {
-                message: "name must not be empty".to_string(),
+                message: message.to_string(),
             }),
         };
     }

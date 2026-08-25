@@ -6,4 +6,5 @@
 pub mod discovery;
 pub mod receiver;
 pub mod routing;
+pub mod routing_runtime;
 pub mod sender;
