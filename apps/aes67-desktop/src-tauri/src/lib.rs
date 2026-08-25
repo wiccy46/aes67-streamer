@@ -1,3 +1,4 @@
+use aes67_engine::interfaces::{list_local_interfaces, LocalInterface};
 use aes67_engine::routing::{
     RoutingError, RoutingModel, RoutingSnapshot, SourceConfig, SourceId, SourceInput, StreamConfig,
     StreamId,
@@ -102,6 +103,11 @@ fn get_desktop_info() -> DesktopInfo {
         version: env!("AES67_TOOLS_VERSION"),
         live_routing_available: true,
     }
+}
+
+#[tauri::command]
+fn get_local_interfaces() -> Result<Vec<LocalInterface>, String> {
+    list_local_interfaces().map_err(|error| format!("{error:#}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -371,6 +377,7 @@ pub fn run() {
         .manage(DesktopState::new())
         .invoke_handler(tauri::generate_handler![
             get_desktop_info,
+            get_local_interfaces,
             get_routing_snapshot,
             create_source,
             update_source,

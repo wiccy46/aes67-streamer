@@ -34,6 +34,7 @@ import {
   createSource,
   createStream,
   getDesktopInfo,
+  getLocalInterfaces,
   getRuntimeSnapshot,
   getRoutingSnapshot,
   getStreamSdp,
@@ -46,6 +47,7 @@ import {
 } from "./desktop";
 import type {
   DesktopInfo,
+  LocalInterface,
   RoutingRuntimeSnapshot,
   RoutingSnapshot,
   SourceInput,
@@ -57,6 +59,19 @@ const routeStyle = {
   stroke: "#ff9d00",
   strokeWidth: 2.5,
 };
+
+const loopbackInterface: LocalInterface = {
+  name: "loopback",
+  address: "127.0.0.1",
+  is_loopback: true,
+};
+
+function formatInterfaceOption(networkInterface: LocalInterface): string {
+  const name = networkInterface.is_loopback
+    ? `Loopback (${networkInterface.name})`
+    : networkInterface.name;
+  return `${name} · ${networkInterface.address}`;
+}
 
 type SourceNodeData = {
   name: string;
@@ -449,7 +464,10 @@ export function App() {
   const [desktopInfo, setDesktopInfo] = useState<DesktopInfo | null>(null);
   const [runtime, setRuntime] = useState<RoutingRuntimeSnapshot>(stoppedRuntime);
   const [browserLive, setBrowserLive] = useState(false);
-  const [interfaceName, setInterfaceName] = useState("127.0.0.1");
+  const [localInterfaces, setLocalInterfaces] = useState<LocalInterface[]>([
+    loopbackInterface,
+  ]);
+  const [interfaceAddress, setInterfaceAddress] = useState(loopbackInterface.address);
   const [streamMenu, setStreamMenu] = useState<StreamMenuState | null>(null);
   const [sdpDialog, setSdpDialog] = useState<SdpDialogState | null>(null);
   const [notice, setNotice] = useState(
@@ -678,8 +696,8 @@ export function App() {
     const streamId = parseEngineId(nodeId, "stream");
     const sdpPromise =
       desktopHost && streamId !== null
-        ? getStreamSdp(streamId, { interface: interfaceName, ptpDomain: 0 })
-        : Promise.resolve(buildPreviewSdp(node.data.name, node.data.detail, interfaceName));
+        ? getStreamSdp(streamId, { interface: interfaceAddress, ptpDomain: 0 })
+        : Promise.resolve(buildPreviewSdp(node.data.name, node.data.detail, interfaceAddress));
 
     void sdpPromise
       .then(async (sdp) => {
@@ -716,15 +734,44 @@ export function App() {
         });
     };
 
-    Promise.all([getDesktopInfo(), getRoutingSnapshot(), getRuntimeSnapshot()])
-      .then(([info, snapshot, runtimeSnapshot]) => {
+    const interfaceDiscovery = getLocalInterfaces()
+      .then((interfaces) => ({ interfaces, error: null }))
+      .catch((error: unknown) => ({
+        interfaces: [loopbackInterface],
+        error: formatError(error),
+      }));
+
+    Promise.all([
+      getDesktopInfo(),
+      getRoutingSnapshot(),
+      getRuntimeSnapshot(),
+      interfaceDiscovery,
+    ])
+      .then(([info, snapshot, runtimeSnapshot, discovered]) => {
         if (cancelled) {
           return;
         }
+        const activeInterface = matchesActiveRuntime(runtimeSnapshot.lifecycle)
+          ? runtimeSnapshot.interface
+          : null;
+        const interfaces =
+          activeInterface &&
+          !discovered.interfaces.some((item) => item.address === activeInterface)
+            ? [
+                ...discovered.interfaces,
+                { name: "active", address: activeInterface, is_loopback: false },
+              ]
+            : discovered.interfaces;
         setDesktopInfo(info);
         setRuntime(runtimeSnapshot);
+        setLocalInterfaces(interfaces.length ? interfaces : [loopbackInterface]);
+        setInterfaceAddress(activeInterface ?? loopbackInterface.address);
         applySnapshot(snapshot);
-        setNotice(`Engine model connected · revision ${snapshot.revision}`);
+        setNotice(
+          discovered.error
+            ? `Engine model connected · Interface discovery unavailable; using Loopback.`
+            : `Engine model connected · ${interfaces.length} network ${interfaces.length === 1 ? "interface" : "interfaces"} found.`,
+        );
         pollTimer = window.setTimeout(pollRuntime, 500);
       })
       .catch((error) => {
@@ -915,7 +962,7 @@ export function App() {
       } else {
         setNotice("Starting PTP and routed streams…");
         setRuntime((current) => ({ ...current, lifecycle: "starting", error: null }));
-        const snapshot = await startAll({ interface: interfaceName, ptpDomain: 0 });
+        const snapshot = await startAll({ interface: interfaceAddress, ptpDomain: 0 });
         setRuntime(snapshot);
         setNotice(`${snapshot.streams.length} streams are sending RTP.`);
       }
@@ -978,14 +1025,22 @@ export function App() {
           <div className="routing-actions">
             <label className="interface-control">
               <span>Interface</span>
-              <input
-                type="text"
-                value={interfaceName}
+              <select
+                value={interfaceAddress}
                 disabled={isLive || isStarting}
                 data-testid="send-interface"
-                onChange={(event) => setInterfaceName(event.target.value)}
-                aria-label="Send network interface or IPv4 address"
-              />
+                onChange={(event) => setInterfaceAddress(event.target.value)}
+                aria-label="Send network interface"
+              >
+                {localInterfaces.map((networkInterface) => (
+                  <option
+                    key={`${networkInterface.name}-${networkInterface.address}`}
+                    value={networkInterface.address}
+                  >
+                    {formatInterfaceOption(networkInterface)}
+                  </option>
+                ))}
+              </select>
             </label>
             <button
               className="toolbar-button"

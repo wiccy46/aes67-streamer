@@ -4,6 +4,7 @@
 //! RTP/SAP transport, and PTP timing remain focused lower-level dependencies.
 
 pub mod discovery;
+pub mod interfaces;
 pub mod receiver;
 pub mod routing;
 pub mod routing_runtime;

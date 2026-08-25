@@ -22,6 +22,12 @@ late-packet count, peak/RMS, and the effective SDP for each Stream. The desktop
 polls it at 2 Hz. This verifies transport health without treating polling as the
 future realtime-meter protocol.
 
+`get_local_interfaces` returns the engine's named local IPv4 interfaces for
+interactive Send and Receive configuration. The desktop displays the interface
+name and address but submits the selected address to runtime commands so an
+adapter with multiple IPv4 assignments remains unambiguous. Loopback is the
+first option and the default when the application is not already running.
+
 Events are suitable for small, infrequent broadcast notifications. They must
 not carry audio meters or packet-by-packet data. A workflow that requires
 ordered delivery should use a channel even when its data rate is low.
