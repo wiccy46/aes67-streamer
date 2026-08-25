@@ -17,7 +17,8 @@ edit succeeded before Rust confirms it.
 
 `remove_blocks` accepts selected Source and Stream identifiers, validates the
 complete selection, and applies block and connected-route removal as one engine
-revision. Both the canvas Delete control and keyboard shortcut use this command.
+revision. Both the per-block minus control and keyboard shortcut use this
+command.
 
 The initial sender runtime uses `start_all`, `stop_all`, and
 `get_runtime_snapshot`. Its snapshot is intentionally low-rate operational

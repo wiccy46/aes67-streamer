@@ -22,6 +22,7 @@ import {
   FileAudio,
   FileCode,
   FolderOpen,
+  Minus,
   PlugsConnected,
   Plus,
   Radio,
@@ -80,7 +81,9 @@ type SourceNodeData = {
   detail: string;
   kind: string;
   importDisabled?: boolean;
+  deleteDisabled?: boolean;
   onImportFile?: (nodeId: string) => void;
+  onDeleteRequest?: (nodeId: string) => void;
 };
 
 type StreamNodeData = {
@@ -89,7 +92,9 @@ type StreamNodeData = {
   format: string;
   gainDb: number | null;
   runtime?: StreamRuntimeStats;
+  deleteDisabled?: boolean;
   onGainCommit?: (gainDb: number | null) => void;
+  onDeleteRequest?: (nodeId: string) => void;
   onSdpRequest?: (nodeId: string, action: "view" | "copy") => void;
   onOpenMenu?: (nodeId: string, x: number, y: number) => void;
 };
@@ -169,6 +174,23 @@ function SourceModule({ data, id }: NodeProps<SourceFlowNode>) {
 
   return (
     <article className="module-node module-node--source" data-testid={id}>
+      <button
+        className="block-remove nodrag"
+        type="button"
+        disabled={data.deleteDisabled}
+        title={
+          data.deleteDisabled ? "Stop all streams before deleting this Source" : "Delete Source"
+        }
+        aria-label={`Delete Source ${data.name}`}
+        data-testid={`${id}-remove`}
+        onClick={(event) => {
+          event.stopPropagation();
+          data.onDeleteRequest?.(id);
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <Minus size={14} weight="bold" aria-hidden="true" />
+      </button>
       <div className="module-node__eyebrow">
         <span>
           <FileAudio size={15} weight="fill" aria-hidden="true" />
@@ -238,6 +260,23 @@ function StreamModule({ data, id }: NodeProps<StreamFlowNode>) {
         data.onOpenMenu?.(id, event.clientX, event.clientY);
       }}
     >
+      <button
+        className="block-remove nodrag"
+        type="button"
+        disabled={data.deleteDisabled}
+        title={
+          data.deleteDisabled ? "Stop all streams before deleting this Stream" : "Delete Stream"
+        }
+        aria-label={`Delete Stream ${data.name}`}
+        data-testid={`${id}-remove`}
+        onClick={(event) => {
+          event.stopPropagation();
+          data.onDeleteRequest?.(id);
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <Minus size={14} weight="bold" aria-hidden="true" />
+      </button>
       <Handle
         id="input"
         data-testid={`${id}-input`}
@@ -481,16 +520,6 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
-function formatSelectionSummary(blocks: DeleteBlockTarget[]): string {
-  if (blocks.length === 1) {
-    return blocks[0].name;
-  }
-  if (blocks.length === 2) {
-    return `${blocks[0].name} and ${blocks[1].name}`;
-  }
-  return `${blocks[0].name}, ${blocks[1].name} and ${blocks.length - 2} more`;
-}
-
 export function App() {
   const desktopHost = isDesktopHost();
   const [nodes, setNodes, onNodesChange] = useNodesState<AppNode>(initialNodes);
@@ -517,6 +546,7 @@ export function App() {
   const streamGainCommitRef = useRef(
     (_streamId: number, _config: StreamConfig, _gainDb: number | null) => {},
   );
+  const blockDeleteRequestRef = useRef((_nodeId: string) => {});
   const streamSdpRequestRef = useRef((_nodeId: string, _action: "view" | "copy") => {});
   const isLive = desktopHost ? runtime.lifecycle === "running" : browserLive;
   const isStarting = desktopHost && runtime.lifecycle === "starting";
@@ -554,7 +584,9 @@ export function App() {
               name: source.config.name,
               ...getSourcePresentation(source.config.input),
               importDisabled: matchesActiveRuntime(runtimeRef.current.lifecycle),
+              deleteDisabled: matchesActiveRuntime(runtimeRef.current.lifecycle),
               onImportFile: (nodeId) => sourceFileImportRef.current(nodeId),
+              onDeleteRequest: (nodeId) => blockDeleteRequestRef.current(nodeId),
             },
           };
         });
@@ -574,8 +606,10 @@ export function App() {
               format: "48 kHz · source channels",
               gainDb: stream.config.gain_db,
               runtime: runtimeStats,
+              deleteDisabled: matchesActiveRuntime(runtimeRef.current.lifecycle),
               onGainCommit: (gainDb) =>
                 streamGainCommitRef.current(stream.id, stream.config, gainDb),
+              onDeleteRequest: (nodeId) => blockDeleteRequestRef.current(nodeId),
               onSdpRequest: (nodeId, action) =>
                 streamSdpRequestRef.current(nodeId, action),
               onOpenMenu: (nodeId, x, y) =>
@@ -625,7 +659,9 @@ export function App() {
             data: {
               ...node.data,
               importDisabled: matchesActiveRuntime(runtime.lifecycle),
+              deleteDisabled: matchesActiveRuntime(runtime.lifecycle),
               onImportFile: (nodeId) => sourceFileImportRef.current(nodeId),
+              onDeleteRequest: (nodeId) => blockDeleteRequestRef.current(nodeId),
             },
           };
         }
@@ -637,12 +673,14 @@ export function App() {
           ...node,
           data: {
             ...node.data,
+            deleteDisabled: matchesActiveRuntime(runtime.lifecycle),
             runtime:
               streamId === null
                 ? node.data.runtime
                 : runtime.streams.find((stats) => stats.stream_id === streamId),
             onSdpRequest: (nodeId, action) =>
               streamSdpRequestRef.current(nodeId, action),
+            onDeleteRequest: (nodeId) => blockDeleteRequestRef.current(nodeId),
             onOpenMenu: (nodeId, x, y) =>
               setStreamMenu({ nodeId, name: node.data.name, x, y }),
           },
@@ -922,17 +960,41 @@ export function App() {
     [applySnapshot, desktopHost],
   );
 
-  const requestDeleteSelection = useCallback(() => {
-    if (!selectedBlocks.length) {
-      setNotice("Select a Source or Stream block first.");
-      return;
-    }
-    if (isLive || isStarting) {
-      setNotice("Stop all streams before deleting blocks.");
-      return;
-    }
-    setDeleteDialog({ blocks: selectedBlocks });
-  }, [isLive, isStarting, selectedBlocks]);
+  const requestDeleteSelection = useCallback(
+    (nodeId?: string) => {
+      const requestedBlocks = nodeId
+        ? nodes
+            .filter((node) => node.id === nodeId)
+            .map<DeleteBlockTarget>((node) => ({
+              nodeId: node.id,
+              name: node.data.name,
+              kind: node.type,
+            }))
+        : selectedBlocks;
+
+      if (!requestedBlocks.length) {
+        setNotice("Select a Source or Stream block first.");
+        return;
+      }
+      if (isLive || isStarting) {
+        setNotice("Stop all streams before deleting blocks.");
+        return;
+      }
+      if (nodeId) {
+        setNodes((currentNodes) =>
+          currentNodes.map((node) => ({ ...node, selected: node.id === nodeId })),
+        );
+        setEdges((currentEdges) =>
+          currentEdges.map((edge) => ({ ...edge, selected: false })),
+        );
+        setSelectedNodeIds([nodeId]);
+      }
+      setDeleteDialog({ blocks: requestedBlocks });
+    },
+    [isLive, isStarting, nodes, selectedBlocks, setEdges, setNodes],
+  );
+
+  blockDeleteRequestRef.current = (nodeId) => requestDeleteSelection(nodeId);
 
   async function confirmDeleteSelection() {
     if (!deleteDialog || isDeleting) {
@@ -1047,6 +1109,8 @@ export function App() {
           name: `Source ${sequence}`,
           detail: "Choose an input or file",
           kind: "New source",
+          deleteDisabled: false,
+          onDeleteRequest: (nodeId) => blockDeleteRequestRef.current(nodeId),
         },
       },
     ]);
@@ -1083,6 +1147,8 @@ export function App() {
           detail: "Set multicast address",
           format: "48 kHz · 2 ch",
           gainDb: 0,
+          deleteDisabled: false,
+          onDeleteRequest: (nodeId) => blockDeleteRequestRef.current(nodeId),
         },
       },
     ]);
@@ -1238,7 +1304,7 @@ export function App() {
             onSelectionChange={onSelectionChange}
             onConnect={onConnect}
             onNodeClick={(_, node) =>
-              setNotice(`${node.data.name} selected. Use the Delete control or keyboard shortcut.`)
+              setNotice(`${node.data.name} selected. Use its minus button or a delete key.`)
             }
             onEdgeClick={() => setNotice("Selected route. Press Delete or Backspace to remove it.")}
             onPaneClick={() => {
@@ -1256,34 +1322,6 @@ export function App() {
           >
             <Background color="#1a2530" gap={25} size={1} />
           </ReactFlow>
-
-          {selectedBlocks.length ? (
-            <div className="selection-actions" data-testid="selection-actions">
-              <div className="selection-actions__summary">
-                <span>
-                  {selectedBlocks.length} {selectedBlocks.length === 1 ? "block" : "blocks"} selected
-                </span>
-                <strong title={selectedBlocks.map((block) => block.name).join(", ")}>
-                  {formatSelectionSummary(selectedBlocks)}
-                </strong>
-              </div>
-              <span className="selection-actions__shortcut">Backspace or Delete</span>
-              <button
-                type="button"
-                disabled={isLive || isStarting}
-                title={
-                  isLive || isStarting
-                    ? "Stop all streams before deleting blocks"
-                    : "Delete selected blocks"
-                }
-                data-testid="delete-selected"
-                onClick={requestDeleteSelection}
-              >
-                <Trash size={16} weight="bold" aria-hidden="true" />
-                Delete
-              </button>
-            </div>
-          ) : null}
 
           <aside className="canvas-legend" aria-live="polite">
             <span className="canvas-legend__line" aria-hidden="true" />
