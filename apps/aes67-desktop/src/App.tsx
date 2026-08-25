@@ -14,12 +14,14 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   Broadcast,
   CheckCircle,
   Copy,
   FileAudio,
   FileCode,
+  FolderOpen,
   PlugsConnected,
   Plus,
   Radio,
@@ -39,6 +41,7 @@ import {
   removeRoute,
   startAll,
   stopAll,
+  updateSource,
   updateStream,
 } from "./desktop";
 import type {
@@ -59,6 +62,8 @@ type SourceNodeData = {
   name: string;
   detail: string;
   kind: string;
+  importDisabled?: boolean;
+  onImportFile?: (nodeId: string) => void;
 };
 
 type StreamNodeData = {
@@ -143,6 +148,8 @@ const initialEdges: Edge[] = [
 ];
 
 function SourceModule({ data, id }: NodeProps<SourceFlowNode>) {
+  const hasFile = data.kind === "Audio file";
+
   return (
     <article className="module-node module-node--source" data-testid={id}>
       <div className="module-node__eyebrow">
@@ -153,7 +160,20 @@ function SourceModule({ data, id }: NodeProps<SourceFlowNode>) {
         <span className="module-node__signal" aria-label="Source defined" />
       </div>
       <h2>{data.name}</h2>
-      <p>{data.detail}</p>
+      <div className="source-file-row">
+        <p title={data.detail}>{data.detail}</p>
+        <button
+          className="source-file-action nodrag"
+          type="button"
+          disabled={data.importDisabled}
+          data-testid={`${id}-import-file`}
+          onClick={() => data.onImportFile?.(id)}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <FolderOpen size={14} weight="bold" aria-hidden="true" />
+          {hasFile ? "Replace" : "Import file"}
+        </button>
+      </div>
       <div className="module-node__port-label">Output</div>
       <Handle
         id="output"
@@ -357,6 +377,10 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function matchesActiveRuntime(lifecycle: RoutingRuntimeSnapshot["lifecycle"]): boolean {
+  return lifecycle === "starting" || lifecycle === "running";
+}
+
 function buildPreviewSdp(name: string, destination: string, interfaceName: string): string {
   const [address = "239.69.83.1", port = "5004"] = destination.split(":");
   return [
@@ -434,6 +458,7 @@ export function App() {
   const sourceSequence = useRef(4);
   const streamSequence = useRef(4);
   const runtimeRef = useRef(runtime);
+  const sourceFileImportRef = useRef((_nodeId: string) => {});
   const streamGainCommitRef = useRef(
     (_streamId: number, _config: StreamConfig, _gainDb: number | null) => {},
   );
@@ -457,6 +482,8 @@ export function App() {
             data: {
               name: source.config.name,
               ...getSourcePresentation(source.config.input),
+              importDisabled: matchesActiveRuntime(runtimeRef.current.lifecycle),
+              onImportFile: (nodeId) => sourceFileImportRef.current(nodeId),
             },
           };
         });
@@ -521,6 +548,16 @@ export function App() {
   useEffect(() => {
     setNodes((currentNodes) =>
       currentNodes.map((node) => {
+        if (node.type === "source") {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              importDisabled: matchesActiveRuntime(runtime.lifecycle),
+              onImportFile: (nodeId) => sourceFileImportRef.current(nodeId),
+            },
+          };
+        }
         if (node.type !== "stream") {
           return node;
         }
@@ -542,6 +579,92 @@ export function App() {
       }),
     );
   }, [runtime, setNodes]);
+
+  sourceFileImportRef.current = (nodeId) => {
+    if (matchesActiveRuntime(runtime.lifecycle)) {
+      setNotice("Stop all streams before changing a source file.");
+      return;
+    }
+
+    const node = nodes.find((candidate) => candidate.id === nodeId);
+    if (!node || node.type !== "source") {
+      setNotice("Could not find that source.");
+      return;
+    }
+
+    if (!desktopHost) {
+      const picker = document.createElement("input");
+      picker.type = "file";
+      picker.accept = ".wav,.flac,.mp3,.aiff,.aif,audio/*";
+      picker.addEventListener(
+        "change",
+        () => {
+          const file = picker.files?.[0];
+          if (!file) {
+            return;
+          }
+          setNodes((currentNodes) =>
+            currentNodes.map((currentNode) =>
+              currentNode.id === nodeId && currentNode.type === "source"
+                ? {
+                    ...currentNode,
+                    data: {
+                      ...currentNode.data,
+                      kind: "Audio file",
+                      detail: file.name,
+                    },
+                  }
+                : currentNode,
+            ),
+          );
+          setNotice(`${file.name} selected for ${node.data.name} in browser preview.`);
+        },
+        { once: true },
+      );
+      picker.click();
+      return;
+    }
+
+    const sourceId = parseEngineId(nodeId, "source");
+    if (sourceId === null) {
+      setNotice("This source does not contain a valid engine identifier.");
+      return;
+    }
+
+    void open({
+      multiple: false,
+      directory: false,
+      filters: [
+        {
+          name: "Audio files",
+          extensions: ["wav", "flac", "mp3", "aiff", "aif"],
+        },
+      ],
+    })
+      .then((selection) => {
+        if (selection === null) {
+          return null;
+        }
+        const path = Array.isArray(selection) ? selection[0] : selection;
+        if (!path) {
+          return null;
+        }
+        setNotice(`Importing ${path.split(/[\\/]/).at(-1) ?? path}…`);
+        return updateSource(sourceId, {
+          name: node.data.name,
+          inputKind: "file",
+          location: path,
+        });
+      })
+      .then((snapshot) => {
+        if (!snapshot) {
+          return;
+        }
+        applySnapshot(snapshot);
+        setNotice(`${node.data.name} audio file updated · revision ${snapshot.revision}`);
+      })
+      .catch((error) => setNotice(`Could not import audio file: ${formatError(error)}`));
+  };
 
   streamSdpRequestRef.current = (nodeId, action) => {
     const node = nodes.find((candidate) => candidate.id === nodeId);
@@ -710,7 +833,7 @@ export function App() {
       })
         .then((snapshot) => {
           applySnapshot(snapshot);
-          setNotice("Source created. Device selection is the next editor step.");
+          setNotice("Source created. Import an audio file from its Source block.");
         })
         .catch((error) => setNotice(`Could not create source: ${formatError(error)}`));
       return;

@@ -80,7 +80,8 @@ multiple streams with a different gain on each route destination. `Start all`
 runs file-backed routes through one shared PTP runtime, decodes each source once
 per packet, and sends independent RTP/SAP outputs. Stream modules show live
 packet, bitrate, and peak-level statistics, and expose view/copy actions for
-their generated SDP. Live-input capture and production source/device editors
+their generated SDP. File-backed Sources can import or replace audio directly
+from their Source blocks. Live-input capture and production device editors
 remain follow-up work.
 
 Run the native desktop acceptance suite with:

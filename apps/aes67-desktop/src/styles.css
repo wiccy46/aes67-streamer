@@ -386,6 +386,50 @@ button:focus-visible {
   line-height: 1.35;
 }
 
+.source-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.source-file-row p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-file-action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 27px;
+  padding: 0 8px;
+  color: #ffb43f;
+  border: 1px solid rgba(255, 157, 0, 0.38);
+  border-radius: 4px;
+  background: rgba(255, 157, 0, 0.055);
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.source-file-action:hover {
+  color: #ffd18a;
+  border-color: rgba(255, 177, 55, 0.78);
+  background: rgba(255, 157, 0, 0.11);
+}
+
+.source-file-action:disabled {
+  color: #707983;
+  border-color: rgba(151, 161, 171, 0.18);
+  background: transparent;
+  cursor: not-allowed;
+}
+
 .module-node .is-address,
 .module-node__format {
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
