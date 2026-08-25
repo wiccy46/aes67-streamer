@@ -15,6 +15,10 @@ Commands are request/response operations. Every mutation returns a typed error
 or the authoritative revisioned snapshot; the frontend never assumes a local
 edit succeeded before Rust confirms it.
 
+`remove_blocks` accepts selected Source and Stream identifiers, validates the
+complete selection, and applies block and connected-route removal as one engine
+revision. Both the canvas Delete control and keyboard shortcut use this command.
+
 The initial sender runtime uses `start_all`, `stop_all`, and
 `get_runtime_snapshot`. Its snapshot is intentionally low-rate operational
 state: lifecycle, PTP status, uptime, packet/byte totals, packet/bit rate,

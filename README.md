@@ -82,9 +82,11 @@ per packet, and sends independent RTP/SAP outputs. Stream modules show live
 packet, bitrate, and peak-level statistics, and expose view/copy actions for
 their generated SDP. The Send toolbar discovers local IPv4 interfaces and shows
 their operating-system names in a dropdown, with Loopback first and selected by
-default. File-backed Sources can import or replace audio directly from their
-Source blocks. Live-input capture and production device editors remain
-follow-up work.
+default. Selected Source and Stream blocks are clearly identified and can be
+deleted from the canvas action bar or with Backspace/Delete after confirmation;
+their connected routes are removed with them. File-backed Sources can import or
+replace audio directly from their Source blocks. Live-input capture and
+production device editors remain follow-up work.
 
 Run the native desktop acceptance suite with:
 

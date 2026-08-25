@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   Handle,
@@ -26,6 +26,7 @@ import {
   Plus,
   Radio,
   Stop,
+  Trash,
   Waveform,
   X,
 } from "@phosphor-icons/react";
@@ -39,6 +40,7 @@ import {
   getRoutingSnapshot,
   getStreamSdp,
   isDesktopHost,
+  removeBlocks,
   removeRoute,
   startAll,
   stopAll,
@@ -457,6 +459,38 @@ type SdpDialogState = {
   sdp: string;
 };
 
+type DeleteBlockTarget = {
+  nodeId: string;
+  name: string;
+  kind: "source" | "stream";
+};
+
+type DeleteDialogState = {
+  blocks: DeleteBlockTarget[];
+};
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return (
+    target.isContentEditable ||
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT"
+  );
+}
+
+function formatSelectionSummary(blocks: DeleteBlockTarget[]): string {
+  if (blocks.length === 1) {
+    return blocks[0].name;
+  }
+  if (blocks.length === 2) {
+    return `${blocks[0].name} and ${blocks[1].name}`;
+  }
+  return `${blocks[0].name}, ${blocks[1].name} and ${blocks.length - 2} more`;
+}
+
 export function App() {
   const desktopHost = isDesktopHost();
   const [nodes, setNodes, onNodesChange] = useNodesState<AppNode>(initialNodes);
@@ -468,8 +502,11 @@ export function App() {
     loopbackInterface,
   ]);
   const [interfaceAddress, setInterfaceAddress] = useState(loopbackInterface.address);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [streamMenu, setStreamMenu] = useState<StreamMenuState | null>(null);
   const [sdpDialog, setSdpDialog] = useState<SdpDialogState | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<DeleteDialogState | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [notice, setNotice] = useState(
     "Drag an output handle onto a stream input to create a route.",
   );
@@ -483,6 +520,22 @@ export function App() {
   const streamSdpRequestRef = useRef((_nodeId: string, _action: "view" | "copy") => {});
   const isLive = desktopHost ? runtime.lifecycle === "running" : browserLive;
   const isStarting = desktopHost && runtime.lifecycle === "starting";
+  const selectedBlocks = useMemo(() => {
+    const selectedIds = new Set(selectedNodeIds);
+    return nodes
+      .filter((node) => selectedIds.has(node.id))
+      .map<DeleteBlockTarget>((node) => ({
+        nodeId: node.id,
+        name: node.data.name,
+        kind: node.type,
+      }));
+  }, [nodes, selectedNodeIds]);
+
+  const onSelectionChange = useCallback(
+    ({ nodes: selectedNodes }: { nodes: AppNode[] }) =>
+      setSelectedNodeIds(selectedNodes.map((node) => node.id)),
+    [],
+  );
 
   runtimeRef.current = runtime;
 
@@ -869,6 +922,103 @@ export function App() {
     [applySnapshot, desktopHost],
   );
 
+  const requestDeleteSelection = useCallback(() => {
+    if (!selectedBlocks.length) {
+      setNotice("Select a Source or Stream block first.");
+      return;
+    }
+    if (isLive || isStarting) {
+      setNotice("Stop all streams before deleting blocks.");
+      return;
+    }
+    setDeleteDialog({ blocks: selectedBlocks });
+  }, [isLive, isStarting, selectedBlocks]);
+
+  async function confirmDeleteSelection() {
+    if (!deleteDialog || isDeleting) {
+      return;
+    }
+
+    const blocks = deleteDialog.blocks;
+    setIsDeleting(true);
+    setNotice(`Deleting ${blocks.length} selected ${blocks.length === 1 ? "block" : "blocks"}...`);
+
+    try {
+      if (desktopHost) {
+        const sourceIds: number[] = [];
+        const streamIds: number[] = [];
+        for (const block of blocks) {
+          if (block.kind === "source") {
+            const sourceId = parseEngineId(block.nodeId, "source");
+            if (sourceId === null) {
+              throw new Error(`${block.name} does not contain a valid Source identifier.`);
+            }
+            sourceIds.push(sourceId);
+          } else {
+            const streamId = parseEngineId(block.nodeId, "stream");
+            if (streamId === null) {
+              throw new Error(`${block.name} does not contain a valid Stream identifier.`);
+            }
+            streamIds.push(streamId);
+          }
+        }
+        const snapshot = await removeBlocks({ sourceIds, streamIds });
+        applySnapshot(snapshot);
+      } else {
+        const deletedIds = new Set(blocks.map((block) => block.nodeId));
+        setNodes((currentNodes) =>
+          currentNodes.filter((node) => !deletedIds.has(node.id)),
+        );
+        setEdges((currentEdges) =>
+          currentEdges.filter(
+            (edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target),
+          ),
+        );
+      }
+
+      setSelectedNodeIds([]);
+      setDeleteDialog(null);
+      setNotice(
+        `${blocks.length} ${blocks.length === 1 ? "block" : "blocks"} deleted with connected routes.`,
+      );
+    } catch (error) {
+      setNotice(`Could not delete selection: ${formatError(error)}`);
+      if (desktopHost) {
+        const snapshot = await getRoutingSnapshot().catch(() => null);
+        if (snapshot) {
+          applySnapshot(snapshot);
+        }
+      }
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
+  useEffect(() => {
+    const handleDeleteShortcut = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && deleteDialog && !isDeleting) {
+        event.preventDefault();
+        setDeleteDialog(null);
+        return;
+      }
+      if (
+        (event.key !== "Backspace" && event.key !== "Delete") ||
+        event.repeat ||
+        deleteDialog ||
+        isEditableTarget(event.target) ||
+        !selectedBlocks.length
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      requestDeleteSelection();
+    };
+
+    window.addEventListener("keydown", handleDeleteShortcut, true);
+    return () => window.removeEventListener("keydown", handleDeleteShortcut, true);
+  }, [deleteDialog, isDeleting, requestDeleteSelection, selectedBlocks.length]);
+
   function addSource() {
     const sequence = sourceSequence.current++;
     if (desktopHost) {
@@ -1085,9 +1235,10 @@ export function App() {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onEdgesDelete={onEdgesDelete}
+            onSelectionChange={onSelectionChange}
             onConnect={onConnect}
             onNodeClick={(_, node) =>
-              setNotice(`${node.data.name} can be moved anywhere on the canvas.`)
+              setNotice(`${node.data.name} selected. Use the Delete control or keyboard shortcut.`)
             }
             onEdgeClick={() => setNotice("Selected route. Press Delete or Backspace to remove it.")}
             onPaneClick={() => {
@@ -1105,6 +1256,34 @@ export function App() {
           >
             <Background color="#1a2530" gap={25} size={1} />
           </ReactFlow>
+
+          {selectedBlocks.length ? (
+            <div className="selection-actions" data-testid="selection-actions">
+              <div className="selection-actions__summary">
+                <span>
+                  {selectedBlocks.length} {selectedBlocks.length === 1 ? "block" : "blocks"} selected
+                </span>
+                <strong title={selectedBlocks.map((block) => block.name).join(", ")}>
+                  {formatSelectionSummary(selectedBlocks)}
+                </strong>
+              </div>
+              <span className="selection-actions__shortcut">Backspace or Delete</span>
+              <button
+                type="button"
+                disabled={isLive || isStarting}
+                title={
+                  isLive || isStarting
+                    ? "Stop all streams before deleting blocks"
+                    : "Delete selected blocks"
+                }
+                data-testid="delete-selected"
+                onClick={requestDeleteSelection}
+              >
+                <Trash size={16} weight="bold" aria-hidden="true" />
+                Delete
+              </button>
+            </div>
+          ) : null}
 
           <aside className="canvas-legend" aria-live="polite">
             <span className="canvas-legend__line" aria-hidden="true" />
@@ -1190,6 +1369,70 @@ export function App() {
               >
                 <Copy size={16} aria-hidden="true" />
                 Copy SDP
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {deleteDialog ? (
+        <div
+          className="delete-backdrop"
+          role="presentation"
+          onMouseDown={() => {
+            if (!isDeleting) {
+              setDeleteDialog(null);
+            }
+          }}
+        >
+          <section
+            className="delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-dialog-title"
+            aria-describedby="delete-dialog-description"
+            data-testid="delete-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header>
+              <Trash size={22} weight="bold" aria-hidden="true" />
+              <div>
+                <span>Confirm deletion</span>
+                <h2 id="delete-dialog-title">
+                  Delete {deleteDialog.blocks.length === 1 ? "this block" : "these blocks"}?
+                </h2>
+              </div>
+            </header>
+            <p id="delete-dialog-description">
+              Connected routes will also be removed. This change cannot be undone.
+            </p>
+            <div className="delete-dialog__targets">
+              {deleteDialog.blocks.map((block) => (
+                <span key={block.nodeId}>
+                  <small>{block.kind === "source" ? "Source" : "Stream"}</small>
+                  {block.name}
+                </span>
+              ))}
+            </div>
+            <footer>
+              <button
+                className="delete-dialog__cancel"
+                type="button"
+                disabled={isDeleting}
+                autoFocus
+                onClick={() => setDeleteDialog(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="delete-dialog__confirm"
+                type="button"
+                disabled={isDeleting}
+                data-testid="confirm-delete"
+                onClick={() => void confirmDeleteSelection()}
+              >
+                <Trash size={16} weight="bold" aria-hidden="true" />
+                {isDeleting ? "Deleting..." : "Delete"}
               </button>
             </footer>
           </section>

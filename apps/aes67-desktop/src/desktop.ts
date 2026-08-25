@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   DesktopInfo,
   LocalInterface,
+  RemoveBlocksRequest,
   RoutingRuntimeSnapshot,
   RoutingSnapshot,
   RuntimeRequest,
@@ -55,6 +56,10 @@ export function updateStream(
 
 export function removeStream(streamId: StreamId): Promise<RoutingSnapshot> {
   return invoke<RoutingSnapshot>("remove_stream", { streamId });
+}
+
+export function removeBlocks(request: RemoveBlocksRequest): Promise<RoutingSnapshot> {
+  return invoke<RoutingSnapshot>("remove_blocks", { request });
 }
 
 export function assignSource(sourceId: SourceId, streamId: StreamId): Promise<RoutingSnapshot> {

@@ -77,6 +77,13 @@ struct StreamRequest {
     gain_db: Option<f32>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveBlocksRequest {
+    source_ids: Vec<SourceId>,
+    stream_ids: Vec<StreamId>,
+}
+
 fn default_stream_gain_db() -> Option<f32> {
     Some(0.0)
 }
@@ -203,6 +210,17 @@ fn remove_stream(
 ) -> Result<RoutingSnapshot, String> {
     with_routing(&state, |routing| {
         routing.remove_stream(stream_id)?;
+        Ok(routing.get_snapshot())
+    })
+}
+
+#[tauri::command]
+fn remove_blocks(
+    request: RemoveBlocksRequest,
+    state: State<'_, DesktopState>,
+) -> Result<RoutingSnapshot, String> {
+    with_routing(&state, |routing| {
+        routing.remove_blocks(&request.source_ids, &request.stream_ids)?;
         Ok(routing.get_snapshot())
     })
 }
@@ -385,6 +403,7 @@ pub fn run() {
             create_stream,
             update_stream,
             remove_stream,
+            remove_blocks,
             assign_source,
             remove_route,
             get_runtime_snapshot,

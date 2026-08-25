@@ -6,7 +6,7 @@
 //! before the runtime applies it to live audio.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -169,13 +169,7 @@ impl RoutingModel {
     }
 
     pub fn remove_source(&mut self, id: SourceId) -> Result<(), RoutingError> {
-        self.sources
-            .remove(&id)
-            .ok_or(RoutingError::UnknownSource(id))?;
-        self.routes_by_stream
-            .retain(|_, source_id| *source_id != id);
-        self.revision += 1;
-        Ok(())
+        self.remove_blocks(&[id], &[])
     }
 
     pub fn create_stream(&mut self, config: StreamConfig) -> Result<StreamId, RoutingError> {
@@ -202,10 +196,40 @@ impl RoutingModel {
     }
 
     pub fn remove_stream(&mut self, id: StreamId) -> Result<(), RoutingError> {
+        self.remove_blocks(&[], &[id])
+    }
+
+    /// Atomically remove selected Sources and Streams with their routes.
+    pub fn remove_blocks(
+        &mut self,
+        source_ids: &[SourceId],
+        stream_ids: &[StreamId],
+    ) -> Result<(), RoutingError> {
+        let source_ids = source_ids.iter().copied().collect::<BTreeSet<_>>();
+        let stream_ids = stream_ids.iter().copied().collect::<BTreeSet<_>>();
+
+        for source_id in &source_ids {
+            if !self.sources.contains_key(source_id) {
+                return Err(RoutingError::UnknownSource(*source_id));
+            }
+        }
+        for stream_id in &stream_ids {
+            if !self.streams.contains_key(stream_id) {
+                return Err(RoutingError::UnknownStream(*stream_id));
+            }
+        }
+
+        if source_ids.is_empty() && stream_ids.is_empty() {
+            return Ok(());
+        }
+
+        self.sources
+            .retain(|source_id, _| !source_ids.contains(source_id));
         self.streams
-            .remove(&id)
-            .ok_or(RoutingError::UnknownStream(id))?;
-        self.routes_by_stream.remove(&id);
+            .retain(|stream_id, _| !stream_ids.contains(stream_id));
+        self.routes_by_stream.retain(|stream_id, source_id| {
+            !stream_ids.contains(stream_id) && !source_ids.contains(source_id)
+        });
         self.revision += 1;
         Ok(())
     }

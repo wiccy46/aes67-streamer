@@ -269,7 +269,7 @@ button:focus-visible {
 
 .react-flow__node.selected .module-node {
   border-color: #ffb333;
-  box-shadow: 0 0 0 1px rgba(255, 179, 51, 0.18), 0 20px 46px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 0 0 2px rgba(255, 179, 51, 0.42), 0 20px 46px rgba(0, 0, 0, 0.32);
 }
 
 .react-flow__edge-path {
@@ -667,6 +667,88 @@ button:focus-visible {
   color: #83e266;
 }
 
+.selection-actions {
+  position: absolute;
+  z-index: 6;
+  top: 18px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: min(520px, calc(100% - 48px));
+  min-height: 58px;
+  padding: 8px 9px 8px 15px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 179, 51, 0.58);
+  border-radius: 7px;
+  background: rgba(15, 22, 30, 0.96);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.32);
+}
+
+.selection-actions__summary {
+  display: grid;
+  min-width: 0;
+  margin-right: auto;
+  gap: 2px;
+}
+
+.selection-actions__summary span {
+  color: #ffb43f;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.selection-actions__summary strong {
+  overflow: hidden;
+  color: #eef1ed;
+  font-size: 13px;
+  font-weight: 610;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-actions__shortcut {
+  flex: none;
+  color: #818c98;
+  font: 500 10px/1 "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+.selection-actions button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 0 12px;
+  color: #ffaaa3;
+  border: 1px solid rgba(236, 106, 100, 0.55);
+  border-radius: 5px;
+  background: rgba(118, 39, 38, 0.22);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.selection-actions button:hover:not(:disabled) {
+  color: #ffe3df;
+  border-color: #ec6a64;
+  background: rgba(150, 49, 47, 0.38);
+}
+
+.selection-actions button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.selection-actions button:disabled {
+  color: #766f70;
+  border-color: rgba(146, 126, 127, 0.24);
+  background: rgba(62, 46, 48, 0.18);
+  cursor: not-allowed;
+}
+
 .stream-menu {
   position: fixed;
   z-index: 30;
@@ -808,6 +890,146 @@ button:focus-visible {
   cursor: pointer;
 }
 
+.delete-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  padding: 28px;
+  place-items: center;
+  background: rgba(2, 5, 8, 0.76);
+  backdrop-filter: blur(4px);
+}
+
+.delete-dialog {
+  width: min(470px, 100%);
+  overflow: hidden;
+  color: #eef1ed;
+  border: 1px solid rgba(236, 106, 100, 0.48);
+  border-radius: 8px;
+  background: #10171f;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.54);
+}
+
+.delete-dialog header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid rgba(201, 211, 219, 0.13);
+}
+
+.delete-dialog header > svg {
+  flex: none;
+  margin-top: 2px;
+  color: #f07972;
+}
+
+.delete-dialog header span {
+  color: #f28b85;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.delete-dialog h2 {
+  margin: 4px 0 0;
+  font-size: 20px;
+  font-weight: 610;
+}
+
+.delete-dialog > p {
+  margin: 0;
+  padding: 16px 20px 12px;
+  color: #aab3bc;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.delete-dialog__targets {
+  max-height: 188px;
+  margin: 0 20px 18px;
+  overflow: auto;
+  border: 1px solid rgba(194, 204, 213, 0.15);
+  border-radius: 5px;
+  background: rgba(6, 11, 16, 0.5);
+}
+
+.delete-dialog__targets > span {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: #e2e6e3;
+  font-size: 12px;
+}
+
+.delete-dialog__targets > span + span {
+  border-top: 1px solid rgba(194, 204, 213, 0.1);
+}
+
+.delete-dialog__targets small {
+  color: #77838f;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.delete-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 14px 20px 18px;
+  border-top: 1px solid rgba(201, 211, 219, 0.13);
+}
+
+.delete-dialog footer button {
+  min-width: 90px;
+  min-height: 38px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.delete-dialog footer button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.delete-dialog footer button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.delete-dialog__cancel {
+  color: #c8cfd4;
+  border: 1px solid rgba(200, 210, 218, 0.3);
+  background: rgba(24, 33, 43, 0.8);
+}
+
+.delete-dialog__cancel:hover:not(:disabled) {
+  border-color: rgba(223, 230, 235, 0.52);
+  background: rgba(35, 46, 57, 0.9);
+}
+
+.delete-dialog__confirm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #fff1ef;
+  border: 1px solid #d85e58;
+  background: #a13f3b;
+}
+
+.delete-dialog__confirm:hover:not(:disabled) {
+  border-color: #ef7a73;
+  background: #b84944;
+}
+
 @media (max-width: 760px) {
   .topbar {
     height: 70px;
@@ -872,6 +1094,16 @@ button:focus-visible {
   }
 
   .canvas-status {
+    display: none;
+  }
+
+  .selection-actions {
+    top: 12px;
+    width: calc(100% - 28px);
+    gap: 8px;
+  }
+
+  .selection-actions__shortcut {
     display: none;
   }
 }

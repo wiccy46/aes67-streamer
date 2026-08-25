@@ -64,6 +64,11 @@ export interface StreamRequest {
   gainDb: number | null;
 }
 
+export interface RemoveBlocksRequest {
+  sourceIds: SourceId[];
+  streamIds: StreamId[];
+}
+
 export interface RuntimeRequest {
   interface: string;
   ptpDomain: number;
