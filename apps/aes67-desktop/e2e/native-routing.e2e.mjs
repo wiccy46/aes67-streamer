@@ -91,9 +91,8 @@ describe("AES67 native routing workspace", () => {
     );
     assert.ok(attenuated.revision > withStream.revision);
 
-    const sourceOutput = await $('[data-testid="source-1-output"]');
-    const streamInput = await $('[data-testid="stream-3-input"]');
-    await sourceOutput.dragAndDrop(streamInput);
+    await clickSelector('[data-testid="source-1-output"]');
+    await clickSelector('[data-testid="stream-3-input"]');
     const reassigned = await waitForSnapshot(
       (snapshot) =>
         snapshot.routes.some((route) => route.source_id === 1 && route.stream_id === 3),

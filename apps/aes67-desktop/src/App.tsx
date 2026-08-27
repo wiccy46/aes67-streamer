@@ -1303,6 +1303,7 @@ export function App() {
             onEdgesDelete={onEdgesDelete}
             onSelectionChange={onSelectionChange}
             onConnect={onConnect}
+            connectOnClick
             onNodeClick={(_, node) =>
               setNotice(`${node.data.name} selected. Use its minus button or a delete key.`)
             }
