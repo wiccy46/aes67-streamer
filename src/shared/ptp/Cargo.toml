@@ -9,5 +9,4 @@ anyhow = "1.0"
 log = "0.4"
 tokio = { version = "1.0", features = ["net", "time", "rt", "macros", "sync"] }
 tokio-util = "0.7"
-socket2 = { version = "0.6.1", features = ["all"] }
-libc = "0.2"
+network = { path = "../network" }
