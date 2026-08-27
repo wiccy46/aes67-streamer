@@ -1,10 +1,9 @@
-use anyhow::{Context, Result, anyhow};
-use socket2::{Domain, Protocol, Socket, Type};
+use anyhow::{Context, Result};
+use network::find_interface_mac_by_ipv4;
+use network::udp::{UdpSocketOptions, create_udp_socket};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::ffi::CStr;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
@@ -23,44 +22,15 @@ const LOCAL_MASTER_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 const PTP_DSCP: u8 = 46;
 const PTP_SOCKET_BUFFER_SIZE: usize = 262_144;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UdpSocketDefaults {
-    reuse_address: bool,
-    reuse_port: bool,
-    multicast_loop_v4: bool,
-    send_buffer_size: Option<usize>,
-    recv_buffer_size: Option<usize>,
-}
-
-fn ptp_socket_defaults() -> UdpSocketDefaults {
-    UdpSocketDefaults {
+fn ptp_socket_defaults() -> UdpSocketOptions {
+    UdpSocketOptions {
         reuse_address: true,
         reuse_port: true,
         multicast_loop_v4: true,
         send_buffer_size: Some(PTP_SOCKET_BUFFER_SIZE),
         recv_buffer_size: Some(PTP_SOCKET_BUFFER_SIZE),
+        dscp: Some(PTP_DSCP),
     }
-}
-
-fn apply_udp_socket_defaults(socket: &Socket, defaults: UdpSocketDefaults) -> Result<()> {
-    if defaults.reuse_address {
-        socket.set_reuse_address(true)?;
-    }
-    #[cfg(unix)]
-    if defaults.reuse_port {
-        socket.set_reuse_port(true)?;
-    }
-    if defaults.multicast_loop_v4 {
-        socket.set_multicast_loop_v4(true)?;
-    }
-    if let Some(size) = defaults.send_buffer_size {
-        socket.set_send_buffer_size(size)?;
-    }
-    if let Some(size) = defaults.recv_buffer_size {
-        socket.set_recv_buffer_size(size)?;
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -710,14 +680,11 @@ impl PtpClient {
     }
 
     fn setup_multicast_socket(port: u16, interface_ip: Ipv4Addr) -> Result<UdpSocket> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-
-        apply_udp_socket_defaults(&socket, ptp_socket_defaults())?;
+        let socket = create_udp_socket(ptp_socket_defaults())?;
 
         // Bind to wildcard address
         let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
         socket.bind(&addr.into())?;
-        socket.set_tos_v4(dscp_to_tos(PTP_DSCP)?)?;
 
         // Join multicast group 224.0.1.129 (PTP primary)
         let multi_addr = Ipv4Addr::new(224, 0, 1, 129);
@@ -730,14 +697,6 @@ impl PtpClient {
 
         Ok(UdpSocket::from_std(socket.into())?)
     }
-}
-
-fn dscp_to_tos(dscp: u8) -> Result<u32> {
-    if dscp > 63 {
-        return Err(anyhow!("DSCP value {dscp} must be between 0 and 63"));
-    }
-
-    Ok((dscp as u32) << 2)
 }
 
 fn announce_timeout(log_message_interval: i8) -> Duration {
@@ -774,141 +733,9 @@ fn source_port_identity(clock_identity: ClockIdentity) -> [u8; 10] {
 }
 
 fn discover_clock_identity(interface_ip: Ipv4Addr) -> Result<ClockIdentity> {
-    let interface_name = interface_name_for_ipv4(interface_ip)?
-        .with_context(|| format!("no interface found for {interface_ip}"))?;
-    let mac = mac_address_for_interface(&interface_name)?
-        .with_context(|| format!("no MAC address found for interface {interface_name}"))?;
+    let mac = find_interface_mac_by_ipv4(interface_ip)
+        .with_context(|| format!("no MAC address found for interface address {interface_ip}"))?;
     Ok(ClockIdentity::from_mac_address(mac))
-}
-
-#[cfg(unix)]
-fn interface_name_for_ipv4(interface_ip: Ipv4Addr) -> Result<Option<String>> {
-    let mut interfaces: *mut libc::ifaddrs = ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("failed to enumerate interfaces");
-    }
-
-    let mut cursor = interfaces;
-    let mut found = None;
-
-    while !cursor.is_null() {
-        let interface = unsafe { &*cursor };
-
-        if !interface.ifa_name.is_null() && !interface.ifa_addr.is_null() {
-            let name = unsafe { CStr::from_ptr(interface.ifa_name) }.to_string_lossy();
-            let family = unsafe { (*interface.ifa_addr).sa_family as i32 };
-
-            if family == libc::AF_INET {
-                let sockaddr = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
-                let ip = Ipv4Addr::from(sockaddr.sin_addr.s_addr.to_ne_bytes());
-                if ip == interface_ip {
-                    found = Some(name.into_owned());
-                    break;
-                }
-            }
-        }
-
-        cursor = unsafe { (*cursor).ifa_next };
-    }
-
-    unsafe { libc::freeifaddrs(interfaces) };
-    Ok(found)
-}
-
-#[cfg(not(unix))]
-fn interface_name_for_ipv4(_interface_ip: Ipv4Addr) -> Result<Option<String>> {
-    Ok(None)
-}
-
-#[cfg(target_os = "linux")]
-fn mac_address_for_interface(interface_name: &str) -> Result<Option<[u8; 6]>> {
-    let mut interfaces: *mut libc::ifaddrs = ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("failed to enumerate interfaces");
-    }
-
-    let mut cursor = interfaces;
-    let mut found = None;
-
-    while !cursor.is_null() {
-        let interface = unsafe { &*cursor };
-
-        if !interface.ifa_name.is_null() && !interface.ifa_addr.is_null() {
-            let name = unsafe { CStr::from_ptr(interface.ifa_name) }.to_string_lossy();
-            let family = unsafe { (*interface.ifa_addr).sa_family as i32 };
-
-            if name == interface_name && family == libc::AF_PACKET {
-                let sockaddr = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_ll) };
-                if sockaddr.sll_halen >= 6 {
-                    let mut mac = [0u8; 6];
-                    mac.copy_from_slice(&sockaddr.sll_addr[..6]);
-                    found = Some(mac);
-                    break;
-                }
-            }
-        }
-
-        cursor = unsafe { (*cursor).ifa_next };
-    }
-
-    unsafe { libc::freeifaddrs(interfaces) };
-    Ok(found)
-}
-
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-))]
-fn mac_address_for_interface(interface_name: &str) -> Result<Option<[u8; 6]>> {
-    let mut interfaces: *mut libc::ifaddrs = ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("failed to enumerate interfaces");
-    }
-
-    let mut cursor = interfaces;
-    let mut found = None;
-
-    while !cursor.is_null() {
-        let interface = unsafe { &*cursor };
-
-        if !interface.ifa_name.is_null() && !interface.ifa_addr.is_null() {
-            let name = unsafe { CStr::from_ptr(interface.ifa_name) }.to_string_lossy();
-            let family = unsafe { (*interface.ifa_addr).sa_family as i32 };
-
-            if name == interface_name && family == libc::AF_LINK {
-                let sockaddr = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_dl) };
-                if sockaddr.sdl_alen >= 6 {
-                    let offset = sockaddr.sdl_nlen as usize;
-                    let mut mac = [0u8; 6];
-                    for (index, byte) in mac.iter_mut().enumerate() {
-                        *byte = sockaddr.sdl_data[offset + index] as u8;
-                    }
-                    found = Some(mac);
-                    break;
-                }
-            }
-        }
-
-        cursor = unsafe { (*cursor).ifa_next };
-    }
-
-    unsafe { libc::freeifaddrs(interfaces) };
-    Ok(found)
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-)))]
-fn mac_address_for_interface(_interface_name: &str) -> Result<Option<[u8; 6]>> {
-    Ok(None)
 }
 
 #[cfg(test)]

@@ -14,7 +14,6 @@
 //! explicit errors so callers can log or ignore them safely.
 
 use anyhow::{Context, Result, anyhow};
-use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
@@ -23,6 +22,8 @@ use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
+
+use crate::udp::{UdpSocketOptions, create_udp_socket};
 
 /// DSCP value used for outgoing SAP discovery/control packets.
 ///
@@ -361,17 +362,14 @@ impl SapBrowser {
     /// addresses, this binds directly to `config.address:config.port`, which is
     /// primarily useful for deterministic loopback tests.
     pub fn new(config: SapBrowserConfig) -> Result<Self> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        crate::socket::apply_udp_socket_defaults(
-            &socket,
-            crate::socket::UdpSocketDefaults {
-                reuse_address: true,
-                reuse_port: true,
-                multicast_loop_v4: false,
-                send_buffer_size: None,
-                recv_buffer_size: Some(config.recv_buffer_size),
-            },
-        )?;
+        let socket = create_udp_socket(UdpSocketOptions {
+            reuse_address: true,
+            reuse_port: true,
+            multicast_loop_v4: false,
+            send_buffer_size: None,
+            recv_buffer_size: Some(config.recv_buffer_size),
+            dscp: None,
+        })?;
 
         let bind_ip = if config.address.is_multicast() {
             Ipv4Addr::UNSPECIFIED
@@ -450,16 +448,14 @@ impl SapAnnouncer {
     /// `interface_ip` is used both as the multicast interface and as the SAP
     /// origin source encoded in outgoing packets.
     pub fn new(sdp_payload: String, interface_ip: Ipv4Addr) -> Result<Self> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-
-        crate::socket::apply_udp_socket_defaults(&socket, crate::socket::sap_socket_defaults())?;
+        let socket = create_udp_socket(UdpSocketOptions {
+            dscp: Some(SAP_DSCP),
+            ..crate::socket::sap_socket_defaults()
+        })?;
 
         // Bind to wildcard
         let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0);
         socket.bind(&addr.into())?;
-
-        // SAP DSCP 24 discovery/control
-        socket.set_tos_v4(crate::socket::dscp_to_tos(SAP_DSCP)?)?;
 
         // Set multicast interface
         socket.set_multicast_if_v4(&interface_ip)?;
