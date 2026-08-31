@@ -59,6 +59,11 @@ pub fn create_udp_socket(options: UdpSocketOptions) -> Result<Socket> {
     Ok(socket)
 }
 
+/// DSCP Layout (Modern): Defined in RFC 2474, the field was renamed the Differentiated Services (DS) field. 
+/// The first 6 bits form the DSCP value (allowing for 64 distinct traffic classes), 
+/// while the final 2 bits are allocated for Explicit Congestion Notification (ECN)
+/// tos stands for Type of Service
+/// For AES67, ptpv2 uses dscp 46, rtp uses dscp 34
 pub(crate) fn dscp_to_tos(dscp: u8) -> Result<u32> {
     if dscp > 63 {
         return Err(anyhow!("DSCP value {dscp} must be between 0 and 63"));
