@@ -73,6 +73,16 @@ For faster frontend-only iteration, run `npm run dev` and open the local URL.
 Browser mode uses representative in-memory data because Tauri commands are not
 available outside the desktop host.
 
+Build the platform-native release bundle with one command from the repository
+root:
+
+```bash
+./scripts/build_app.sh
+```
+
+The build defaults to `release`. Use `./scripts/build_app.sh debug` for a debug
+bundle.
+
 The current desktop milestone supports source, stream, route, and per-stream
 output-gain configuration. Every stream starts at unity gain (`0 dB`); values
 below `-120 dB` are represented as mute (`-inf`). A single source may feed
